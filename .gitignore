@@ -1,0 +1,32 @@
+# ---- 凭证：任何情况下都不入库 ----
+.env
+.env.local
+secrets/
+*.json.key
+client_secret*.json
+token*.json
+*credentials*.json
+*.pem
+*.p12
+
+# ---- 本地状态 ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+
+# ---- 数据集：不入库 ----
+# 小数据集（Northwind/Olist）放这里方便；Home Credit 这类大的用 DATASETS_DIR 指向项目外
+data/*
+!data/README.md
+
+# ---- R0 概念验证，已被 plugins/ 取代，可随时删 ----
+spike/
+
+# ---- 运行产物 ----
+/tmp/
+*.log

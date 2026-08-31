@@ -1,0 +1,146 @@
+# Data Steward Claw —— 独立 Data Platform
+#
+# 内存约束（R0 实测）：开发机 8GB。完整栈无法同时运行。
+# 因此按 profile 分组，按需启动：
+#
+#   docker compose --profile core up -d          # MinIO + Iceberg REST + Trino  （~3GB）
+#   docker compose --profile governance up -d    # OpenMetadata + ES + MySQL     （~4.5GB）
+#   docker compose --profile obs up -d           # Phoenix                        （~0.5GB）
+#
+# core 与 governance 不要同时启动。
+
+name: datalaker
+
+services:
+  # ---------------- core：数据平面 ----------------
+  minio:
+    image: minio/minio:latest
+    profiles: [core]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio_data:/data]
+    healthcheck:
+      # 注意：`mc ready` 在旧版 minio 镜像中不存在，会让 depends_on 永久卡住
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      retries: 12
+
+  # 创建 lake bucket。Agent 的唯一写目标（readme 第 8 节：写权限单向）
+  minio_init:
+    # 必须用 mc 客户端镜像 —— minio server 镜像里没有 mc
+    image: minio/mc:latest
+    profiles: [core]
+    depends_on: {minio: {condition: service_healthy}}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 admin password &&
+      mc mb -p local/lake local/media &&
+      echo 'buckets ready'"
+
+  iceberg_rest:
+    image: apache/iceberg-rest-fixture:latest
+    profiles: [core]
+    depends_on: [minio]
+    ports: ["8181:8181"]
+    environment:
+      CATALOG_WAREHOUSE: s3://lake/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+
+  trino:
+    image: trinodb/trino:latest
+    profiles: [core]
+    depends_on: [iceberg_rest]
+    ports: ["8080:8080"]
+    # 8GB 机器上限制 JVM，默认配置会吃掉大部分内存
+    environment:
+      # 8GB 机器上限制 JVM，默认配置会吃掉大部分内存
+      JAVA_TOOL_OPTIONS: "-Xmx1G"
+      SOURCE_RO_PASSWORD: ${SOURCE_RO_PASSWORD:-ro_pass}
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+
+  # 源系统模拟：注入脏数据的 Olist（readme 第 15 节）
+  source_pg:
+    image: postgres:15-alpine
+    profiles: [core, source, agent]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: olist
+    ports: ["5432:5432"]
+    volumes: [pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 12
+
+  # ---------------- obs：可观测性 ----------------
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    profiles: [obs]
+    ports: ["6006:6006", "4317:4317"]
+
+  # ---------------- agent 平面 ----------------
+  # 两个服务，两个数据库账号 —— CLAUDE.md 铁律 2。
+  # 同一个容器跑两个角色，「独立进程 + 独立账号」就退化成了自觉。
+
+  approval-callback:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: callback
+    image: datalaker/callback:dev
+    profiles: [agent]
+    depends_on: {source_pg: {condition: service_healthy}}
+    environment:
+      # approver_role：唯一能写 decisions 的身份
+      DATASTEWARD_DSN: postgresql://approver_role:approver_pass@source_pg:5432/steward
+      DATASTEWARD_TOKEN_SECRET: ${DATASTEWARD_TOKEN_SECRET:?必须设置}
+      APPROVAL_PORT: 8787
+    ports: ["8787:8787"]
+    restart: unless-stopped
+
+  steward-agent:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: agent
+    image: datalaker/agent:dev
+    profiles: [agent]
+    depends_on:
+      source_pg: {condition: service_healthy}
+      approval-callback: {condition: service_started}
+    environment:
+      # agent_role：对 decisions 只有 SELECT，写不了决定
+      DATASTEWARD_DSN: postgresql://agent_role:agent_pass@source_pg:5432/steward
+      DATASTEWARD_TOKEN_SECRET: ${DATASTEWARD_TOKEN_SECRET:?必须设置}
+      SOURCE_DSN: postgresql://agent_ro:ro_pass@source_pg:5432/olist
+      APPROVAL_BASE_URL: ${APPROVAL_BASE_URL:-http://127.0.0.1:8787}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:?}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?}
+      OPENAI_MODEL: ${OPENAI_MODEL:-qwen3.7-plus}
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-gmail_api}
+      MAIL_OWNER: ${MAIL_OWNER:-}
+      MAIL_STEWARD: ${MAIL_STEWARD:-}
+      MAIL_SPONSOR: ${MAIL_SPONSOR:-}
+      MINIO_ENDPOINT: http://minio:9000
+    volumes:
+      # 凭证只读挂载，不进镜像
+      - ../secrets:/app/secrets:ro
+      # 开发期热更新：改代码不用重 build
+      - ../plugins:/app/plugins
+      - ../services:/app/services
+      - ../tests:/app/tests
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+  pg_data:
