@@ -36,7 +36,8 @@
 ## 目录
 
 ```
-readme.md                     完整方案（16 节）
+readme.md                     完整方案（18 节）
+docs/industry-context.md      行业真实数据与来源（设计的外部锚定）
 CLAUDE.md                     本文件：不变量
 docs/handoff/                 每阶段交接记录
 infra/docker-compose.yml      数据平台编排（按 profile 分组）
