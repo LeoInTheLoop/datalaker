@@ -56,8 +56,49 @@ def gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
                            f"{tool_name}：{type(e).__name__}: {e}"}
 
 
+_budget_cache = {"ts": 0.0, "over": None}
+
+
+def _budget_exceeded():
+    """预算硬停（readme 5.6 / 20.2）。
+
+    超限是**挂起**，不是告警——告警没人看，挂起才停得住。
+    每次工具调用都查库太贵，缓存 60 秒；预算是天级的，60 秒精度足够。
+    """
+    import time as _t
+    if _t.time() - _budget_cache["ts"] < 60:
+        return _budget_cache["over"]
+
+    over = None
+    try:
+        import os as _o
+        import sys as _s
+        _s.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), "services"))
+        import connector
+        u = connector.today_usage()
+        tl = int(_o.environ.get("DAILY_TOKEN_LIMIT", "0") or 0)
+        cl = float(_o.environ.get("DAILY_COST_LIMIT_USD", "0") or 0)
+        if tl and u["tokens"] >= tl:
+            over = f"今日 token {u['tokens']:,} 已达上限 {tl:,}"
+        elif cl and u["cost_usd"] >= cl:
+            over = f"今日花费 ${u['cost_usd']:.2f} 已达上限 ${cl}"
+    except Exception:
+        over = None                       # 查不到预算不阻断正常工作
+    _budget_cache.update(ts=_t.time(), over=over)
+    return over
+
+
 def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     level, approver_role = lookup(tool_name)
+
+    # 预算兜底：只挡消耗型动作，不挡纯读元数据（否则连状态都查不了）
+    if level >= Level.L1:
+        over = _budget_exceeded()
+        if over:
+            return {"action": "block",
+                    "message": f"[BUDGET] {over}。今日不再执行 {tool_name}，"
+                               f"请明日继续或调整 .env 中的上限。"}
     st = store()
     h = st.action_hash(tool_name, args)
 

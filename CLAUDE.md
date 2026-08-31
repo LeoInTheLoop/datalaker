@@ -48,6 +48,7 @@ plugins/datasteward_gate/     Hermes 治理 Plugin —— 项目核心
 services/                     独立进程，不与 Agent 同进程
   ├─ tokens.py                HMAC 签名令牌
   └─ approval_callback.py     审批 callback 服务
+ops/claw-status.py            运维面板（独立于被监控对象，零依赖）
 tests/                        断言（安全类要求 100% 通过）
 spike/                        R0 概念验证，可随时删除
 ```
@@ -61,7 +62,8 @@ spike/                        R0 概念验证，可随时删除
 
 ## 开发约定
 
-- 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`（**81 条断言必须全绿**）
+- 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`（**99 条断言必须全绿**）
+- 看状态：`python3 ops/claw-status.py`（退出码 2 = 有告警）
   - 不设 `HERMES` 时会跳过真实集成那一段
   - Hermes 需要 python 3.11–3.13，本机 3.14 不兼容：用 `uv venv --python 3.13 .venv-h`
 - 起数据平面：`cd infra && docker compose --profile core up -d`

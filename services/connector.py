@@ -77,9 +77,31 @@ def _estimate(cur, sql: str) -> float:
         return -1.0        # 估不出来不阻断，但记账时标记
 
 
+def _in_bulk_window() -> bool:
+    """批量抽取是否在允许的时间窗口内（readme 8.1 时间窗口）。"""
+    import datetime
+    start = _E.get("BULK_WINDOW_START", "")
+    end = _E.get("BULK_WINDOW_END", "")
+    if not (start and end):
+        return True
+    now = datetime.datetime.now().strftime("%H:%M")
+    if start <= end:
+        return start <= now <= end
+    return now >= start or now <= end          # 跨零点
+
+
 def query(source_id: str, sql: str, purpose: str = "") -> dict:
-    """Agent 访问源系统的唯一入口。"""
+    """Agent 访问源系统的唯一入口。
+
+    purpose='bulk' 的查询受低峰时间窗口约束；探查类不受限。
+    """
     import psycopg
+
+    if purpose == "bulk" and not _in_bulk_window():
+        w = f"{_E.get('BULK_WINDOW_START')}-{_E.get('BULK_WINDOW_END')}"
+        _record(source_id, sql, purpose, 0, 0, -1, f"REJECTED: 非低峰窗口({w})")
+        raise QueryRejected(
+            f"批量抽取只在 {w} 执行。当前不在窗口内，任务已排队至下个窗口。")
 
     if source_id not in _SOURCES:
         raise ConnectorError(f"未知数据源: {source_id}")
@@ -116,11 +138,75 @@ def query(source_id: str, sql: str, purpose: str = "") -> dict:
 
 
 def _record(source_id, sql, purpose, rows, dur, est, status):
-    LEDGER.append({
+    rec = {
         "ts": time.time(), "source": source_id, "purpose": purpose,
         "sql": sql[:200], "rows": rows, "duration_ms": round(dur * 1000, 1),
         "est_rows": est, "status": status,
-    })
+    }
+    LEDGER.append(rec)
+    _persist(rec)
+
+
+def _persist(rec):
+    """落库。
+
+    内存里的 LEDGER 进程一重启就没了 —— 记了等于没记。
+    运维监控必须独立于被监控对象：Agent 挂掉时这些数据仍要可查。
+    落库失败不能影响查询本身，故整体吞掉异常。
+    """
+    dsn = _E.get("STEWARD_AGENT_DSN") or _E.get("DATASTEWARD_DSN", "")
+    if not dsn:
+        return
+    try:
+        import psycopg
+        with psycopg.connect(dsn, autocommit=True, connect_timeout=3) as c:
+            c.execute(
+                "INSERT INTO query_ledger (source_id, purpose, sql_text, rows_out,"
+                " duration_ms, est_rows, status) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (rec["source"], rec["purpose"], rec["sql"], rec["rows"],
+                 rec["duration_ms"], rec["est_rows"], rec["status"]))
+    except Exception:
+        pass
+
+
+def record_usage(model, prompt_tokens=0, output_tokens=0, cost_usd=0.0,
+                 run_id="", purpose=""):
+    """记录一次 LLM 调用。
+
+    成本不可见就无法设上限。这张表是 `ops/claw-status.sh` 和
+    第 5.6 节预算兜底的数据来源。
+    """
+    dsn = _E.get("STEWARD_AGENT_DSN") or _E.get("DATASTEWARD_DSN", "")
+    if not dsn:
+        return
+    try:
+        import psycopg
+        with psycopg.connect(dsn, autocommit=True, connect_timeout=3) as c:
+            c.execute(
+                "INSERT INTO usage_ledger (run_id, model, prompt_tokens,"
+                " output_tokens, cost_usd, purpose) VALUES (%s,%s,%s,%s,%s,%s)",
+                (run_id, model, prompt_tokens, output_tokens, cost_usd, purpose))
+    except Exception:
+        pass
+
+
+def today_usage():
+    """今日用量。预算兜底与状态面板共用。"""
+    dsn = _E.get("STEWARD_AGENT_DSN") or _E.get("DATASTEWARD_DSN", "")
+    if not dsn:
+        return {"calls": 0, "tokens": 0, "cost_usd": 0.0}
+    try:
+        import psycopg
+        with psycopg.connect(dsn, connect_timeout=3) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*), coalesce(sum(prompt_tokens+output_tokens),0),"
+                    " coalesce(sum(cost_usd),0) FROM usage_ledger"
+                    " WHERE ts >= date_trunc('day', now())")
+                n, tok, cost = cur.fetchone()
+                return {"calls": n, "tokens": int(tok), "cost_usd": float(cost)}
+    except Exception:
+        return {"calls": 0, "tokens": 0, "cost_usd": 0.0}
 
 
 def load_report(source_id: str | None = None) -> dict:

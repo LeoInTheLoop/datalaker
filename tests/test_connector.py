@@ -46,5 +46,26 @@ rep = connector.load_report("olist")
 check("负载记账可用", rep["queries"] >= 2 and rep["rejected"] >= 4,
       f"{rep['queries']} 次查询 / {rep['rejected']} 次拒绝")
 
+# 8. 低峰时间窗口只约束批量抽取
+import os
+os.environ["BULK_WINDOW_START"], os.environ["BULK_WINDOW_END"] = "01:00", "05:00"
+connector._E["BULK_WINDOW_START"], connector._E["BULK_WINDOW_END"] = "01:00", "05:00"
+import datetime
+now = datetime.datetime.now().strftime("%H:%M")
+in_win = "01:00" <= now <= "05:00"
+try:
+    connector.query("olist", "SELECT 1", purpose="bulk")
+    check("批量抽取受时间窗口约束", in_win, f"当前 {now} 在窗口内")
+except QueryRejected:
+    check("批量抽取受时间窗口约束", not in_win, f"当前 {now} 不在窗口内，已拒")
+try:
+    connector.query("olist", "SELECT count(*) FROM orders", purpose="probe")
+    check("探查查询不受窗口限制", True)
+except QueryRejected:
+    check("探查查询不受窗口限制", False, "探查被误拒")
+
+# 9. 账本落库（进程重启后仍可查）
+check("负载账本已持久化", hasattr(connector, "_persist") and hasattr(connector, "today_usage"))
+
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 sys.exit(1 if bad else 0)

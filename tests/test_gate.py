@@ -130,6 +130,18 @@ for t in ("modify_own_role", "grant_self", "modify_role_assignment",
     r = gate(t, {"role": "owner:FIN"}, RUN)
     check(f"自我提权被拒: {t}", is_block(r) and "L4" in r.get("message", ""))
 
+# 19. 预算硬停：超限时挡住消耗型动作，但不挡纯读元数据
+import plugins.datasteward_gate as _bg
+_bg._budget_cache.update(ts=9e9, over="今日 token 已达上限（测试注入）")
+try:
+    r = _bg.gate("profile_table", {"table": "x"}, RUN)
+    check("超预算时 L1 被挡", is_block(r) and "BUDGET" in r.get("message", ""),
+          r.get("message", "")[:34] if isinstance(r, dict) else "")
+    r0 = _bg.gate("get_table_metadata", {"table": "x"}, RUN)
+    check("超预算时 L0 仍放行（否则连状态都查不了）", r0 is None)
+finally:
+    _bg._budget_cache.update(ts=0.0, over=None)
+
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 if bad:
     print("失败项:", ", ".join(bad))
