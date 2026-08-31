@@ -25,27 +25,54 @@ import time
 import uuid
 
 DDL = """
+-- 「待答事项」：审批 = 选项固定为 approve/deny 的提问（readme 5.7）
 CREATE TABLE IF NOT EXISTS approvals (
     id           TEXT PRIMARY KEY,
     run_id       TEXT NOT NULL,
     action_hash  TEXT NOT NULL,
     tool_name    TEXT NOT NULL,
     args_json    TEXT NOT NULL,
-    approver     TEXT NOT NULL,
+    approver     TEXT NOT NULL,          -- 角色名或邮箱
     created_at   REAL NOT NULL,
     expires_at   REAL NOT NULL,
-    used_at      REAL
+    used_at      REAL,
+    kind         TEXT NOT NULL DEFAULT 'approval',   -- approval | question
+    options      TEXT,                   -- JSON: [{key,label,desc,recommended}]
+    question     TEXT,
+    evidence     TEXT
 );
 CREATE TABLE IF NOT EXISTS decisions (
     id           TEXT PRIMARY KEY,
     approval_id  TEXT NOT NULL,
-    decision     TEXT NOT NULL CHECK (decision IN ('approve','deny')),
+    decision     TEXT NOT NULL CHECK (decision IN ('approve','deny','answered')),
+    chosen       TEXT,                   -- question 类型：选中的选项 key
     approver     TEXT NOT NULL,
     decided_at   REAL NOT NULL,
     token_jti    TEXT UNIQUE NOT NULL,
     message_id   TEXT,
     client_ip    TEXT,
     user_agent   TEXT
+);
+-- 角色化：绑角色不绑人（readme 10.4）
+CREATE TABLE IF NOT EXISTS role_assignment (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    role        TEXT NOT NULL,
+    person      TEXT NOT NULL,
+    valid_from  REAL NOT NULL,
+    valid_to    REAL,
+    granted_by  TEXT NOT NULL,
+    reason      TEXT
+);
+-- 业务知识沉淀：问过的不再问（readme 5.7）
+CREATE TABLE IF NOT EXISTS asset_semantics (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset        TEXT NOT NULL,
+    key          TEXT NOT NULL,
+    value        TEXT NOT NULL,
+    confirmed_by TEXT NOT NULL,
+    confirmed_at REAL NOT NULL,
+    source_item  TEXT,
+    UNIQUE(asset, key)
 );
 CREATE TABLE IF NOT EXISTS events (
     seq     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -273,6 +300,77 @@ class Store:
             return True
         except sqlite3.IntegrityError:
             return False                          # token 重放：jti 唯一约束挡住
+
+    # ---------- 角色解析（readme 10.4）----------
+    def resolve_role(self, role):
+        """角色 → 当前持有人。换人只需改 role_assignment，未决事项自动跟随。"""
+        row = self.db.execute(
+            "SELECT person FROM role_assignment WHERE role=? "
+            "AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?) "
+            "ORDER BY valid_from DESC LIMIT 1",
+            (role, time.time(), time.time()),
+        ).fetchone()
+        return row[0] if row else None
+
+    def assign_role(self, role, person, granted_by, reason=""):
+        """指派角色。旧持有人自动失效——决定是历史事实，不回填改写。"""
+        now = time.time()
+        self.db.execute(
+            "UPDATE role_assignment SET valid_to=? WHERE role=? AND valid_to IS NULL",
+            (now, role))
+        self.db.execute(
+            "INSERT INTO role_assignment (role, person, valid_from, granted_by, reason)"
+            " VALUES (?,?,?,?,?)", (role, person, now, granted_by, reason))
+        self.db.commit()
+
+    # ---------- WIP 计数（readme 10.7）----------
+    def open_count(self, approver=None):
+        """在办 = 已发出、等回复。已批准未消费的不算——那是 Agent 自己的活。"""
+        sql = ("SELECT count(*) FROM approvals a "
+               "LEFT JOIN decisions d ON d.approval_id = a.id "
+               "WHERE d.id IS NULL AND a.expires_at > ?")
+        args = [time.time()]
+        if approver:
+            sql += " AND a.approver = ?"
+            args.append(approver)
+        return self.db.execute(sql, args).fetchone()[0]
+
+    # ---------- 提问（readme 5.7）----------
+    def ask(self, run_id, asset, question, options, approver, evidence=""):
+        """创建一条提问。与审批共用同一套令牌、超时、WIP 机制。"""
+        h = action_hash("__question__", {"asset": asset, "q": question})
+        existing = self.pending(h, run_id)
+        if existing:
+            return existing, False
+        qid = str(uuid.uuid4())
+        now = time.time()
+        self.db.execute(
+            "INSERT INTO approvals (id, run_id, action_hash, tool_name, args_json,"
+            " approver, created_at, expires_at, kind, options, question, evidence)"
+            " VALUES (?,?,?,?,?,?,?,?,'question',?,?,?)",
+            (qid, run_id, h, "__question__",
+             json.dumps({"asset": asset}, ensure_ascii=False), approver,
+             now, now + TTL,
+             json.dumps(options, ensure_ascii=False), question, evidence))
+        self.db.commit()
+        return qid, True
+
+    def known(self, asset, key):
+        """问过的不再问（readme 5.7）。"""
+        row = self.db.execute(
+            "SELECT value, confirmed_by FROM asset_semantics WHERE asset=? AND key=?",
+            (asset, key)).fetchone()
+        return {"value": row[0], "confirmed_by": row[1]} if row else None
+
+    def remember(self, asset, key, value, confirmed_by, source_item=None):
+        """答案沉淀。重复问同一件事是最快失去信任的方式。"""
+        self.db.execute(
+            "INSERT INTO asset_semantics (asset, key, value, confirmed_by,"
+            " confirmed_at, source_item) VALUES (?,?,?,?,?,?)"
+            " ON CONFLICT(asset, key) DO UPDATE SET value=excluded.value,"
+            " confirmed_by=excluded.confirmed_by, confirmed_at=excluded.confirmed_at",
+            (asset, key, value, confirmed_by, time.time(), source_item))
+        self.db.commit()
 
     # ---------- event log ----------
     def append_event(self, run_id, kind, payload=""):

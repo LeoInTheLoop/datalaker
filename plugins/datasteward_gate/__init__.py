@@ -113,6 +113,12 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
                 "message": f"[DENIED] {tool_name} 已被拒绝，不会重复发起审批。"
                            f"请改变方案（将产生新的动作指纹）或触发升级。"}
 
+    # WIP 限制（readme 10.7）：不要淹没任何人
+    if level >= Level.L2:
+        over = _wip_exceeded(st, approver_role or "owner")
+        if over:
+            return {"action": "block", "message": over}
+
     # L2 / L3：需要有效票据
     if level >= Level.L2:
         tok = st.find_valid(h, task_id)
@@ -153,6 +159,30 @@ def _sql_guard(args: dict):
     return None
 
 
+def _wip_exceeded(st, approver_role):
+    """在办上限（readme 10.7）。
+
+    Owner 每周只有 2–3 小时（docs/industry-context.md），
+    一次给他 30 件待办等于什么也批不了。
+    超限不是等待，而是让 Agent 转去做不需要审批的工作。
+    """
+    per = int(os.environ.get("PER_PERSON_WIP_LIMIT", "3") or 3)
+    glob = int(os.environ.get("GLOBAL_WIP_LIMIT", "20") or 20)
+    try:
+        if st.open_count() >= glob:
+            return (f"[WIP_LIMIT] 全局在办已达上限 {glob} 件，暂不发起新事项。"
+                    f"请先推进其他不受阻塞的任务线。")
+        # 按**角色**计数：approvals.approver 存的是角色（readme 10.4 绑角色不绑人）。
+        # 解析成真人再计数会永远匹配不上——换人时在办事项也不该被清零。
+        if st.open_count(approver_role) >= per:
+            who = st.resolve_role(approver_role) or approver_role
+            return (f"[WIP_LIMIT] {who} 当前已有 {per} 件待办，暂不发起新事项。"
+                    f"请先推进其他不受阻塞的任务线。")
+    except Exception:
+        return None                       # 计数失败不阻断正常审批
+    return None
+
+
 def _notify_async(approval_id, tool_name, args, approver_role):
     """发审批邮件。
 
@@ -174,7 +204,9 @@ def _notify_async(approval_id, tool_name, args, approver_role):
                 os.path.dirname(os.path.abspath(__file__)))), "services"))
             import notify
             n = notify.get()
-            to = (notify.E.get(f"MAIL_{approver_role.upper()}")
+            # 角色 → 当前持有人（readme 10.4）；未配置角色表时回退到 .env
+            to = (st.resolve_role(approver_role)
+                  or notify.E.get(f"MAIL_{approver_role.upper()}")
                   or notify.E.get("MAIL_OWNER") or "")
             if not to and n.name == "email":
                 st.append_event(approval_id, "MAIL_SKIPPED", "未配置收件人")
