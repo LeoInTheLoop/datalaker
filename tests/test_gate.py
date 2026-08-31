@@ -124,6 +124,12 @@ try:
 finally:
     _g.store = _orig
 
+# 18. Agent 不得自我提权（readme 11.6）—— 所有门禁的前提
+for t in ("modify_own_role", "grant_self", "modify_role_assignment",
+          "alter_access_policy", "rotate_own_credential"):
+    r = gate(t, {"role": "owner:FIN"}, RUN)
+    check(f"自我提权被拒: {t}", is_block(r) and "L4" in r.get("message", ""))
+
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 if bad:
     print("失败项:", ", ".join(bad))

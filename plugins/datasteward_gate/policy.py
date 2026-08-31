@@ -38,6 +38,15 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     "drop_source_table":    (Level.L4, None),
     "delete_published":     (Level.L4, None),
     "unmask_pii":           (Level.L4, None),
+
+    # --- L4：Agent 不得改动自己的权限（readme 11.6）---
+    # 没有这一组，前面所有门禁都有一个后门：
+    # Agent 可以先给自己提权，再去做别的事。
+    "modify_own_role":      (Level.L4, None),
+    "grant_self":           (Level.L4, None),
+    "modify_role_assignment": (Level.L4, None),
+    "alter_access_policy":  (Level.L4, None),
+    "rotate_own_credential": (Level.L4, None),
 }
 
 # 未在表中声明的工具的默认级别。
