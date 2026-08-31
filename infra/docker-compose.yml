@@ -105,7 +105,28 @@ services:
       DATASTEWARD_DSN: postgresql://approver_role:approver_pass@source_pg:5432/steward
       DATASTEWARD_TOKEN_SECRET: ${DATASTEWARD_TOKEN_SECRET:?必须设置}
       APPROVAL_PORT: 8787
+      # callback 也要能发回执（readme 10.6）
+      NOTIFY_CHANNEL: ${NOTIFY_CHANNEL:-email}
+      FEISHU_WEBHOOK: ${FEISHU_WEBHOOK:-}
+      WECOM_WEBHOOK: ${WECOM_WEBHOOK:-}
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-}
     ports: ["8787:8787"]
+    restart: unless-stopped
+
+  # 把内网的 approval-callback 安全暴露到公网（readme 13.2）
+  # 出站连接，不需要公网 IP、不开防火墙端口；自带 HTTPS 与域名
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: [tunnel]
+    depends_on: [approval-callback]
+    # 注意：不能用 ${VAR:?} —— compose 会解析整个文件，
+    # 未激活 profile 的必需变量同样会阻塞其他 profile 启动
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
     restart: unless-stopped
 
   steward-agent:
@@ -127,6 +148,9 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:?}
       OPENAI_API_KEY: ${OPENAI_API_KEY:?}
       OPENAI_MODEL: ${OPENAI_MODEL:-qwen3.7-plus}
+      NOTIFY_CHANNEL: ${NOTIFY_CHANNEL:-email}
+      FEISHU_WEBHOOK: ${FEISHU_WEBHOOK:-}
+      WECOM_WEBHOOK: ${WECOM_WEBHOOK:-}
       MAIL_TRANSPORT: ${MAIL_TRANSPORT:-gmail_api}
       MAIL_OWNER: ${MAIL_OWNER:-}
       MAIL_STEWARD: ${MAIL_STEWARD:-}

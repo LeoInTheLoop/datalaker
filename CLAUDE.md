@@ -47,7 +47,12 @@ plugins/datasteward_gate/     Hermes 治理 Plugin —— 项目核心
   └─ approvals.py             两表 append-only 审批存储
 services/                     独立进程，不与 Agent 同进程
   ├─ tokens.py                HMAC 签名令牌
-  └─ approval_callback.py     审批 callback 服务
+  ├─ approval_callback.py     审批 callback 服务
+  ├─ connector.py             源系统唯一出入口 + 账本
+  └─ notify/                  通知通道（门禁逻辑与通道无关）
+      ├─ email_channel.py     SMTP / Gmail API
+      ├─ feishu.py            飞书交互卡片
+      └─ wecom.py             企微模板卡片
 ops/claw-status.py            运维面板（独立于被监控对象，零依赖）
 tests/                        断言（安全类要求 100% 通过）
 spike/                        R0 概念验证，可随时删除

@@ -172,15 +172,17 @@ def _notify_async(approval_id, tool_name, args, approver_role):
             import sys as _s
             _s.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
                 os.path.dirname(os.path.abspath(__file__)))), "services"))
-            import mailer
-            to = mailer.E.get(f"MAIL_{approver_role.upper()}") or mailer.E.get("MAIL_OWNER")
-            if not to:
+            import notify
+            n = notify.get()
+            to = (notify.E.get(f"MAIL_{approver_role.upper()}")
+                  or notify.E.get("MAIL_OWNER") or "")
+            if not to and n.name == "email":
                 st.append_event(approval_id, "MAIL_SKIPPED", "未配置收件人")
                 return
             target = args.get("table") or args.get("source") or json.dumps(args, ensure_ascii=False)
-            mailer.send(to, approval_id, tool_name, target,
-                        "该动作需要你确认后才会执行。", to)
-            st.append_event(approval_id, "MAIL_SENT", to)
+            n.send_approval(to, approval_id, tool_name, target,
+                            "该动作需要你确认后才会执行。", to or approver_role)
+            st.append_event(approval_id, "MAIL_SENT", f"{n.name}:{to}")
         except Exception as e:
             # 发信失败不影响拦截 —— 动作依然不会执行，只是通知没送达
             st.append_event(approval_id, "MAIL_FAILED", str(e)[:200])

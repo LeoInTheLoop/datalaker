@@ -16,6 +16,9 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import json
+
+import notify
 import tokens
 from plugins.datasteward_gate.approvals import Store, open_store
 
@@ -93,6 +96,7 @@ class Handler(BaseHTTPRequestHandler):
                                             "已处理", "#fef3c7", "#92400e"))
             store.append_event(payload["aid"], f"DECIDED_{payload['d'].upper()}",
                                payload["who"])
+            _receipt(store, payload)
         if payload["d"] == "approve":
             return self._send(200, page(
                 "已批准", "任务将在下次唤醒时继续执行。", "已批准",
@@ -102,6 +106,37 @@ class Handler(BaseHTTPRequestHandler):
             "已拒绝", "该动作不会执行，Agent 也不会就同一动作重复发起审批。",
             "已拒绝", "#fde8e8", "#b42318",
             f"审批人 {payload['who']} · 如需改变，请让 Agent 提出新的方案。"))
+
+
+def _receipt(store, payload):
+    """回执：告诉他刚才批准了什么（readme 10.6）。
+
+    在后台线程发送——回执失败不能影响决定落库，决定已经生效了。
+    这与 Agent 侧「通知失败 ≠ 门禁打开」是同一条原则的两面。
+    """
+    import threading
+
+    def _go():
+        try:
+            import notify
+            row = store.db.execute(
+                "SELECT tool_name, args_json FROM approvals WHERE id=?",
+                (payload["aid"],)).fetchone() if hasattr(store.db, "execute") else None
+            tool = row[0] if row else "(未知动作)"
+            target = ""
+            if row:
+                try:
+                    a = json.loads(row[1])
+                    target = a.get("table") or a.get("source") or row[1]
+                except Exception:
+                    target = row[1]
+            notify.get().send_receipt(payload["who"], payload["aid"],
+                                      payload["d"], tool, target, payload["who"])
+            store.append_event(payload["aid"], "RECEIPT_SENT", payload["who"])
+        except Exception as e:
+            store.append_event(payload["aid"], "RECEIPT_FAILED", str(e)[:180])
+
+    threading.Thread(target=_go, daemon=True).start()
 
 
 if __name__ == "__main__":
