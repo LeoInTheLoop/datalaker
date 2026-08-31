@@ -24,6 +24,12 @@ echo "########## 1. 治理 Plugin 拦截 ##########"
 DATASTEWARD_DB=/tmp/dl_gate.db python3 tests/test_gate.py || rc=1
 
 echo ""
+echo "########## 1.5 R2 Harness（角色化/WIP/提问/沉淀/升级） ##########"
+DATASTEWARD_DB=/tmp/dl_r2.db python3 tests/test_r2_harness.py || rc=1
+rm -f /tmp/dl_esc.db*
+DATASTEWARD_DB=/tmp/dl_esc.db python3 tests/test_escalation.py || rc=1
+
+echo ""
 echo "########## 2. 凭证层（源系统只读） ##########"
 if docker ps --format '{{.Names}}' | grep -q datalaker-source_pg-1; then
   ./tests/test_readonly.sh || rc=1

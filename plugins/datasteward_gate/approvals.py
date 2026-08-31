@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS approvals (
     expires_at   REAL NOT NULL,
     used_at      REAL,
     kind         TEXT NOT NULL DEFAULT 'approval',   -- approval | question
+    abandoned_at REAL,                  -- 超时放弃：退出活跃队列但不删除
+    escalation_level INTEGER NOT NULL DEFAULT 0,
     options      TEXT,                   -- JSON: [{key,label,desc,recommended}]
     question     TEXT,
     evidence     TEXT
@@ -73,6 +75,28 @@ CREATE TABLE IF NOT EXISTS asset_semantics (
     confirmed_at REAL NOT NULL,
     source_item  TEXT,
     UNIQUE(asset, key)
+);
+-- 运维账本（readme 20.1）：落库而非进程内存，监控独立于被监控对象
+CREATE TABLE IF NOT EXISTS query_ledger (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    source_id   TEXT NOT NULL,
+    purpose     TEXT,
+    sql_text    TEXT NOT NULL,
+    rows_out    INTEGER NOT NULL DEFAULT 0,
+    duration_ms REAL NOT NULL DEFAULT 0,
+    est_rows    REAL,
+    status      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_ledger (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            REAL NOT NULL,
+    run_id        TEXT,
+    model         TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd      REAL NOT NULL DEFAULT 0,
+    purpose       TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     seq     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -328,7 +352,7 @@ class Store:
         """在办 = 已发出、等回复。已批准未消费的不算——那是 Agent 自己的活。"""
         sql = ("SELECT count(*) FROM approvals a "
                "LEFT JOIN decisions d ON d.approval_id = a.id "
-               "WHERE d.id IS NULL AND a.expires_at > ?")
+               "WHERE d.id IS NULL AND a.expires_at > ? AND a.abandoned_at IS NULL")
         args = [time.time()]
         if approver:
             sql += " AND a.approver = ?"
@@ -371,6 +395,33 @@ class Store:
             " confirmed_by=excluded.confirmed_by, confirmed_at=excluded.confirmed_at",
             (asset, key, value, confirmed_by, time.time(), source_item))
         self.db.commit()
+
+    # ---------- 超时升级（readme 5.4）----------
+    def stale_items(self):
+        """未决且未放弃的事项，附年龄（小时）与当前升级层级。"""
+        return self.db.execute(
+            "SELECT a.id, a.approver, a.tool_name, a.kind, a.escalation_level,"
+            " (? - a.created_at)/3600.0 FROM approvals a "
+            "LEFT JOIN decisions d ON d.approval_id = a.id "
+            "WHERE d.id IS NULL AND a.abandoned_at IS NULL ORDER BY a.created_at",
+            (time.time(),)).fetchall()
+
+    def bump_escalation(self, item_id, level):
+        self.db.execute("UPDATE approvals SET escalation_level=? WHERE id=?",
+                        (level, item_id))
+        self.db.commit()
+
+    def abandon(self, item_id):
+        """标记放弃。**不是删除**——退出活跃队列，event log 完整保留，
+        人想起来后可随时手动 resume（readme 5.4）。"""
+        self.db.execute("UPDATE approvals SET abandoned_at=? WHERE id=?",
+                        (time.time(), item_id))
+        self.db.commit()
+
+    def abandoned(self):
+        return self.db.execute(
+            "SELECT id, approver, tool_name FROM approvals "
+            "WHERE abandoned_at IS NOT NULL ORDER BY abandoned_at DESC").fetchall()
 
     # ---------- event log ----------
     def append_event(self, run_id, kind, payload=""):
