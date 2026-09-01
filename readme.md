@@ -454,6 +454,60 @@ Agent loop（自主）
    └─► Pipeline: weekly_report          步骤固定
 ```
 
+##### Pipeline 用 LangGraph 实现，但要划清边界
+
+Pipeline 层用 **LangGraph** 编排（图式步骤、条件边、重试、checkpoint）。
+但它与本项目已有的 harness 有职责重叠，**不划清会出现两套状态机打架**：
+
+| 关注点 | 归谁 | 理由 |
+|---|---|---|
+| Pipeline 内部步骤流转 | **LangGraph** | 它就是干这个的 |
+| 单次 Pipeline 执行的中断恢复 | **LangGraph checkpointer** | 进程崩了从上一节点续 |
+| **跨天的人工审批挂起** | **本项目 harness** | 见下 |
+| **审批状态的权威来源** | **`approvals` / `decisions` 表** | 见下 |
+| 工具准入与门禁 | **`pre_tool_call` gate** | Pipeline 不是安全边界 |
+
+**不使用 LangGraph 的 `interrupt` / human-in-the-loop。** 它是为
+「同一个 run 内暂停等输入」设计的；而我们的挂起是**跨天、跨进程、带签名令牌**的：
+
+```
+Pipeline 第 ④ 步「等确认」
+  → 调用工具 → gate 返回 PENDING_APPROVAL
+  → Pipeline **正常结束**（不是挂起等待），状态落 approvals 表
+  → 审批链接被点击后，由 scheduler 或下一次 Agent 唤醒重新拉起 Pipeline
+  → LangGraph checkpointer 从第 ④ 步之后继续
+```
+
+**进程可以死，审批状态在库里**——这条（4.2）不因为引入 LangGraph 而改变。
+LangGraph 的 checkpoint 只负责「这次执行走到哪一步」，
+不负责「这件事人批了没有」。
+
+##### Pipeline 不是安全边界
+
+LangGraph 节点里调用工具时**仍然要过 gate**。不能因为在 Pipeline 内部
+就绕过门禁——否则「把危险操作包进一个 Pipeline」就成了旁路手段。
+
+> 与 4.6 的 text2sql 结论同源：**skill / workflow / graph 都是编排，不是边界。**
+> 边界只有工具签名、gate 和 Connector Service。
+
+##### 依赖成本要算
+
+LangGraph 会带进 LangChain 生态的一批依赖，而项目已经有 Hermes。
+**如果 Pipeline 实际只是线性 5 步，自己写一个几十行的 runner 更轻**
+（步骤列表 + 状态记录，复用现有 event log）。
+
+判断标准：
+
+| 情形 | 选择 |
+|---|---|
+| 线性步骤，无分支 | 自写 runner（~50 行） |
+| 有条件分支、并行、复杂重试 | **LangGraph** |
+| 需要可视化调试流程 | **LangGraph** |
+
+R2 实施时先写清单：如果四条 Pipeline（接入 / 清洗 / 周报 / 权限扫描）
+都是线性的，就先自写；出现第一个真正需要分支的场景再引入 LangGraph。
+**这是可以延后的决定，不必现在锁死。**
+
 ##### 为什么这个区分重要：成本与可测试性
 
 | | Pipeline | Agent loop |
@@ -1468,6 +1522,7 @@ whisper 转写 → 抽元数据(时间/参会人/主题) → 分类打 tag → �
 | 访问控制 | Trino OPA plugin + Open Policy Agent | 策略由 Policy Sync 从 OpenMetadata 的 owner/tag 生成后下发；支持行级过滤与列级遮蔽 |
 | 负载防护 | Connector Service（自研） | 唯一数据出入口：AST 准入、EXPLAIN 预估、串行队列、时间窗口、熔断、负载记账 |
 | 可观测性 | OpenTelemetry → Phoenix | LLM trace |
+| Pipeline 编排 | LangGraph（R2 起，视是否需要分支决定） | 只管步骤流转与单次执行的 checkpoint；审批挂起仍归 harness |
 | Agent 框架 | Hermes Agent（MIT，自建部署） | 提供 loop、插件系统、`pre_tool_call` 拦截、审批 gate、Email 适配器 |
 | 治理 Plugin | 自研 | 本项目核心：分级、票据、指纹、deny list、停止点 |
 | 模型端点 | Nous Portal / 任意 OpenAI 兼容端点 | harness 逻辑模型无关 |
@@ -1674,7 +1729,7 @@ Harness（人机协作的那套机制）是本项目区别于普通 text2sql 的
 | 周报 + 定时驱动器 | 5.5、20.5 | ✅ |
 | 回执 | 10.6 | ✅ |
 | **数据工具实现（支柱二）** | **4.6** | ⬜ |
-| **执行形态三层：纯函数 / Pipeline / Agent loop（支柱四）** | **4.5、4.6** | ⬜ |
+| **执行形态三层：纯函数 / Pipeline（LangGraph 或自写 runner）/ Agent loop** | **4.5、4.6** | ⬜ |
 | **记忆：资产关联 + 审批偏好（支柱三）** | **4.6** | ⬜ |
 | **Hermes 工具白名单（主防线，省 1.4–2.7 万 token/次）** | **4.6** | ⬜ |
 | 停止点判定、阶段成果交付 | 5.2 | ⬜ |
