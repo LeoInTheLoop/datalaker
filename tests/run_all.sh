@@ -43,6 +43,7 @@ if docker ps --format '{{.Names}}' | grep -q datalaker-source_pg-1; then
   $PY tests/test_pipeline.py || rc=1
   $PY tests/test_memory.py || rc=1
   $PY tests/test_sql_admission.py || rc=1
+  $PY tests/test_ingest_paths.py || rc=1
 else
   echo "  SKIP  Postgres 未启动"
 fi
