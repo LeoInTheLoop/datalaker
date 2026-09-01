@@ -24,6 +24,7 @@ from plugins.datasteward_gate.approvals import Store, open_store
 
 DB = os.environ.get("DATASTEWARD_DB", os.path.expanduser("~/.datalaker/approvals.db"))
 PORT = int(os.environ.get("APPROVAL_PORT", "8787"))
+REQUIRE_CONFIRM = os.environ.get("REQUIRE_DOUBLE_CONFIRM", "1") not in ("0", "false", "")
 
 PAGE = """<!doctype html><meta charset=utf-8>
 <title>{title}</title>
@@ -81,7 +82,18 @@ class Handler(BaseHTTPRequestHandler):
                                         "这枚令牌不是用于该操作的。", "拒绝",
                                         "#fde8e8", "#b42318"))
 
-        # 3. 写入决定。token_jti 唯一约束负责挡住重放。
+        # 3. 双重确认（readme 10.5）：第一次点击不落库，只发确认信。
+        #    链接被转发多少次都无所谓 —— 确认信只到 approver 的注册邮箱。
+        if REQUIRE_CONFIRM and payload.get("st") == "click":
+            _send_confirm(payload)
+            return self._send(200, page(
+                "已发出确认邮件",
+                "为防止链接被转发后被他人误点，我们向你的注册邮箱发了一封确认信。"
+                "请在那封信里再点一次，决定才会生效。",
+                "待确认", "#fef3c7", "#92400e",
+                "这一步不依赖你是谁——确认信只会送到发起审批时登记的地址。"))
+
+        # 4. 写入决定。token_jti 唯一约束负责挡住重放。
         #    连接用完即关 —— 否则会持有 SQLite 写锁，把 Agent 进程挡在门外。
         with open_store(readonly=False, init_schema=False) as store:
             ok = store.decide(
@@ -106,6 +118,20 @@ class Handler(BaseHTTPRequestHandler):
             "已拒绝", "该动作不会执行，Agent 也不会就同一动作重复发起审批。",
             "已拒绝", "#fde8e8", "#b42318",
             f"审批人 {payload['who']} · 如需改变，请让 Agent 提出新的方案。"))
+
+
+def _send_confirm(payload):
+    """发确认信：内含 stage=confirm 的第二枚令牌。"""
+    import notify
+    base = os.environ.get("APPROVAL_BASE_URL", f"http://127.0.0.1:{PORT}").rstrip("/")
+    t2 = tokens.issue(payload["aid"], payload["d"], payload["who"], stage="confirm")
+    path = "approve" if payload["d"] == "approve" else "deny"
+    verb = "批准" if payload["d"] == "approve" else "拒绝"
+    notify.get().send_notice(
+        payload["who"], f"[数据管家] 请确认你的{verb}操作",
+        f"有人点击了{verb}链接。若确实是你本人操作，请点击下面的链接确认：\n\n"
+        f"{base}/{path}?t={t2}\n\n"
+        f"若不是你操作的，忽略本邮件即可——该动作不会执行。")
 
 
 def _receipt(store, payload):
