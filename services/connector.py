@@ -266,6 +266,24 @@ def describe_table(source_id: str, table: str) -> dict:
     return {"columns": cols["rows"], "primary_key": [r[0] for r in pk["rows"]]}
 
 
+def list_foreign_keys(source_id: str) -> list:
+    """外键关系。走元数据通道，SQL 固定无参数。"""
+    # 用 pg_catalog 而非 information_schema：
+    # 后者的视图按当前用户权限过滤，只读账号看不到约束定义
+    r = _meta_exec(source_id, """
+        SELECT c.conrelid::regclass::text  AS tbl,
+               a.attname                   AS col,
+               c.confrelid::regclass::text AS ref_tbl,
+               af.attname                  AS ref_col
+        FROM pg_constraint c
+        JOIN pg_attribute a  ON a.attrelid  = c.conrelid  AND a.attnum  = c.conkey[1]
+        JOIN pg_attribute af ON af.attrelid = c.confrelid AND af.attnum = c.confkey[1]
+        WHERE c.contype = 'f'
+          AND c.connamespace = 'public'::regnamespace
+    """)
+    return [tuple(row) for row in r["rows"]]
+
+
 def load_report(source_id: str | None = None) -> dict:
     """负载记账 —— 进周报交给 DBA。"""
     rs = [r for r in LEDGER if source_id is None or r["source"] == source_id]

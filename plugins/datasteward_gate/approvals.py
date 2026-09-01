@@ -287,6 +287,28 @@ class PgStore:
                       " confirmed_at=now()",
                       (asset, key, value, confirmed_by, source_item))
 
+    def approver_stats(self, role):
+        with self.db.cursor() as c:
+            c.execute("SELECT count(*),"
+                      " count(*) FILTER (WHERE d.decision='approve'),"
+                      " count(*) FILTER (WHERE d.decision='deny'),"
+                      " avg(extract(epoch from (d.decided_at - a.created_at)))"
+                      " FROM approvals a JOIN decisions d ON d.approval_id=a.id"
+                      " WHERE a.approver=%s", (role,))
+            n, ok_, no_, avg_s = c.fetchone()
+            c.execute("SELECT count(*) FROM approvals a LEFT JOIN decisions d"
+                      " ON d.approval_id=a.id WHERE a.approver=%s AND d.id IS NULL"
+                      " AND a.abandoned_at IS NULL", (role,))
+            pend = c.fetchone()[0]
+            c.execute("SELECT count(*) FROM approvals WHERE approver=%s"
+                      " AND abandoned_at IS NOT NULL", (role,))
+            aband = c.fetchone()[0]
+        n = n or 0
+        return {"role": role, "decided": n, "approved": ok_ or 0, "denied": no_ or 0,
+                "pending": pend, "abandoned": aband,
+                "avg_response_hours": round(float(avg_s) / 3600, 1) if avg_s else None,
+                "approve_rate": round((ok_ or 0) / n, 2) if n else None}
+
     def completed_since(self, ts):
         with self.db.cursor() as c:
             c.execute("SELECT a.tool_name, count(*) FROM approvals a JOIN decisions d "
@@ -527,6 +549,32 @@ class Store:
         return self.db.execute(
             "SELECT id, approver, tool_name FROM approvals "
             "WHERE abandoned_at IS NOT NULL ORDER BY abandoned_at DESC").fetchall()
+
+    def approver_stats(self, role):
+        """审批偏好统计（readme 4.6 支柱三）。
+
+        **数据全部来自已有表，只需统计不需新采集**——
+        这让「按人调整交互」的成本接近于零。
+        """
+        row = self.db.execute(
+            "SELECT count(*),"
+            " sum(CASE WHEN d.decision='approve' THEN 1 ELSE 0 END),"
+            " sum(CASE WHEN d.decision='deny' THEN 1 ELSE 0 END),"
+            " avg(d.decided_at - a.created_at)"
+            " FROM approvals a JOIN decisions d ON d.approval_id=a.id"
+            " WHERE a.approver=?", (role,)).fetchone()
+        n, ok_, no_, avg_s = row[0] or 0, row[1] or 0, row[2] or 0, row[3]
+        pend = self.db.execute(
+            "SELECT count(*) FROM approvals a LEFT JOIN decisions d"
+            " ON d.approval_id=a.id WHERE a.approver=? AND d.id IS NULL"
+            " AND a.abandoned_at IS NULL", (role,)).fetchone()[0]
+        aband = self.db.execute(
+            "SELECT count(*) FROM approvals WHERE approver=? AND abandoned_at IS NOT NULL",
+            (role,)).fetchone()[0]
+        return {"role": role, "decided": n, "approved": ok_, "denied": no_,
+                "pending": pend, "abandoned": aband,
+                "avg_response_hours": round(avg_s / 3600, 1) if avg_s else None,
+                "approve_rate": round(ok_ / n, 2) if n else None}
 
     def completed_since(self, ts):
         return self.db.execute(

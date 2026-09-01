@@ -50,3 +50,7 @@ GRANT CONNECT ON DATABASE steward TO approver_role;
 GRANT USAGE ON SCHEMA public TO approver_role;
 GRANT SELECT ON approvals TO approver_role;
 GRANT INSERT, SELECT ON decisions TO approver_role;
+
+-- 业务知识沉淀：Agent 可更新（口径会修订）。
+-- 与 decisions 的只读约束是两回事——那张表关乎审批权威，这张不。
+GRANT UPDATE ON asset_semantics TO agent_role;
