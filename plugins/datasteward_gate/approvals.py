@@ -202,6 +202,111 @@ class PgStore:
         except psycopg.errors.InsufficientPrivilege:
             raise PermissionError("该连接无权写入 decisions —— 列级 GRANT 生效")
 
+    # ---------- 与 SQLite Store 对齐的方法（方言不同，故各自实现）----------
+    def resolve_role(self, role):
+        with self.db.cursor() as c:
+            c.execute("SELECT person FROM role_assignment WHERE role=%s "
+                      "AND valid_from <= now() AND (valid_to IS NULL OR valid_to > now()) "
+                      "ORDER BY valid_from DESC LIMIT 1", (role,))
+            r = c.fetchone()
+            return r[0] if r else None
+
+    def assign_role(self, role, person, granted_by, reason=""):
+        with self.db.cursor() as c:
+            c.execute("UPDATE role_assignment SET valid_to=now() "
+                      "WHERE role=%s AND valid_to IS NULL", (role,))
+            c.execute("INSERT INTO role_assignment (role, person, granted_by, reason)"
+                      " VALUES (%s,%s,%s,%s)", (role, person, granted_by, reason))
+
+    def open_count(self, approver=None):
+        sql = ("SELECT count(*) FROM approvals a LEFT JOIN decisions d "
+               "ON d.approval_id=a.id WHERE d.id IS NULL AND a.expires_at > now() "
+               "AND a.abandoned_at IS NULL")
+        args = []
+        if approver:
+            sql += " AND a.approver = %s"
+            args.append(approver)
+        with self.db.cursor() as c:
+            c.execute(sql, args)
+            return c.fetchone()[0]
+
+    def stale_items(self):
+        with self.db.cursor() as c:
+            c.execute("SELECT a.id::text, a.approver, a.tool_name, a.kind,"
+                      " a.escalation_level,"
+                      " extract(epoch from (now()-a.created_at))/3600.0"
+                      " FROM approvals a LEFT JOIN decisions d ON d.approval_id=a.id"
+                      " WHERE d.id IS NULL AND a.abandoned_at IS NULL"
+                      " ORDER BY a.created_at")
+            return c.fetchall()
+
+    def bump_escalation(self, item_id, level):
+        with self.db.cursor() as c:
+            c.execute("UPDATE approvals SET escalation_level=%s WHERE id=%s",
+                      (level, item_id))
+
+    def abandon(self, item_id):
+        with self.db.cursor() as c:
+            c.execute("UPDATE approvals SET abandoned_at=now() WHERE id=%s", (item_id,))
+
+    def abandoned(self):
+        with self.db.cursor() as c:
+            c.execute("SELECT id::text, approver, tool_name FROM approvals "
+                      "WHERE abandoned_at IS NOT NULL ORDER BY abandoned_at DESC")
+            return c.fetchall()
+
+    def ask(self, run_id, asset, question, options, approver, evidence=""):
+        h = action_hash("__question__", {"asset": asset, "q": question})
+        existing = self.pending(h, run_id)
+        if existing:
+            return existing, False
+        qid = str(uuid.uuid4())
+        with self.db.cursor() as c:
+            c.execute(
+                "INSERT INTO approvals (id, run_id, action_hash, tool_name, args_json,"
+                " approver, created_at, expires_at, kind, options, question, evidence)"
+                " VALUES (%s,%s,%s,%s,%s,%s, now(), now()+interval '72 hours',"
+                " 'question',%s,%s,%s)",
+                (qid, run_id, h, "__question__",
+                 json.dumps({"asset": asset}, ensure_ascii=False), approver,
+                 json.dumps(options, ensure_ascii=False), question, evidence))
+        return qid, True
+
+    def known(self, asset, key):
+        with self.db.cursor() as c:
+            c.execute("SELECT value, confirmed_by FROM asset_semantics "
+                      "WHERE asset=%s AND key=%s", (asset, key))
+            r = c.fetchone()
+            return {"value": r[0], "confirmed_by": r[1]} if r else None
+
+    def remember(self, asset, key, value, confirmed_by, source_item=None):
+        with self.db.cursor() as c:
+            c.execute("INSERT INTO asset_semantics (asset,key,value,confirmed_by,source_item)"
+                      " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (asset,key) DO UPDATE SET"
+                      " value=excluded.value, confirmed_by=excluded.confirmed_by,"
+                      " confirmed_at=now()",
+                      (asset, key, value, confirmed_by, source_item))
+
+    def completed_since(self, ts):
+        with self.db.cursor() as c:
+            c.execute("SELECT a.tool_name, count(*) FROM approvals a JOIN decisions d "
+                      "ON d.approval_id=a.id WHERE d.decision='approve' "
+                      "AND a.created_at >= to_timestamp(%s) "
+                      "GROUP BY a.tool_name ORDER BY 2 DESC", (ts,))
+            return c.fetchall()
+
+    def ledger_summary(self, ts):
+        with self.db.cursor() as c:
+            c.execute("SELECT count(*), coalesce(sum(rows_out),0), "
+                      "count(*) FILTER (WHERE status<>'OK') "
+                      "FROM query_ledger WHERE ts >= to_timestamp(%s)", (ts,))
+            q = c.fetchone()
+            c.execute("SELECT count(*), coalesce(sum(prompt_tokens+output_tokens),0), "
+                      "coalesce(sum(cost_usd),0) FROM usage_ledger "
+                      "WHERE ts >= to_timestamp(%s)", (ts,))
+            u = c.fetchone()
+            return q, u
+
     def append_event(self, run_id, kind, payload=""):
         with self.db.cursor() as c:
             c.execute("INSERT INTO events (run_id, ts, kind, payload) "
@@ -422,6 +527,22 @@ class Store:
         return self.db.execute(
             "SELECT id, approver, tool_name FROM approvals "
             "WHERE abandoned_at IS NOT NULL ORDER BY abandoned_at DESC").fetchall()
+
+    def completed_since(self, ts):
+        return self.db.execute(
+            "SELECT a.tool_name, count(*) FROM approvals a JOIN decisions d "
+            "ON d.approval_id=a.id WHERE d.decision='approve' AND a.created_at>=? "
+            "GROUP BY a.tool_name ORDER BY 2 DESC", (ts,)).fetchall()
+
+    def ledger_summary(self, ts):
+        q = self.db.execute(
+            "SELECT count(*), coalesce(sum(rows_out),0), "
+            "sum(CASE WHEN status<>'OK' THEN 1 ELSE 0 END) "
+            "FROM query_ledger WHERE ts>=?", (ts,)).fetchone()
+        u = self.db.execute(
+            "SELECT count(*), coalesce(sum(prompt_tokens+output_tokens),0), "
+            "coalesce(sum(cost_usd),0) FROM usage_ledger WHERE ts>=?", (ts,)).fetchone()
+        return q, u
 
     # ---------- event log ----------
     def append_event(self, run_id, kind, payload=""):

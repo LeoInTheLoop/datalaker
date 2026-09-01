@@ -101,8 +101,20 @@ try:
 except PermissionError:
     check("Agent 无法伪造批准", True, "PermissionError")
 
-# 15. 未声明的工具保守默认 L2
-check("未声明工具默认需审批", is_block(gate("some_new_tool", {"x": 1}, RUN)))
+# 15. 未声明工具：deny by default，且不发审批
+r = gate("some_new_tool", {"x": 1}, RUN)
+check("未声明工具被拒", is_block(r) and "NOT_DECLARED" in r.get("message", ""),
+      r.get("message", "")[:40] if isinstance(r, dict) else "")
+n_before = len(store().db.execute("SELECT id FROM approvals").fetchall())
+gate("another_unknown", {"y": 2}, RUN)
+n_after = len(store().db.execute("SELECT id FROM approvals").fetchall())
+check("未声明工具不发审批（不打扰人）", n_before == n_after, f"{n_before} -> {n_after}")
+
+# 15b. Hermes 高危内置工具被点名拒绝
+for t in ("terminal", "execute_code", "browser", "delegate_task"):
+    r = gate(t, {"cmd": "psql ..."}, RUN)
+    check(f"高危内置工具被拒: {t}",
+          is_block(r) and "绕过" in r.get("message", ""))
 
 
 # 16. fail closed：治理组件自身异常时必须拦截，不能放行

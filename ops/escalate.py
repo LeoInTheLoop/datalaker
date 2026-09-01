@@ -28,7 +28,7 @@ def main(dry_run=False):
     st = open_store(readonly=False, init_schema=False)
     acted = []
     for item_id, approver, tool, kind, level, age_h in st.stale_items():
-        age_d = age_h / 24.0
+        age_d = float(age_h) / 24.0   # Postgres 返回 Decimal
 
         if age_d >= ABANDON_DAYS:
             if not dry_run:

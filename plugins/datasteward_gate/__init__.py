@@ -15,7 +15,7 @@ import json
 import os
 
 from .approvals import Store, open_store
-from .policy import Level, lookup
+from .policy import HERMES_DANGEROUS, Level, is_declared, lookup
 
 DB_PATH = os.environ.get("DATASTEWARD_DB", os.path.expanduser("~/.datalaker/approvals.db"))
 _store: Store | None = None
@@ -101,6 +101,15 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
                                f"请明日继续或调整 .env 中的上限。"}
     st = store()
     h = st.action_hash(tool_name, args)
+
+    # 未声明工具：直接拒绝，不发审批
+    if not is_declared(tool_name):
+        why = ("该工具可执行任意命令，会绕过 Connector 的查询护栏与审批门禁"
+               if tool_name in HERMES_DANGEROUS else "该工具未在治理策略中声明")
+        return {"action": "block",
+                "message": f"[NOT_DECLARED] {tool_name} 不可用：{why}。"
+                           f"如确需使用，请在 plugins/datasteward_gate/policy.py "
+                           f"中显式声明其自主性级别。"}
 
     # L4：永不自动执行
     if level >= Level.L4:

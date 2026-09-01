@@ -27,15 +27,12 @@ def build():
     L = []
 
     # 1. 本周完成
-    done = st.db.execute(
-        "SELECT a.tool_name, count(*) FROM approvals a JOIN decisions d "
-        "ON d.approval_id=a.id WHERE d.decision='approve' AND a.created_at>=? "
-        "GROUP BY a.tool_name ORDER BY 2 DESC", (since,)).fetchall()
+    done = st.completed_since(since)
     L.append("## 本周完成")
     L += [f"- {t} × {n}" for t, n in done] or ["- （无）"]
 
     # 2. 卡在谁那里
-    stale = [r for r in st.stale_items() if r[5] >= 24]
+    stale = [r for r in st.stale_items() if float(r[5]) >= 24]
     L.append("\n## 卡在谁那里")
     if stale:
         for _id, who, tool, kind, lvl, age_h in stale[:8]:
@@ -53,7 +50,7 @@ def build():
         L.append("> 这些已退出活跃队列，不再消耗额度。需要时可手动恢复。")
 
     # 3. 需要你决策
-    pend = [r for r in st.stale_items() if r[5] < 24]
+    pend = [r for r in st.stale_items() if float(r[5]) < 24]
     L.append(f"\n## 需要你决策（{len(pend)} 件）")
     L += [f"- {tool} · {st.resolve_role(who) or who}"
           for _i, who, tool, _k, _l, _a in pend[:8]] or ["- （无）"]
@@ -61,16 +58,7 @@ def build():
     # 4. 系统开销
     L.append("\n## 系统开销")
     try:
-        q = st.db.execute(
-            "SELECT count(*), coalesce(sum(rows_out),0), "
-            "count(*) FILTER (WHERE status<>'OK') FROM query_ledger WHERE ts>=?"
-            if st.__class__.__name__ == "PgStore" else
-            "SELECT count(*), coalesce(sum(rows_out),0), "
-            "sum(CASE WHEN status<>'OK' THEN 1 ELSE 0 END) FROM query_ledger WHERE ts>=?",
-            (since,)).fetchone()
-        u = st.db.execute(
-            "SELECT count(*), coalesce(sum(prompt_tokens+output_tokens),0), "
-            "coalesce(sum(cost_usd),0) FROM usage_ledger WHERE ts>=?", (since,)).fetchone()
+        q, u = st.ledger_summary(since)
         L.append(f"- 源系统查询 {q[0]} 次，返回 {q[1]:,} 行，拒绝 {q[2] or 0} 次")
         L.append(f"- 模型调用 {u[0]} 次，{u[1]:,} tokens，${u[2]:.4f}")
         L.append("\n> 「拒绝」是护栏生效，不是故障。")

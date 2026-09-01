@@ -129,6 +129,34 @@ services:
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
     restart: unless-stopped
 
+  # 定时驱动器：超时升级与周报。**独立于 Agent** —— Agent 挂了催办也不能停
+  scheduler:
+    image: datalaker/callback:dev
+    profiles: [agent]
+    depends_on: {source_pg: {condition: service_healthy}}
+    environment:
+      DATASTEWARD_DSN: postgresql://agent_role:agent_pass@source_pg:5432/steward
+      DATASTEWARD_TOKEN_SECRET: ${DATASTEWARD_TOKEN_SECRET:?必须设置}
+      APPROVAL_BASE_URL: ${APPROVAL_BASE_URL:-http://127.0.0.1:8787}
+      NOTIFY_CHANNEL: ${NOTIFY_CHANNEL:-email}
+      FEISHU_WEBHOOK: ${FEISHU_WEBHOOK:-}
+      WECOM_WEBHOOK: ${WECOM_WEBHOOK:-}
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_SPONSOR: ${MAIL_SPONSOR:-}
+      MAIL_OWNER: ${MAIL_OWNER:-}
+      SCHEDULER_STATE: /app/state/scheduler.json
+      ESCALATE_INTERVAL_SEC: ${ESCALATE_INTERVAL_SEC:-3600}
+    volumes:
+      - ../ops:/app/ops
+      - ../plugins:/app/plugins
+      - ../services:/app/services
+      - scheduler_state:/app/state
+    command: python /app/ops/scheduler.py
+    restart: unless-stopped
+
   steward-agent:
     build:
       context: ..
@@ -166,5 +194,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  scheduler_state:
   minio_data:
   pg_data:

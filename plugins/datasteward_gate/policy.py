@@ -49,10 +49,32 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     "rotate_own_credential": (Level.L4, None),
 }
 
-# 未在表中声明的工具的默认级别。
-# 保守取 L2：新工具默认需要人确认，而不是默认放行。
-DEFAULT = (Level.L2, "owner")
+# ---------------------------------------------------------------------------
+# 未声明工具：deny by default，不是「问一下」
+#
+# Hermes 自带 137 个内置工具，其中 terminal / code_execution 能执行任意命令——
+# 用它们可以直接 psql 连库，绕过 Connector 的查询护栏，甚至改写 decisions 表。
+#
+# 把未声明工具设为 L2（发审批问人）是不够的：
+#   1. 每个内置工具都发一封审批邮件 = 噪音，人会开始无脑点批准
+#   2. 一旦误批一次 terminal，后果不可控——它不是单个动作，是任意动作
+#
+# 因此改为 L4：不在册的一律拒绝，且**不发审批打扰人**。
+# 新增自己的工具时必须在 POLICY 里显式加一行——这是刻意设置的摩擦，
+# 防止工具悄悄溜进可执行集合。
+# ---------------------------------------------------------------------------
+UNDECLARED = (Level.L4, None)
+
+# 明确点名的高危内置工具，仅为让拒绝消息更具体
+HERMES_DANGEROUS = {
+    "terminal", "execute_code", "code_execution", "run_shell", "bash",
+    "browser", "browser_use", "delegate_task", "write_file", "edit_file",
+}
 
 
 def lookup(tool_name: str) -> tuple[Level, str | None]:
-    return POLICY.get(tool_name, DEFAULT)
+    return POLICY.get(tool_name, UNDECLARED)
+
+
+def is_declared(tool_name: str) -> bool:
+    return tool_name in POLICY
