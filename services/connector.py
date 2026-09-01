@@ -29,6 +29,8 @@ _E = _env()
 # source_id -> DSN。**只有本模块读取这个表**
 _SOURCES = {
     "olist": _E.get("SOURCE_DSN", ""),
+    "northwind": _E.get("NORTHWIND_DSN", "")
+                 or (_E.get("SOURCE_DSN", "").replace("/olist", "/northwind")),
 }
 
 # 每个源一把锁：concurrency = 1，串行执行（readme 8.1 并发与排队）
@@ -207,6 +209,61 @@ def today_usage():
                 return {"calls": n, "tokens": int(tok), "cost_usd": float(cost)}
     except Exception:
         return {"calls": 0, "tokens": 0, "cost_usd": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# 元数据查询：与业务查询分开
+#
+# 系统目录（pg_catalog / information_schema）查询天然要 join，
+# 但数据量只有几十行，不构成负担——用「禁 join」拦它是误伤。
+#
+# 不给护栏开 purpose 豁免（Agent 可以声称自己在做 discovery），
+# 而是**把元数据查询也参数化**：SQL 写死在这里，调用方只能传表名，
+# 且表名先过标识符校验。这与 4.6「参数化优于自由 SQL」是同一条原则。
+# ---------------------------------------------------------------------------
+_IDENT = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _meta_exec(source_id: str, sql: str, args=(), purpose="metadata"):
+    import psycopg
+    if source_id not in _SOURCES:
+        raise ConnectorError(f"未知数据源: {source_id}")
+    t0 = time.time()
+    with _LOCKS.setdefault(source_id, threading.Lock()):
+        with psycopg.connect(_SOURCES[source_id], connect_timeout=10) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
+                cur.execute(sql, args)
+                cols = [d.name for d in cur.description] if cur.description else []
+                rows = cur.fetchall()
+    _record(source_id, sql, purpose, len(rows), time.time() - t0, -1, "OK")
+    return {"columns": cols, "rows": rows, "row_count": len(rows)}
+
+
+def list_tables(source_id: str) -> list:
+    """表清单与行数估算。SQL 固定，无参数。"""
+    r = _meta_exec(source_id,
+                   "SELECT relname, n_live_tup FROM pg_stat_user_tables "
+                   "ORDER BY n_live_tup DESC")
+    return [(a, int(b)) for a, b in r["rows"]]
+
+
+def describe_table(source_id: str, table: str) -> dict:
+    """列定义与主键。表名是唯一参数，且必须是纯标识符。"""
+    if not _IDENT.match(table or ""):
+        raise QueryRejected(f"表名不合法: {table!r}")
+    cols = _meta_exec(source_id,
+                      "SELECT column_name, data_type, is_nullable "
+                      "FROM information_schema.columns "
+                      "WHERE table_schema='public' AND table_name=%s "
+                      "ORDER BY ordinal_position", (table,))
+    pk = _meta_exec(source_id,
+                    "SELECT a.attname FROM pg_index i "
+                    "JOIN pg_attribute a ON a.attrelid=i.indrelid "
+                    "AND a.attnum = ANY(i.indkey) "
+                    "WHERE i.indrelid = to_regclass(%s) AND i.indisprimary",
+                    (table,))
+    return {"columns": cols["rows"], "primary_key": [r[0] for r in pk["rows"]]}
 
 
 def load_report(source_id: str | None = None) -> dict:

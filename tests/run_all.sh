@@ -28,6 +28,16 @@ echo "########## 1. 治理 Plugin 拦截 ##########"
 DATASTEWARD_DB=/tmp/dl_gate.db python3 tests/test_gate.py || rc=1
 
 echo ""
+PY=./.venv/bin/python; [ -x "$PY" ] || PY=python3
+echo "########## 1.2 数据工具 + Pipeline ##########"
+if docker ps --format '{{.Names}}' | grep -q datalaker-source_pg-1; then
+  $PY tests/test_data_tools.py || rc=1
+  $PY tests/test_pipeline.py || rc=1
+else
+  echo "  SKIP  Postgres 未启动"
+fi
+
+echo ""
 echo "########## 1.5 R2 Harness（角色化/WIP/提问/沉淀/升级） ##########"
 DATASTEWARD_DB=/tmp/dl_r2.db python3 tests/test_r2_harness.py || rc=1
 rm -f /tmp/dl_esc.db*
