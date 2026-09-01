@@ -490,23 +490,24 @@ LangGraph 节点里调用工具时**仍然要过 gate**。不能因为在 Pipeli
 > 与 4.6 的 text2sql 结论同源：**skill / workflow / graph 都是编排，不是边界。**
 > 边界只有工具签名、gate 和 Connector Service。
 
-##### 依赖成本要算
+##### 选型已定：R2 起 Pipeline 一律用 LangGraph
 
-LangGraph 会带进 LangChain 生态的一批依赖，而项目已经有 Hermes。
-**如果 Pipeline 实际只是线性 5 步，自己写一个几十行的 runner 更轻**
-（步骤列表 + 状态记录，复用现有 event log）。
+不再保留「线性就自写 runner」的余地——**统一用 LangGraph**，理由三条：
 
-判断标准：
-
-| 情形 | 选择 |
+| 理由 | 说明 |
 |---|---|
-| 线性步骤，无分支 | 自写 runner（~50 行） |
-| 有条件分支、并行、复杂重试 | **LangGraph** |
-| 需要可视化调试流程 | **LangGraph** |
+| **分支迟早会来** | 清洗 Pipeline 的「3 轮上限后转人工」（5.3）、接入 Pipeline 的「schema 变更则暂停」（6.1）本身就是条件边。先自写后迁移，等于做两遍 |
+| **可视化调试** | Pipeline 出错要定位到具体节点。自写 runner 得自己做这套，而这正是 LangGraph 现成的 |
+| **生态可读性** | 交接与评审时，「这是一个 LangGraph 图」比「这是我自己写的 runner」省一半解释成本 |
 
-R2 实施时先写清单：如果四条 Pipeline（接入 / 清洗 / 周报 / 权限扫描）
-都是线性的，就先自写；出现第一个真正需要分支的场景再引入 LangGraph。
-**这是可以延后的决定，不必现在锁死。**
+代价是带进 LangChain 生态的一批依赖，而项目已有 Hermes。
+**接受这个代价**，但设一条约束：
+
+> **只用 `langgraph` 的图与 checkpoint，不引入 LangChain 的 Agent / Chain / Memory 抽象。**
+> 那些与本项目已有的 harness 功能重复（4.6 四支柱），
+> 混用会重新制造刚刚划清的边界问题。
+
+依赖上体现为：装 `langgraph`，不装 `langchain` 主包。
 
 ##### 为什么这个区分重要：成本与可测试性
 
@@ -1522,7 +1523,7 @@ whisper 转写 → 抽元数据(时间/参会人/主题) → 分类打 tag → �
 | 访问控制 | Trino OPA plugin + Open Policy Agent | 策略由 Policy Sync 从 OpenMetadata 的 owner/tag 生成后下发；支持行级过滤与列级遮蔽 |
 | 负载防护 | Connector Service（自研） | 唯一数据出入口：AST 准入、EXPLAIN 预估、串行队列、时间窗口、熔断、负载记账 |
 | 可观测性 | OpenTelemetry → Phoenix | LLM trace |
-| Pipeline 编排 | LangGraph（R2 起，视是否需要分支决定） | 只管步骤流转与单次执行的 checkpoint；审批挂起仍归 harness |
+| Pipeline 编排 | **LangGraph**（R2 起，选型已定） | 只用图与 checkpoint，不引入 LangChain 的 Agent/Chain/Memory 抽象；审批挂起仍归 harness |
 | Agent 框架 | Hermes Agent（MIT，自建部署） | 提供 loop、插件系统、`pre_tool_call` 拦截、审批 gate、Email 适配器 |
 | 治理 Plugin | 自研 | 本项目核心：分级、票据、指纹、deny list、停止点 |
 | 模型端点 | Nous Portal / 任意 OpenAI 兼容端点 | harness 逻辑模型无关 |
@@ -1729,7 +1730,7 @@ Harness（人机协作的那套机制）是本项目区别于普通 text2sql 的
 | 周报 + 定时驱动器 | 5.5、20.5 | ✅ |
 | 回执 | 10.6 | ✅ |
 | **数据工具实现（支柱二）** | **4.6** | ⬜ |
-| **执行形态三层：纯函数 / Pipeline（LangGraph 或自写 runner）/ Agent loop** | **4.5、4.6** | ⬜ |
+| **执行形态三层：纯函数 / Pipeline（LangGraph）/ Agent loop** | **4.5、4.6** | ⬜ |
 | **记忆：资产关联 + 审批偏好（支柱三）** | **4.6** | ⬜ |
 | **Hermes 工具白名单（主防线，省 1.4–2.7 万 token/次）** | **4.6** | ⬜ |
 | 停止点判定、阶段成果交付 | 5.2 | ⬜ |
@@ -1744,7 +1745,7 @@ Harness（人机协作的那套机制）是本项目区别于普通 text2sql 的
 |---|---|
 | R0+R1 ✅ | 「基于 Hermes 构建数据治理 Agent，实现执行链路级审批门禁：工具调用被 `pre_tool_call` 拦截，票据绑定动作指纹，Agent 对决定表无写权限（容器与数据库账号双重隔离），组件异常时 fail-closed」 |
 | R1.5 | 「接入 OpenTelemetry/Phoenix，工具链路、耗时、token 成本可观测」 |
-| **R2** | 「设计并实现长时任务的挂起/恢复：run 状态落 event log，进程崩溃可续；超时逐级升级至优雅放弃；WIP 限制防止淹没审批人；按 Permission / Tool / Memory / Runtime 四支柱构建 agent harness，未声明工具 deny by default」 ← **含金量最高** |
+| **R2** | 「设计并实现长时任务的挂起/恢复：run 状态落 event log，进程崩溃可续；超时逐级升级至优雅放弃；WIP 限制防止淹没审批人；按 Permission / Tool / Memory / 执行形态四支柱构建 agent harness；用 LangGraph 编排固定步骤 Pipeline 挂在自主 Agent loop 之下；未声明工具 deny by default」 ← **含金量最高** |
 | R3 | 「lakehouse 安全基线；四种异构接入路径结果等价；增量同步与新鲜度 SLA」 |
 | R4 | 「反向整改闭环：量化复发成本推动源头修复，清洗规则可退役；权限现状发现与收敛提案」 |
 | R5 | 「构建注入式 eval：N 个已知缺陷，检出率 x%、误修率 y%、Unsafe Write Rate 0.0%」 |
