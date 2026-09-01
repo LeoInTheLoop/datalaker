@@ -36,7 +36,7 @@ python3 tests/test_toolset_whitelist.py || rc=1
 
 echo ""
 echo "########## 1. 治理 Plugin 拦截 ##########"
-DATASTEWARD_DB=/tmp/dl_gate.db ( unset DATASTEWARD_DSN; python3 tests/test_gate.py ) || rc=1
+( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_gate.db python3 tests/test_gate.py ) || rc=1
 
 echo ""
 PY=./.venv/bin/python; [ -x "$PY" ] || PY=python3
@@ -55,9 +55,9 @@ fi
 
 echo ""
 echo "########## 1.5 R2 Harness（角色化/WIP/提问/沉淀/升级） ##########"
-DATASTEWARD_DB=/tmp/dl_r2.db ( unset DATASTEWARD_DSN; python3 tests/test_r2_harness.py ) || rc=1
+( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_r2.db python3 tests/test_r2_harness.py ) || rc=1
 rm -f /tmp/dl_esc.db*
-DATASTEWARD_DB=/tmp/dl_esc.db ( unset DATASTEWARD_DSN; python3 tests/test_escalation.py ) || rc=1
+( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_esc.db python3 tests/test_escalation.py ) || rc=1
 
 echo ""
 echo "########## 2. 凭证层（源系统只读） ##########"
@@ -94,7 +94,7 @@ fi
 
 echo ""
 echo "########## 6. 通知失败 ≠ 门禁打开 ##########"
-DATASTEWARD_DB=/tmp/dl_mail_iso.db ( unset DATASTEWARD_DSN; python3 tests/test_mail_isolation.py ) || rc=1
+( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_mail_iso.db python3 tests/test_mail_isolation.py ) || rc=1
 
 echo ""
 echo "########## 7. 挂起语义（Hermes error 格式） ##########"
