@@ -14,6 +14,7 @@ PG_DSN="${DATASTEWARD_DSN:-}"
 export DATASTEWARD_TOKEN_SECRET=${DATASTEWARD_TOKEN_SECRET:-test-secret}
 export APPROVAL_PORT=${APPROVAL_PORT:-8787}
 rc=0
+PY=./.venv/bin/python; [ -x "$PY" ] || PY=python3
 
 echo "########## 0. L0 平台冒烟（datalake 独立可用） ##########"
 if docker ps --format '{{.Names}}' | grep -q datalaker-trino-1; then
@@ -36,7 +37,7 @@ python3 tests/test_toolset_whitelist.py || rc=1
 
 echo ""
 echo "########## 1. 治理 Plugin 拦截 ##########"
-( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_gate.db python3 tests/test_gate.py ) || rc=1
+( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_gate.db $PY tests/test_gate.py ) || rc=1
 
 echo ""
 PY=./.venv/bin/python; [ -x "$PY" ] || PY=python3
@@ -49,6 +50,7 @@ if docker ps --format '{{.Names}}' | grep -q datalaker-source_pg-1; then
   $PY tests/test_ingest_paths.py || rc=1
   $PY tests/test_sync.py || rc=1
   ( unset DATASTEWARD_DSN; $PY tests/test_double_confirm.py ) || rc=1
+  ( unset DATASTEWARD_DSN; $PY tests/test_inbound.py ) || rc=1
 else
   echo "  SKIP  Postgres 未启动"
 fi

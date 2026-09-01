@@ -11,7 +11,7 @@
 FROM python:3.13-slim AS base
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
-RUN pip install --no-cache-dir "psycopg[binary]==3.*"
+RUN pip install --no-cache-dir "psycopg[binary]==3.*" "sqlglot>=25" openpyxl
 
 # ---------------------------------------------------------------- callback
 FROM base AS callback

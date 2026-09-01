@@ -12,6 +12,22 @@ from ingest_file import FileRejected
 CSV = os.path.join(ROOT, "data/exports/shippers.csv")
 XLSX = os.path.join(ROOT, "data/exports/shippers.xlsx")
 
+# 自己导出，不依赖预先生成的文件——
+# 别的测试（如 test_sync）会改动源数据，跨测试的数据依赖必然出问题
+import subprocess, csv as _csv
+os.makedirs(os.path.dirname(CSV), exist_ok=True)
+_out = subprocess.run(
+    ["docker", "exec", "datalaker-source_pg-1", "psql", "-U", "postgres",
+     "-d", "northwind", "-c",
+     "\\copy (SELECT * FROM shippers ORDER BY shipper_id) TO STDOUT WITH CSV HEADER"],
+    capture_output=True, text=True, timeout=60).stdout
+open(CSV, "w").write(_out)
+import openpyxl
+_wb = openpyxl.Workbook(); _ws = _wb.active; _ws.title = "shippers"
+for _row in _csv.reader(_out.splitlines()):
+    _ws.append(_row)
+_wb.save(XLSX)
+
 ok, bad = [], []
 def chk(n, c, d=""):
     (ok if c else bad).append(n); print(f"  {'PASS' if c else 'FAIL'}  {n}" + (f"  [{d}]" if d else ""))
@@ -22,9 +38,10 @@ c = F.read_csv(CSV)
 x = F.read_excel(XLSX)
 d = F.read_table("northwind", "shippers")
 
-chk("CSV 可读", len(c["rows"]) == 6, f"{len(c['rows'])} 行")
-chk("Excel 可读", len(x["rows"]) == 6, f"{len(x['rows'])} 行")
-chk("数据库可读", len(d["rows"]) == 6, f"{len(d['rows'])} 行")
+N = len(c["rows"])
+chk("CSV 可读", N > 0, f"{N} 行")
+chk("Excel 可读", len(x["rows"]) == N, f"{len(x['rows'])} 行")
+chk("数据库可读", len(d["rows"]) == N, f"{len(d['rows'])} 行")
 
 fc, fx, fd = (F.canonical_fingerprint(p) for p in (c, x, d))
 chk("CSV == Excel", fc == fx, fc[:12])
