@@ -3,6 +3,8 @@
     {"user": "admin", "allow": "all"},
     {"user": "claw", "catalog": "iceberg", "allow": "all"},
     {"user": "claw", "catalog": "postgres", "allow": "read-only"},
+    {"user": "claw", "catalog": "northwind", "allow": "read-only"},
+    {"user": "admin", "catalog": "northwind", "allow": "all"},
     {"user": "analyst", "catalog": "iceberg", "allow": "read-only"},
     {"user": ".*", "catalog": "system", "allow": "read-only"}
   ],
@@ -16,6 +18,7 @@
     {"user": "claw", "catalog": "iceberg",
      "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP"]},
     {"user": "claw", "catalog": "postgres", "privileges": ["SELECT"]},
+    {"user": "claw", "catalog": "northwind", "privileges": ["SELECT"]},
     {"user": "analyst", "catalog": "iceberg", "schema": "gold",
      "privileges": ["SELECT"],
      "columns": [

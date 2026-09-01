@@ -8,6 +8,9 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 export DATASTEWARD_DB=${DATASTEWARD_DB:-/tmp/dl_test.db}
+# 存储后端必须逐段显式控制：DATASTEWARD_DSN 一旦设置，
+# open_store 全局走 Postgres——包括那些只想用 SQLite 的隔离测试
+PG_DSN="${DATASTEWARD_DSN:-}"
 export DATASTEWARD_TOKEN_SECRET=${DATASTEWARD_TOKEN_SECRET:-test-secret}
 export APPROVAL_PORT=${APPROVAL_PORT:-8787}
 rc=0
@@ -33,7 +36,7 @@ python3 tests/test_toolset_whitelist.py || rc=1
 
 echo ""
 echo "########## 1. 治理 Plugin 拦截 ##########"
-DATASTEWARD_DB=/tmp/dl_gate.db python3 tests/test_gate.py || rc=1
+DATASTEWARD_DB=/tmp/dl_gate.db ( unset DATASTEWARD_DSN; python3 tests/test_gate.py ) || rc=1
 
 echo ""
 PY=./.venv/bin/python; [ -x "$PY" ] || PY=python3
@@ -44,15 +47,16 @@ if docker ps --format '{{.Names}}' | grep -q datalaker-source_pg-1; then
   $PY tests/test_memory.py || rc=1
   $PY tests/test_sql_admission.py || rc=1
   $PY tests/test_ingest_paths.py || rc=1
+  $PY tests/test_sync.py || rc=1
 else
   echo "  SKIP  Postgres 未启动"
 fi
 
 echo ""
 echo "########## 1.5 R2 Harness（角色化/WIP/提问/沉淀/升级） ##########"
-DATASTEWARD_DB=/tmp/dl_r2.db python3 tests/test_r2_harness.py || rc=1
+DATASTEWARD_DB=/tmp/dl_r2.db ( unset DATASTEWARD_DSN; python3 tests/test_r2_harness.py ) || rc=1
 rm -f /tmp/dl_esc.db*
-DATASTEWARD_DB=/tmp/dl_esc.db python3 tests/test_escalation.py || rc=1
+DATASTEWARD_DB=/tmp/dl_esc.db ( unset DATASTEWARD_DSN; python3 tests/test_escalation.py ) || rc=1
 
 echo ""
 echo "########## 2. 凭证层（源系统只读） ##########"
@@ -78,14 +82,18 @@ echo ""
 echo "########## 5. Hermes 真实集成（pre_tool_call） ##########"
 HERMES_DIR=${HERMES:-}
 if [ -n "$HERMES_DIR" ] && [ -x "$HERMES_DIR/.venv-h/bin/python" ]; then
-  HERMES="$HERMES_DIR" "$HERMES_DIR/.venv-h/bin/python" tests/test_hermes_integration.py || rc=1
+  # Hermes 集成测的是 hook 契约而非存储；用 SQLite 隔离，
+  # 且 .venv-h 里没有 psycopg
+  ( unset DATASTEWARD_DSN
+    DATASTEWARD_DB=/tmp/dl_hermes.db HERMES="$HERMES_DIR" \
+      "$HERMES_DIR/.venv-h/bin/python" tests/test_hermes_integration.py ) || rc=1
 else
   echo "  SKIP  未设置 HERMES 环境变量（见 docs/handoff/R1.md）"
 fi
 
 echo ""
 echo "########## 6. 通知失败 ≠ 门禁打开 ##########"
-DATASTEWARD_DB=/tmp/dl_mail_iso.db python3 tests/test_mail_isolation.py || rc=1
+DATASTEWARD_DB=/tmp/dl_mail_iso.db ( unset DATASTEWARD_DSN; python3 tests/test_mail_isolation.py ) || rc=1
 
 echo ""
 echo "########## 7. 挂起语义（Hermes error 格式） ##########"
@@ -112,7 +120,7 @@ for _ in range(50):
         urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=.5); break
     except Exception: time.sleep(.1)
 PY
-python3 tests/test_callback_e2e.py || rc=1
+( unset DATASTEWARD_DSN; python3 tests/test_callback_e2e.py ) || rc=1
 kill $CB 2>/dev/null
 
 echo ""
