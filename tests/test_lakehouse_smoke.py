@@ -6,6 +6,7 @@ Trino/Iceberg/MinIO 本身的正确性由上游保证，这里只验证我们的
 前置：cd infra && docker compose --profile core up -d
 跑法：python3 tests/test_lakehouse_smoke.py
 """
+import os
 import subprocess
 import sys
 
@@ -13,9 +14,16 @@ C = "datalaker-trino-1"
 ok, bad = [], []
 
 
+# 加了授权（R3）之后，容器内 CLI 也必须报身份——
+# rules.json 里只有 admin/claw/analyst 有权限，默认用户只能读 system。
+# 运维与测试脚本用 admin；容器内走 HTTP，免密码。
+TRINO_USER = os.environ.get("TRINO_USER", "admin")
+
+
 def q(sql, fmt="CSV_UNQUOTED"):
     r = subprocess.run(
-        ["docker", "exec", C, "trino", "--output-format", fmt, "--execute", sql],
+        ["docker", "exec", C, "trino", "--user", TRINO_USER,
+         "--output-format", fmt, "--execute", sql],
         capture_output=True, text=True, timeout=180)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout)[:300])

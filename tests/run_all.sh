@@ -20,6 +20,14 @@ else
 fi
 
 echo ""
+echo "########## 0.2 平台安全基线（TLS/认证/授权） ##########"
+if docker ps --format '{{.Names}}' | grep -q datalaker-trino-1; then
+  ./.venv/bin/python tests/test_platform_security.py 2>/dev/null || python3 tests/test_platform_security.py || rc=1
+else
+  echo "  SKIP  Trino 未启动"
+fi
+
+echo ""
 echo "########## 0.5 工具白名单（安全主防线） ##########"
 python3 tests/test_toolset_whitelist.py || rc=1
 

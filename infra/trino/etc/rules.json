@@ -1,0 +1,26 @@
+{
+  "catalogs": [
+    {"user": "admin", "allow": "all"},
+    {"user": "claw", "catalog": "iceberg", "allow": "all"},
+    {"user": "claw", "catalog": "postgres", "allow": "read-only"},
+    {"user": "analyst", "catalog": "iceberg", "allow": "read-only"},
+    {"user": ".*", "catalog": "system", "allow": "read-only"}
+  ],
+  "schemas": [
+    {"user": "admin", "owner": true},
+    {"user": "claw", "catalog": "iceberg", "owner": true},
+    {"user": "analyst", "catalog": "iceberg", "schema": "gold", "owner": false}
+  ],
+  "tables": [
+    {"user": "admin", "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP"]},
+    {"user": "claw", "catalog": "iceberg",
+     "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP"]},
+    {"user": "claw", "catalog": "postgres", "privileges": ["SELECT"]},
+    {"user": "analyst", "catalog": "iceberg", "schema": "gold",
+     "privileges": ["SELECT"],
+     "columns": [
+       {"name": "phone", "mask": "'***'"},
+       {"name": "email", "mask": "'***'"}
+     ]}
+  ]
+}
