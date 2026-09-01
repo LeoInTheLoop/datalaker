@@ -67,6 +67,9 @@ spike/                        R0 概念验证，可随时删除
 
 ## 开发约定
 
+- **gate 依赖 `sqlglot`**（AST 准入），新增依赖须同步三处：
+  项目 `.venv`、容器镜像（`docker/Dockerfile`）、Hermes 的 `.venv-h`
+  （uv 建的无 pip，用 `VIRTUAL_ENV=<path> uv pip install`）
 - 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`（**99 条断言必须全绿**）
 - 看状态：`python3 ops/claw-status.py`（退出码 2 = 有告警）
   - 不设 `HERMES` 时会跳过真实集成那一段
