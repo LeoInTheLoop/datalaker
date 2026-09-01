@@ -20,6 +20,10 @@ else
 fi
 
 echo ""
+echo "########## 0.5 工具白名单（安全主防线） ##########"
+python3 tests/test_toolset_whitelist.py || rc=1
+
+echo ""
 echo "########## 1. 治理 Plugin 拦截 ##########"
 DATASTEWARD_DB=/tmp/dl_gate.db python3 tests/test_gate.py || rc=1
 

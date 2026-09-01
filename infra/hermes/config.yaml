@@ -1,0 +1,48 @@
+# Hermes 工具白名单 —— 安全主防线（readme 4.6）
+#
+# 实测：Hermes 的 tools/ 目录有 84 处工具定义、约 49,000 字符 ≈ 1.4 万 token，
+# 89 个工具分布在 58 个 toolset。这些定义每次请求都进 prompt。
+#
+# 本项目实际需要的内置工具只有 3 个，其余 86 个是纯浪费，
+# 而其中 terminal / code_execution / browser / file / delegation 更是危险——
+# 用它们可直接连库，绕过 Connector 护栏与审批门禁。
+#
+# 不注入是主防线；gate 的 deny by default 只是兜底（配置会漏，代码不会）。
+
+agent:
+  enabled_toolsets:
+    - clarify        # 提问渲染层：choices / 推荐项 / 多选（readme 5.7）
+    - memory         # 跨会话记忆
+    - todo           # 任务清单
+
+  # 显式列出以表明是刻意关闭，不是遗漏
+  disabled_toolsets:
+    - terminal       # ⚠️ 可执行任意命令，绕过一切门禁
+    - code_execution # ⚠️ 同上
+    - computer_use   # ⚠️ 控制桌面
+    - browser        # ⚠️ 出网
+    - file           # ⚠️ 读写本地文件
+    - delegation     # ⚠️ 派生子 agent，子 agent 不受本 plugin 约束
+    - web
+    - search
+    - x_search
+    - vision
+    - video
+    - image_gen
+    - video_gen
+    - tts
+    - spotify
+    - homeassistant
+    - discord
+    - discord_admin
+    - yuanbao
+    - feishu_doc     # 我们用 webhook 卡片，不用文档 API
+    - feishu_drive
+    - kanban
+    - project
+    - desktop_ui
+    - cronjob        # 有自己的 ops/scheduler.py
+    - session_search
+    - context_engine
+    - coding
+    - debugging

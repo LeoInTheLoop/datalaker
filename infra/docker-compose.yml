@@ -185,6 +185,8 @@ services:
       MAIL_SPONSOR: ${MAIL_SPONSOR:-}
       MINIO_ENDPOINT: http://minio:9000
     volumes:
+      # 工具白名单：安全主防线（readme 4.6）
+      - ./hermes/config.yaml:/root/.hermes/config.yaml:ro
       # 凭证只读挂载，不进镜像
       - ../secrets:/app/secrets:ro
       # 开发期热更新：改代码不用重 build
