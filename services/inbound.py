@@ -198,3 +198,74 @@ def process(msg: dict, store, lookup_by_message_id=None) -> dict:
     return {"action": "processed", "message_id": mid,
             "attribution": attrib, "intent": intent,
             "resets_timer": intent["intent"] != "NOISE"}
+
+
+# ---------------------------------------------------------------- 邮件附件
+def fetch_attachments(message_id: str, out_dir: str) -> list:
+    """取附件（readme 16.4）。
+
+    这是唯一一条「数据从外部主动进来」的通道，安全要求最高：
+    发件人白名单在 `process()` 已过；这里再过类型与大小，
+    并把来源 Message-ID 记进结果供溯源。
+
+    **不执行宏**：解析交给 ingest_file（openpyxl 纯解析）。
+    """
+    import base64
+    import pathlib
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    import ingest_file
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    creds = Credentials.from_authorized_user_file(
+        os.path.join(root, "secrets", "gmail_token.json"),
+        ["https://www.googleapis.com/auth/gmail.send",
+         "https://www.googleapis.com/auth/gmail.readonly"])
+    svc = build("gmail", "v1", credentials=creds)
+    full = svc.users().messages().get(userId="me", id=message_id).execute()
+
+    saved = []
+    pathlib.Path(out_dir).mkdir(parents=True, exist_ok=True)
+    for part in full.get("payload", {}).get("parts", []):
+        fn = part.get("filename")
+        if not fn:
+            continue
+        ext = pathlib.Path(fn).suffix.lower()
+        if ext not in ingest_file.ALLOWED_EXT:
+            saved.append({"filename": fn, "status": "rejected:type"})
+            continue
+        body = part.get("body", {})
+        size = int(body.get("size") or 0)
+        if size > ingest_file.MAX_BYTES:
+            saved.append({"filename": fn, "status": "rejected:size", "bytes": size})
+            continue
+        att_id = body.get("attachmentId")
+        if not att_id:
+            continue
+        data = svc.users().messages().attachments().get(
+            userId="me", messageId=message_id, id=att_id).execute()
+        raw = base64.urlsafe_b64decode(data["data"])
+        p = pathlib.Path(out_dir) / fn
+        p.write_bytes(raw)
+        saved.append({"filename": fn, "path": str(p), "bytes": len(raw),
+                      "status": "saved", "source_message_id": message_id})
+    return saved
+
+
+def ingest_attachment(att: dict, store) -> dict:
+    """把附件解析成 payload 并记录溯源。
+
+    落库时记来源邮件与发件人——Remediation Ledger 里能回答
+    「这份数据哪来的、谁发的」（readme 16.4）。
+    """
+    import ingest_file
+    if att.get("status") != "saved":
+        return {"ok": False, "why": att.get("status")}
+    payload = ingest_file.read_any(att["path"])
+    fp = ingest_file.canonical_fingerprint(payload)
+    store.remember(f"attachment.{att['filename']}", "provenance",
+                   f"message_id={att.get('source_message_id')};fingerprint={fp}",
+                   "system:inbound")
+    return {"ok": True, "rows": len(payload["rows"]),
+            "columns": payload["columns"], "fingerprint": fp,
+            "source_message_id": att.get("source_message_id")}

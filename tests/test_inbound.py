@@ -66,5 +66,20 @@ chk("Message-ID 幂等去重", I.process(dup, st, look)["action"] == "skip")
 chk("正文里的「同意」仍需点击才作数",
     I.decision_still_requires_click({"intent": "DECISION"}) is True)
 
+# 附件路径：准入 + 溯源（不联网，用本地文件模拟已保存的附件）
+import shutil
+tmpd = "/tmp/dl_att"; os.makedirs(tmpd, exist_ok=True)
+src_csv = os.path.join(ROOT, "data/exports/shippers.csv")
+if os.path.exists(src_csv):
+    dst = os.path.join(tmpd, "shippers.csv"); shutil.copy(src_csv, dst)
+    r = I.ingest_attachment({"filename": "shippers.csv", "path": dst,
+                             "status": "saved", "source_message_id": "<mail-9@x>"}, st)
+    chk("附件可解析", r["ok"] and r["rows"] > 0, f"{r.get('rows')} 行")
+    chk("附件记录溯源（哪封邮件来的）",
+        "mail-9@x" in (st.known("attachment.shippers.csv", "provenance") or {}).get("value", ""))
+    chk("附件指纹与文件路径一致", len(r["fingerprint"]) == 64)
+chk("被拒的附件不进入解析",
+    I.ingest_attachment({"filename": "x.exe", "status": "rejected:type"}, st)["ok"] is False)
+
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 sys.exit(1 if bad else 0)
