@@ -151,20 +151,29 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
 
 
 def _sql_guard(args: dict):
+    """before_sql：**复用 Connector 的 AST 准入，不再各写一套**。
+
+    两处实现同一规则必然漂移——之前 gate 与 Connector 各有一份关键字判断，
+    改了一处忘了另一处就出安全缺口。现在统一到 `connector._admit`：
+    AST 解析，能挡住注释分隔、子查询、CTE 写操作、多语句等关键字挡不住的手法。
+    """
     sql = (args.get("sql") or "").strip()
-    low = sql.lower()
+    try:
+        import sys as _s
+        _s.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), "services"))
+        import connector
+    except Exception:
+        # Connector 不可用时保守拒绝——SQL 是最危险的入口，不做无护栏放行
+        return {"action": "block", "message": "SQL 准入组件不可用，已按 fail-closed 拒绝。"}
 
-    if " join " in low:
-        return {"action": "block",
-                "message": "源系统上不允许 join —— 请分别抽取到 bronze 后在 lake 中关联。"}
+    try:
+        rewritten = connector._admit(sql)
+    except Exception as e:
+        return {"action": "block", "message": str(e)[:200]}
 
-    head = low.split(None, 1)[0] if low else ""
-    if head not in ("select", "show", "describe"):
-        return {"action": "block", "message": "仅允许 SELECT / SHOW / DESCRIBE。"}
-
-    if " limit " not in low:
-        return {"action": "modify",
-                "args": {"sql": sql.rstrip("; ") + " LIMIT 1000"}}
+    if rewritten.strip() != sql.strip():
+        return {"action": "modify", "args": {"sql": rewritten}}
     return None
 
 

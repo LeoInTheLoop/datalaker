@@ -51,21 +51,63 @@ class QueryRejected(ConnectorError):
     """未通过准入。Agent 应当改写查询而非重试。"""
 
 
-def _admit(sql: str) -> str:
-    """语句准入。
+DEFAULT_LIMIT = int(_E.get("CONNECTOR_DEFAULT_LIMIT", "1000"))
 
-    ponytail: R1 仍是关键字判断，与 plugin 侧的 _sql_guard 同源。
-    TODO(R3): 统一换成 sqlglot 解析 AST，两处共用一个实现。
+
+def _admit(sql: str) -> str:
+    """语句准入：**AST 解析，不是关键字匹配**（readme 8.1）。
+
+    关键字匹配挡不住的，AST 能挡：
+
+    | 绕过手法 | 关键字判断 | AST |
+    |---|---|---|
+    | `SELECT 1; DROP TABLE x` 多语句 | ❌ 只看第一个词 | ✅ 解析出 2 条 |
+    | `SELECT/**/1 FROM a JOIN b` 注释分隔 | ❌ 匹配不到 " join " | ✅ 看结构 |
+    | `SELECT * FROM (SELECT..JOIN..)` 子查询 | ❌ | ✅ 遍历整棵树 |
+    | `WITH x AS (DELETE..) SELECT` CTE 写操作 | ❌ 头部是 with | ✅ |
+
+    反过来，注释里出现 "join" 这个词不再误伤——**看结构不看字面**。
     """
-    low = " ".join(sql.lower().split())
-    head = low.split(" ", 1)[0] if low else ""
-    if head not in ("select", "show", "describe", "explain"):
-        raise QueryRejected("仅允许 SELECT / SHOW / DESCRIBE")
-    if " join " in low:
+    import sqlglot
+    from sqlglot import exp
+
+    raw = (sql or "").strip()
+    if not raw:
+        raise QueryRejected("空语句")
+
+    try:
+        stmts = sqlglot.parse(raw, read="postgres")
+    except Exception as e:
+        raise QueryRejected(f"SQL 无法解析，拒绝执行：{str(e)[:80]}")
+
+    stmts = [st for st in stmts if st is not None]
+    if len(stmts) != 1:
+        raise QueryRejected(f"只允许单条语句，收到 {len(stmts)} 条")
+
+    tree = stmts[0]
+    if not isinstance(tree, (exp.Select, exp.Show, exp.Describe)):
+        raise QueryRejected(
+            f"仅允许 SELECT / SHOW / DESCRIBE，收到 {type(tree).__name__.upper()}")
+
+    # 整棵树里不允许出现写操作（含 CTE、子查询内部）
+    WRITE = (exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Create,
+             exp.Alter, exp.TruncateTable, exp.Merge)
+    for node in tree.walk():
+        if isinstance(node, WRITE):
+            raise QueryRejected(f"语句中包含写操作 {type(node).__name__.upper()}")
+
+    # join 检查遍历整棵树 —— 子查询与 CTE 里的 join 同样拦下
+    if list(tree.find_all(exp.Join)):
         raise QueryRejected("源系统上不允许 join —— 请分别抽取后在 lake 中关联")
-    if head == "select" and " limit " not in low:
-        sql = sql.rstrip("; ") + f" LIMIT 1000"
-    return sql
+    # 逗号连接的隐式 join：FROM a, b
+    for scope in tree.find_all(exp.From):
+        if len(scope.expressions) > 1:
+            raise QueryRejected("源系统上不允许 join（FROM 多表）")
+
+    if isinstance(tree, exp.Select) and not tree.args.get("limit"):
+        tree = tree.limit(DEFAULT_LIMIT)
+
+    return tree.sql(dialect="postgres")
 
 
 def _estimate(cur, sql: str) -> float:
