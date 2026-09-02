@@ -122,6 +122,10 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
                 "message": f"[DENIED] {tool_name} 已被拒绝，不会重复发起审批。"
                            f"请改变方案（将产生新的动作指纹）或触发升级。"}
 
+    # 角色补域：owner -> owner:fin（见 resolve_approver_role）
+    if approver_role:
+        approver_role = resolve_approver_role(st, approver_role, args)
+
     # WIP 限制（readme 10.7）：不要淹没任何人
     if level >= Level.L2:
         over = _wip_exceeded(st, approver_role or "owner")
@@ -175,6 +179,30 @@ def _sql_guard(args: dict):
     if rewritten.strip() != sql.strip():
         return {"action": "modify", "args": {"sql": rewritten}}
     return None
+
+
+def resolve_approver_role(st, approver_role, args):
+    """把 policy 里的粗粒度角色补成带域的具体角色。
+
+    `policy.py` 只能写 `owner`——它不知道有哪些业务域；
+    而真实角色是 `owner:fin` / `owner:crm`（readme 10.4 绑角色不绑人）。
+    运行时从资产推断域：表名前缀是最可靠的确定性信号。
+
+    推断不出、或该具体角色无人持有时，回退到粗粒度角色——
+    **宁可发给上一级，也不要发丢**。
+    """
+    if not approver_role or ":" in approver_role:
+        return approver_role
+    table = str(args.get("table") or args.get("source") or "")
+    domain = table.split(".")[-1].split("_")[0].lower() if table else ""
+    if domain:
+        specific = f"{approver_role}:{domain}"
+        try:
+            if st.resolve_role(specific):
+                return specific
+        except Exception:
+            pass
+    return approver_role
 
 
 def _wip_exceeded(st, approver_role):

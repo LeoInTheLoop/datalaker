@@ -211,6 +211,12 @@ class PgStore:
             r = c.fetchone()
             return r[0] if r else None
 
+    def current_holders(self) -> set:
+        with self.db.cursor() as c:
+            c.execute("SELECT DISTINCT lower(person) FROM role_assignment "
+                      "WHERE valid_from <= now() AND (valid_to IS NULL OR valid_to > now())")
+            return {r[0] for r in c.fetchall()}
+
     def assign_role(self, role, person, granted_by, reason=""):
         with self.db.cursor() as c:
             c.execute("UPDATE role_assignment SET valid_to=now() "
@@ -462,6 +468,18 @@ class Store:
             (role, time.time(), time.time()),
         ).fetchone()
         return row[0] if row else None
+
+    def current_holders(self) -> set:
+        """当前所有有效的角色持有人。
+
+        角色名是动态的（`owner:FIN` / `steward:CRM`），**不能硬编码枚举**——
+        入站白名单要认的是「此刻谁持有任何角色」。
+        """
+        rows = self.db.execute(
+            "SELECT DISTINCT lower(person) FROM role_assignment "
+            "WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)",
+            (time.time(), time.time())).fetchall()
+        return {r[0] for r in rows}
 
     def assign_role(self, role, person, granted_by, reason=""):
         """指派角色。旧持有人自动失效——决定是历史事实，不回填改写。"""

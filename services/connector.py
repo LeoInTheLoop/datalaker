@@ -31,6 +31,8 @@ _SOURCES = {
     "olist": _E.get("SOURCE_DSN", ""),
     "northwind": _E.get("NORTHWIND_DSN", "")
                  or (_E.get("SOURCE_DSN", "").replace("/olist", "/northwind")),
+    "acme": _E.get("ACME_DSN", "")
+            or (_E.get("SOURCE_DSN", "").replace("/olist", "/acme")),
 }
 
 # 每个源一把锁：concurrency = 1，串行执行（readme 8.1 并发与排队）

@@ -75,12 +75,19 @@ def resolve_item(headers: dict, lookup_by_message_id=None) -> dict:
 # ---------------------------------------------------------------- 意图分类
 INTENTS = ("DECISION", "QUESTION", "DELEGATE", "NOT_MY_SCOPE", "NOISE", "UNCLEAR")
 
+# DECISION_NEG 归并回 DECISION —— 对外只暴露枚举里的六类
+_ALIAS = {"DECISION_NEG": "DECISION"}
+
 _RULES = [
     ("NOISE", (r"out of office", r"automatic reply", r"自动回复", r"休假", r"年假中")),
-    ("DELEGATE", (r"(找|问|联系|转给)\s*[一-龥A-Za-z]{1,10}\s*(吧|看看|处理)?",
+    ("DELEGATE", (r"(找|问|联系|转给)\s*[一-龥A-Za-z]{1,10}(\s*[（(<]?[\w.@]+@|\s*(吧|看看|处理))",
                   r"ask\s+\w+", r"forward(ed)?\s+to")),
     ("NOT_MY_SCOPE", (r"不(归|属于)我(管|负责)", r"不是我的", r"not my (job|scope|area)")),
-    ("DECISION", (r"^\s*(同意|批准|可以|approve[d]?|ok|yes)\b", r"^\s*(拒绝|不行|deny|no)\b")),
+    # 中英文分开：\b 词边界在中文字符之间不成立，
+    # 「我同意接入」里「同意」后面跟中文，加 \b 会漏掉
+    ("DECISION", (r"(我?同意|批准了?|可以的?|没问题)",
+                  r"\b(approve[d]?|ok|yes|agreed)\b")),
+    ("DECISION_NEG", (r"(拒绝|不行|不同意|不批)", r"\b(deny|denied|reject(ed)?|no)\b")),
     ("QUESTION", (r"[?？]\s*$", r"^(为什么|什么|哪个|谁|怎么|why|what|which|who|how)")),
 ]
 
@@ -104,7 +111,8 @@ def classify_intent(body: str, headers: dict | None = None) -> dict:
     for intent, pats in _RULES:
         for p in pats:
             if re.search(p, head, re.I | re.M):
-                return {"intent": intent, "confidence": 0.8, "by": f"rule:{p[:18]}"}
+                return {"intent": _ALIAS.get(intent, intent), "confidence": 0.8,
+                        "by": f"rule:{p[:18]}"}
 
     return {"intent": "UNCLEAR", "confidence": 0.3, "by": "no_rule",
             "note": "规则未命中，应交模型复核；仍不确定则回信澄清，不推进"}
@@ -142,10 +150,13 @@ def sender_allowed(from_addr: str, store) -> bool:
     addr = email.utils.parseaddr(from_addr or "")[1].lower()
     if not addr:
         return False
-    for role in ("sponsor", "owner", "steward"):
-        who = store.resolve_role(role)
-        if who and who.lower() == addr:
+    # 角色名是动态的（owner:FIN / steward:CRM），不能硬编码枚举——
+    # 要认的是「此刻谁持有任何角色」
+    try:
+        if addr in store.current_holders():
             return True
+    except Exception:
+        pass
     env_allow = {a.strip().lower() for a in
                  os.environ.get("INBOUND_ALLOWLIST", "").split(",") if a.strip()}
     return addr in env_allow
