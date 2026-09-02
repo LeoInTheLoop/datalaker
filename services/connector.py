@@ -7,6 +7,7 @@ ponytail: R1 做成进程内模块。DSN 只在本模块读取，工具函数拿
 需要跨进程隔离时（R3）再包一层 HTTP，调用方接口不变。
 """
 import json
+import os
 import pathlib
 import threading
 import time
@@ -26,8 +27,17 @@ def _env():
 
 _E = _env()
 
-# source_id -> DSN。**只有本模块读取这个表**
-_SOURCES = {
+# ---------------------------------------------------------------------------
+# 数据源注册（readme 8 凭证层）
+#
+# **Agent 天生不该持有任何库的凭证。** 硬编码 _SOURCES 等于它一上线
+# 就能连所有库——现实中第一步是问人「公司有哪些系统」，
+# 再走 L3 审批开只读账号，凭证进 secret store，最后才注册进来。
+#
+# 这里保留一份「引导源」用于开发与测试；生产应当为空，
+# 全部经 register_source() 在审批通过后动态注册。
+# ---------------------------------------------------------------------------
+_BOOTSTRAP = {
     "olist": _E.get("SOURCE_DSN", ""),
     "northwind": _E.get("NORTHWIND_DSN", "")
                  or (_E.get("SOURCE_DSN", "").replace("/olist", "/northwind")),
@@ -35,8 +45,41 @@ _SOURCES = {
             or (_E.get("SOURCE_DSN", "").replace("/olist", "/acme")),
 }
 
+_REGISTERED: dict = {}
+
+
+def register_source(source_id: str, dsn: str, approval_id: str | None = None,
+                    kind: str = "postgres", description: str = ""):
+    """审批通过后注册一个数据源。
+
+    `approval_id` 是这条注册的依据——**没有批准就没有数据源**。
+    真实部署中 dsn 应存进 secret store，这里只记引用。
+    """
+    if not approval_id and os.environ.get("REQUIRE_SOURCE_APPROVAL", "1") != "0":
+        raise ConnectorError(
+            f"注册数据源 {source_id} 需要审批依据（approval_id）——"
+            f"Agent 不能自行给自己开数据源")
+    _REGISTERED[source_id] = dsn
+    _LOCKS.setdefault(source_id, threading.Lock())
+    return {"source_id": source_id, "kind": kind, "approval_id": approval_id,
+            "description": description}
+
+
+def known_sources() -> list:
+    return sorted(set(_BOOTSTRAP) | set(_REGISTERED))
+
+
+def _dsn(source_id: str) -> str:
+    dsn = _REGISTERED.get(source_id) or _BOOTSTRAP.get(source_id, "")
+    if not dsn:
+        raise ConnectorError(
+            f"数据源 {source_id} 未注册。Agent 不持有未经批准的凭证——"
+            f"先问人有哪些系统，再走审批开只读账号。")
+    return dsn
+
+
 # 每个源一把锁：concurrency = 1，串行执行（readme 8.1 并发与排队）
-_LOCKS = {sid: threading.Lock() for sid in _SOURCES}
+_LOCKS = {sid: threading.Lock() for sid in _BOOTSTRAP}
 
 MAX_SCAN_ROWS = int(_E.get("CONNECTOR_MAX_SCAN_ROWS", "5000000"))
 STATEMENT_TIMEOUT_MS = int(_E.get("CONNECTOR_STATEMENT_TIMEOUT_MS", "30000"))
@@ -149,11 +192,7 @@ def query(source_id: str, sql: str, purpose: str = "") -> dict:
         raise QueryRejected(
             f"批量抽取只在 {w} 执行。当前不在窗口内，任务已排队至下个窗口。")
 
-    if source_id not in _SOURCES:
-        raise ConnectorError(f"未知数据源: {source_id}")
-    dsn = _SOURCES[source_id]
-    if not dsn:
-        raise ConnectorError(f"数据源 {source_id} 未配置 DSN")
+    dsn = _dsn(source_id)
 
     t0 = time.time()
     try:
@@ -163,7 +202,7 @@ def query(source_id: str, sql: str, purpose: str = "") -> dict:
         _record(source_id, sql, purpose, 0, time.time() - t0, -1, f"REJECTED: {e}")
         raise
 
-    with _LOCKS[source_id]:                       # 串行，排队无法绕过
+    with _LOCKS.setdefault(source_id, threading.Lock()):                       # 串行，排队无法绕过
         with psycopg.connect(dsn, connect_timeout=10) as conn:
             with conn.cursor() as cur:
                 cur.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
@@ -270,11 +309,9 @@ _IDENT = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 def _meta_exec(source_id: str, sql: str, args=(), purpose="metadata"):
     import psycopg
-    if source_id not in _SOURCES:
-        raise ConnectorError(f"未知数据源: {source_id}")
     t0 = time.time()
     with _LOCKS.setdefault(source_id, threading.Lock()):
-        with psycopg.connect(_SOURCES[source_id], connect_timeout=10) as conn:
+        with psycopg.connect(_dsn(source_id), connect_timeout=10) as conn:
             with conn.cursor() as cur:
                 cur.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
                 cur.execute(sql, args)

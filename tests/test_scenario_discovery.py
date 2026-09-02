@@ -28,6 +28,15 @@ SRC = SCEN["source"]
 ok, bad, log = [], [], []
 
 
+def _raises(fn, exc):
+    try:
+        fn(); return False
+    except exc:
+        return True
+    except Exception:
+        return False
+
+
 def chk(act, n, c, d=""):
     (ok if c else bad).append(n)
     print(f"  {'PASS' if c else 'FAIL'}  [{act:>2}] {n}" + (f"  ·  {d}" if d else ""))
@@ -53,89 +62,126 @@ admin = Store(DB, readonly=False)
 print(f"\n=== {SCEN['name']} ===")
 print(f"    {SCEN['premise']}\n")
 
-# ---- 幕 1：发现 ----
-tables = data_tools.list_source_tables(SRC)["tables"]
-chk(1, "扫描到源系统的表", len(tables) >= 6, f"{len(tables)} 张")
-chk(1, "此时没有任何 owner 信息", st.resolve_role("owner:fin") is None,
-    "从零开始，只知道 Sponsor")
+# ---- 幕 0：Agent 手上什么都没有 ----
+import connector
+_real_bootstrap = dict(connector._BOOTSTRAP)
+connector._BOOTSTRAP.clear()          # 模拟真实起点：没有任何预置凭证
+connector._REGISTERED.clear()
+chk(0, "起点：没有任何已注册的数据源", connector.known_sources() == [])
+try:
+    data_tools.list_source_tables(SRC)
+    chk(0, "无凭证时连不上任何库", False, "竟然连上了")
+except connector.ConnectorError as e:
+    chk(0, "无凭证时连不上任何库", True, str(e)[:40])
+chk(0, "Agent 不能自行注册数据源",
+    _raises(lambda: connector.register_source(SRC, "postgresql://x/y"),
+            connector.ConnectorError))
 
-# ---- 幕 2-3：问 Sponsor，拿到转介 ----
+# ---- 幕 1-2：问 Sponsor 有哪些系统 → 审批后开只读账号 ----
 admin.assign_role("sponsor", SCEN["roles"]["sponsor"], "bootstrap", "初始指派")
-qid, _ = st.ask("scen", f"{SRC}", SCEN["acts"][1]["question"],
-                [{"key": "who", "label": "请告知联系人"}], "sponsor")
-chk(2, "已向 Sponsor 发起提问", bool(qid))
+q0, _ = st.ask("scen", "__systems__", SCEN["acts"][1]["question"],
+               [{"key": "list", "label": "请列出数据系统"}], "sponsor")
+chk(1, "已向 Sponsor 询问有哪些系统", bool(q0))
 
-reply = SCEN["acts"][2]["inbound"]
+sysreply = SCEN["acts"][5]["inbound"]
+r = inbound.process({"id": "m0", "headers": {**sysreply["headers"],
+                                             "Message-ID": "<r0@x>",
+                                             "From": sysreply["from"]},
+                     "snippet": sysreply["body"]}, st,
+                    lookup_by_message_id=lambda m: q0 if m == "ask-0@claw" else None)
+chk(5, "Sponsor 回复被接受", r["action"] == "processed")
+
+# 走 L3 审批：批准后 IT 开只读账号，凭证注册进来
+g = gate("connect_source", {"source": SRC}, "scen")
+chk(5, "接入数据源需要审批（L3）",
+    isinstance(g, dict) and "PENDING_APPROVAL" in g.get("message", ""))
+src_aid = st.pending(action_hash("connect_source", {"source": SRC}), "scen")
+admin.decide(src_aid, "approve", SCEN["roles"]["sponsor"])
+connector.register_source(SRC, _real_bootstrap[SRC], approval_id=src_aid)
+chk(5, "批准后数据源才注册进来", SRC in connector.known_sources(), src_aid[:8])
+
+# ---- 幕 3：拿到凭证，才能扫描 ----
+tables = data_tools.list_source_tables(SRC)["tables"]
+chk(6, "扫描到源系统的表", len(tables) >= 6, f"{len(tables)} 张")
+chk(6, "此时仍没有任何 owner 信息", st.resolve_role("owner:fin") is None,
+    "知道有哪些表 ≠ 知道谁负责")
+
+# ---- 幕 4-5：问 Sponsor，拿到转介 ----
+qid, _ = st.ask("scen", f"{SRC}", SCEN["acts"][7]["question"],
+                [{"key": "who", "label": "请告知联系人"}], "sponsor")
+chk(5, "已向 Sponsor 发起提问", bool(qid))
+
+reply = SCEN["acts"][5]["inbound"]
 msg = {"id": "m3", "headers": {**reply["headers"], "Message-ID": "<r3@x>",
                                "From": reply["from"]}, "snippet": reply["body"]}
 r = inbound.process(msg, st, lookup_by_message_id=lambda m: qid if m == "ask-1@claw" else None)
-chk(3, "Sponsor 回复被接受（在白名单内）", r["action"] == "processed", r.get("why", ""))
-chk(3, "意图识别为转介", r["intent"]["intent"] == "DELEGATE", r["intent"]["intent"])
+chk(6, "Sponsor 回复被接受（在白名单内）", r["action"] == "processed", r.get("why", ""))
+chk(6, "意图识别为转介", r["intent"]["intent"] == "DELEGATE", r["intent"]["intent"])
 
 # 按转介内容登记角色（真实实现里由 LLM 抽取人名+邮箱，这里直接用剧本给定值）
 admin.assign_role("owner:fin", SCEN["roles"]["owner:fin"], SCEN["roles"]["sponsor"], "boss 转介")
 admin.assign_role("owner:crm", SCEN["roles"]["owner:crm"], SCEN["roles"]["sponsor"], "boss 转介")
-chk(3, "角色已登记且可解析", st.resolve_role("owner:fin") == SCEN["roles"]["owner:fin"])
+chk(6, "角色已登记且可解析", st.resolve_role("owner:fin") == SCEN["roles"]["owner:fin"])
 
 # ---- 幕 4：⚠️ 陌生人冒充 ----
-atk = SCEN["acts"][3]["inbound"]
+atk = SCEN["acts"][6]["inbound"]
 r = inbound.process({"id": "m4", "headers": {**atk["headers"], "Message-ID": "<r4@x>",
                                              "From": atk["from"]},
                      "snippet": atk["body"]}, st)
-chk(4, "⚠️ 陌生人冒充 owner 被拒", r["action"] == "reject" and r["why"] == "sender_not_allowed",
+chk(7, "⚠️ 陌生人冒充 owner 被拒", r["action"] == "reject" and r["why"] == "sender_not_allowed",
     atk["from"])
 
 # ---- 幕 5-6：问王姐，她认领两张、不认识第三张 ----
-q2, _ = st.ask("scen", f"{SRC}.fin", SCEN["acts"][4]["question"],
+q2, _ = st.ask("scen", f"{SRC}.fin", SCEN["acts"][7]["question"],
                [{"key": "list", "label": "请列出属于财务的表"}], "owner:fin")
-chk(5, "向 owner:fin 发起提问", bool(q2))
-chk(5, "在办未超 WIP 上限", st.open_count("owner:fin") <= 5, f"{st.open_count('owner:fin')} 件")
+chk(8, "向 owner:fin 发起提问", bool(q2))
+chk(8, "在办未超 WIP 上限", st.open_count("owner:fin") <= 5, f"{st.open_count('owner:fin')} 件")
 
-w = SCEN["acts"][5]["inbound"]
+w = SCEN["acts"][8]["inbound"]
 r = inbound.process({"id": "m6", "headers": {**w["headers"], "Message-ID": "<r6@x>",
                                              "From": w["from"]}, "snippet": w["body"]}, st)
-chk(6, "王姐（角色持有人）的回复被接受", r["action"] == "processed")
+chk(9, "王姐（角色持有人）的回复被接受", r["action"] == "processed")
 st.remember(f"{SRC}.legacy_export", "ownership", "无人认领：财务表示未见过",
             SCEN["roles"]["owner:fin"])
-chk(6, "无人认领的表被记录", st.known(f"{SRC}.legacy_export", "ownership") is not None)
+chk(9, "无人认领的表被记录", st.known(f"{SRC}.legacy_export", "ownership") is not None)
 
 # ---- 幕 7：⚠️ 正文说「我同意」 ----
-fake = SCEN["acts"][6]["inbound"]
+fake = SCEN["acts"][9]["inbound"]
 r = inbound.process({"id": "m7", "headers": {**fake["headers"], "Message-ID": "<r7@x>",
                                              "From": fake["from"]}, "snippet": fake["body"]}, st)
-chk(7, "正文被分类为 DECISION", r["intent"]["intent"] == "DECISION")
-chk(7, "⚠️ 但正文不作数，仍需点击", inbound.decision_still_requires_click(r["intent"]))
+chk(10, "正文被分类为 DECISION", r["intent"]["intent"] == "DECISION")
+chk(10, "⚠️ 但正文不作数，仍需点击", inbound.decision_still_requires_click(r["intent"]))
 args_fin = {"table": "fin_monthly", "source": SRC}
 g = gate("ingest_table", args_fin, "scen")
-chk(7, "⚠️ 门禁仍然拦住（只认票据不认文本）",
+chk(10, "⚠️ 门禁仍然拦住（只认票据不认文本）",
     isinstance(g, dict) and "PENDING_APPROVAL" in g.get("message", ""))
 
 # ---- 幕 8：真正点击批准 ----
 aid = st.pending(action_hash("ingest_table", args_fin), "scen")
-chk(8, "审批请求已落库", aid is not None)
+chk(11, "审批请求已落库", aid is not None)
 admin.decide(aid, "approve", st.resolve_role("owner:fin"))
-chk(8, "批准后放行", gate("ingest_table", args_fin, "scen") is None)
-chk(8, "审批邮件确实发给了当前角色持有人",
+chk(11, "批准后放行", gate("ingest_table", args_fin, "scen") is None)
+chk(11, "审批邮件确实发给了当前角色持有人",
     any(s[0] == "approval" and s[1] == SCEN["roles"]["owner:fin"] for s in REC.sent),
     str([s[1] for s in REC.sent if s[0] == "approval"]))
 
 # ---- 幕 9：⚠️ 拿财务票据接 CRM 的 PII 表 ----
 g = gate("ingest_table", {"table": "crm_customer", "source": SRC}, "scen")
-chk(9, "⚠️ 越权接入被拦（参数指纹绑定）",
+chk(12, "⚠️ 越权接入被拦（参数指纹绑定）",
     isinstance(g, dict) and g.get("action") == "block", (g or {}).get("message", "")[:40])
 
 # ---- 幕 10：中途换人 ----
 pend_before = st.open_count("owner:fin")
-admin.assign_role("owner:fin", SCEN["acts"][9]["to"], SCEN["roles"]["sponsor"], "王姐转岗")
-chk(10, "角色指向新人", st.resolve_role("owner:fin") == SCEN["acts"][9]["to"])
-chk(10, "未决事项数量不变（跟角色不跟人）", st.open_count("owner:fin") == pend_before,
+admin.assign_role("owner:fin", SCEN["acts"][12]["to"], SCEN["roles"]["sponsor"], "王姐转岗")
+chk(13, "角色指向新人", st.resolve_role("owner:fin") == SCEN["acts"][12]["to"])
+chk(13, "未决事项数量不变（跟角色不跟人）", st.open_count("owner:fin") == pend_before,
     f"{pend_before} → {st.open_count('owner:fin')}")
-chk(10, "历史决定未被改写",
+chk(13, "历史决定未被改写",
     admin.db.execute("SELECT count(*) FROM decisions").fetchone()[0] >= 1)
 
 # ---- 幕 11：无人认领的表 ----
 g = gate("ingest_table", {"table": "legacy_export", "source": SRC}, "scen")
-chk(11, "无人认领的表仍需审批，不自行接入",
+chk(14, "无人认领的表仍需审批，不自行接入",
     isinstance(g, dict) and g.get("action") == "block")
 
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")

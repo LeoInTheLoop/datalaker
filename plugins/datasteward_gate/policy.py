@@ -28,7 +28,7 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     "define_semantics":     (Level.L2, "steward"),
     "apply_cleaning_rule":  (Level.L2, "steward"),
     # --- L3 需 Owner 审批 ---
-    "connect_source":       (Level.L3, "owner"),
+    "connect_source":       (Level.L3, "sponsor"),   # 起步阶段还没有 owner
     "ingest_table":         (Level.L3, "owner"),
     "publish_gold":         (Level.L3, "owner"),
     "grant_read":           (Level.L3, "owner"),
