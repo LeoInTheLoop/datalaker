@@ -51,6 +51,7 @@ if docker ps --format '{{.Names}}' | grep -q datalaker-source_pg-1; then
   $PY tests/test_sync.py || rc=1
   ( unset DATASTEWARD_DSN; $PY tests/test_double_confirm.py ) || rc=1
   ( unset DATASTEWARD_DSN; $PY tests/test_inbound.py ) || rc=1
+  ( unset DATASTEWARD_DSN; $PY tests/test_inbound_en.py ) || rc=1
   ( unset DATASTEWARD_DSN; $PY tests/test_scenario_discovery.py ) || rc=1
 else
   echo "  SKIP  Postgres 未启动"

@@ -78,17 +78,50 @@ INTENTS = ("DECISION", "QUESTION", "DELEGATE", "NOT_MY_SCOPE", "NOISE", "UNCLEAR
 # DECISION_NEG 归并回 DECISION —— 对外只暴露枚举里的六类
 _ALIAS = {"DECISION_NEG": "DECISION"}
 
+# 英文规则不是中文的直译——办公邮件有自己的说法：
+# 批准说 LGTM / go ahead，转介说 loop in / check with，
+# 推脱说 not my wheelhouse。按中文模式翻译过去会漏掉大半。
 _RULES = [
-    ("NOISE", (r"out of office", r"automatic reply", r"自动回复", r"休假", r"年假中")),
-    ("DELEGATE", (r"(找|问|联系|转给)\s*[一-龥A-Za-z]{1,10}(\s*[（(<]?[\w.@]+@|\s*(吧|看看|处理))",
-                  r"ask\s+\w+", r"forward(ed)?\s+to")),
-    ("NOT_MY_SCOPE", (r"不(归|属于)我(管|负责)", r"不是我的", r"not my (job|scope|area)")),
+    ("NOISE", (r"\bout of office\b", r"\booo\b", r"automatic(ally)? repl",
+               r"auto-?repl", r"\bon (leave|vacation|holiday|pto)\b",
+               r"currently away", r"will be back on",
+               r"自动回复", r"休假", r"年假中", r"不在办公室")),
+    # 「找运营负责人对一下」也是转介——职位描述同样算，不要求紧跟人名。
+    # 这类转介**不是终点而是中间态**：知道要转，但不知道转给谁。
+    ("DELEGATE", (r"(找|问|联系|转给|对接)\s*[一-龥A-Za-z]{1,12}",
+                  # 英文办公邮件的转介说法，与中文并不对应
+                  r"\bloop(ing)? in\b", r"\bcc'?(ing|ed)?\b\s+\w+",
+                  r"\b(reach out|check|speak|talk|connect|sync) (to|with)\s+\w+",
+                  r"\bask\s+\w+", r"\bforward(ed|ing)?\s+to\b",
+                  r"\b\w+\s+owns\s+(this|that|it)\b",
+                  r"\bdefer(ring)? to\b", r"\bbest person (is|would be)\b",
+                  # 英文常用「X should be able to / X would know」表示转介，
+                  # 并不出现 ask/loop in 这类动词
+                  r"\b\w+\s+(should|would|can|could)\s+(be able to|know|have|help)\b",
+                  r"\b(is|are) the right (person|people|team|contact)\b",
+                  r"\b(try|talk to|ping)\s+[A-Z]\w+",
+                  r"\byou'?ll need to (ask|check|contact)\b")),
+    ("NOT_MY_SCOPE", (r"不(归|属于)我(管|负责)", r"不是我的", r"我不管",
+                      r"\bnot my (job|scope|area|team|call|remit|wheelhouse|table)\b",
+                      r"\b(i (don'?t|do not) own)\b", r"\bwrong person\b",
+                      r"\boutside (my|our) (scope|remit|area)\b",
+                      r"\bnot (the )?owner\b")),
     # 中英文分开：\b 词边界在中文字符之间不成立，
     # 「我同意接入」里「同意」后面跟中文，加 \b 会漏掉
-    ("DECISION", (r"(我?同意|批准了?|可以的?|没问题)",
-                  r"\b(approve[d]?|ok|yes|agreed)\b")),
-    ("DECISION_NEG", (r"(拒绝|不行|不同意|不批)", r"\b(deny|denied|reject(ed)?|no)\b")),
-    ("QUESTION", (r"[?？]\s*$", r"^(为什么|什么|哪个|谁|怎么|why|what|which|who|how)")),
+    ("DECISION", (r"(我?同意|批准了?|可以的?|没问题|通过了?)",
+                  # LGTM/SGTM/+1/ship it 是最常见的批准说法，approve 反而少见
+                  r"\b(approve[d]?|approval granted|agreed?)\b",
+                  r"\b(lgtm|sgtm)\b", r"\+1\b",
+                  r"\b(go ahead|green ?light|ship it|sounds good|fine by me)\b",
+                  r"\b(ok(ay)? to (proceed|go)|please proceed)\b")),
+    ("DECISION_NEG", (r"(拒绝|不行|不同意|不批|先别)",
+                      r"\b(deny|denied|reject(ed)?)\b",
+                      r"\b(hold off|not yet|let'?s not|no ?go|stand down)\b")),
+    ("QUESTION", (r"[?？]\s*$",
+                  r"^(为什么|什么|哪个|谁|怎么|能否|是否)",
+                  r"^\s*(why|what|which|who|whom|how|when|where)\b",
+                  r"^\s*(can|could|would|should|do|does|did|is|are|any) (you|we|this|that|i)\b",
+                  r"\b(clarify|explain|not sure what)\b")),
 ]
 
 
@@ -116,6 +149,144 @@ def classify_intent(body: str, headers: dict | None = None) -> dict:
 
     return {"intent": "UNCLEAR", "confidence": 0.3, "by": "no_rule",
             "note": "规则未命中，应交模型复核；仍不确定则回信澄清，不推进"}
+
+
+# 转介目标抽取：有邮箱才算「解析完成」
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_TARGET = re.compile(r"(?:找|问|联系|转给|对接)\s*([一-龥A-Za-z][一-龥A-Za-z0-9_.]{0,15})")
+# 英文：loop in Sarah / check with the ops lead / Mike owns this
+_TARGET_EN = re.compile(
+    r"(?:loop(?:ing)? in|cc'?(?:ing|ed)?|reach out to|check with|speak (?:to|with)|"
+    r"talk to|ask|forward(?:ed|ing)? to|defer(?:ring)? to|connect (?:to|with))\s+"
+    r"((?:the\s+)?[A-Za-z][\w.'-]*(?:\s+(?:lead|owner|team|manager|admin|head))?)",
+    re.I)
+_OWNS_EN = re.compile(r"\b((?:the\s+)?[A-Z][\w.'-]+)\s+owns\s+(?:this|that|it)\b")
+# 职位描述而非人名 —— 与中文的「负责人」同类，都需要澄清
+_VAGUE_EN = ("lead", "owner", "team", "manager", "head", "admin", "someone",
+             "somebody", "person", "department", "dept")
+# 代词不是转介目标：「Mike owns this, ask him」里该抓的是 Mike 不是 him
+_PRONOUNS = {"him", "her", "them", "me", "us", "you", "it", "he", "she",
+             "they", "this", "that", "these", "those", "someone", "somebody"}
+# 泛指不是具体目标：「ask each team」问不出「Who is each team?」这种话
+_QUANTIFIERS = ("each", "every", "all", "any", "both", "various", "several",
+                "respective", "relevant", "individual")
+# 「X should be able to / X would know」里的 X
+_ABLE_EN = re.compile(
+    r"\b((?:the\s+)?[A-Za-z][\w.'-]*(?:\s+(?:lead|owner|team|manager|admin|head))?)"
+    r"\s+(?:should|would|can|could)\s+(?:be able to|know|have|help)", re.I)
+
+
+def _is_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text or "")
+# 抽取会连着后面的动词一起吞进来（「运营负责人对一下」），在这里截断
+_TAIL = re.compile(
+    r"(对一下|对下|看一下|看下|问一下|确认|核实|看看|处理|聊聊|沟通|了解|问问|要一下|拿一下|同步|跟进|核对).*$")
+_LEAD = re.compile(r"^(一下|下|个|的)")
+
+
+def parse_delegation(body: str) -> dict:
+    """解析转介：转给谁、有没有联系方式。
+
+    **DELEGATE 是中间态不是终点。**
+    「找王姐 wang@acme.com」可以直接联系；
+    「你找运营负责人对一下」只知道要转、不知道转给谁——必须追问。
+    把这两种混为一谈，链路就在这里断了。
+    """
+    text = body or ""
+    emails = _EMAIL.findall(text)
+    m = _TARGET.search(text)
+    if m:
+        raw = _LEAD.sub("", _TAIL.sub("", m.group(1)))
+    else:
+        # 「X owns this」比「ask him」更明确，先试它
+        raw = ""
+        mo = _OWNS_EN.search(text) or _ABLE_EN.search(text)
+        if mo:
+            raw = mo.group(1).strip()
+        else:
+            for cand in _TARGET_EN.finditer(text):
+                c = cand.group(1).strip().rstrip(".,;:!?")
+                head = c.lower().split()[0] if c else ""
+                if c.lower() not in _PRONOUNS and head not in _QUANTIFIERS:
+                    raw = c
+                    break
+        raw = raw.rstrip(".,;:!?")
+    raw = raw.rstrip("的地得，,。 ")
+    raw = re.sub(r"(吧|呢|啊|哦|嘛|了|一下)+$", "", raw)
+    # 「负责人」「那边」这类是职位/指代，不是人名
+    low = raw.lower()
+    if low and low.split()[0] in _QUANTIFIERS:
+        raw, low = "", ""
+    # 是职位/指代（不知道是谁），还是人名（知道是谁但没邮箱）——问法不同
+    is_role = bool(raw) and (
+        any(w in raw for w in ("负责人", "那边", "他们", "同事", "部门", "团队",
+                               "这张表", "该表"))
+        or low.startswith("the ")
+        or any(w == low or low.endswith(" " + w) for w in _VAGUE_EN))
+    return {"raw": raw, "email": emails[0] if emails else None,
+            "resolved": bool(emails), "is_role": is_role,
+            "cjk": _is_cjk(text),
+            "vague": (is_role or not raw) and not emails}
+
+
+def _q_lang(body: str, zh: str, en: str) -> str:
+    """按对方的语言回话。用中文回英文邮件是很扎眼的失礼。"""
+    return zh if _is_cjk(body) else en
+
+
+def next_action(intent_result: dict, body: str = "") -> dict:
+    """意图之后：**接下来做什么**。
+
+    分类只回答「这是什么」，不回答「怎么办」——
+    而 Agent 需要的是后者。低置信度的默认动作是问，不是猜（5.2）。
+    """
+    it = intent_result.get("intent")
+
+    if it == "DELEGATE":
+        d = parse_delegation(body)
+        if d["resolved"]:
+            return {"action": "contact_new_person", "target": d["email"],
+                    "note": f"转介到 {d['raw'] or d['email']}，可直接联系"}
+        cjk = d.get("cjk", True)
+        who = d["raw"] or ("你提到的负责人" if cjk else "the person you mentioned")
+        if "这张表" in who or "该表" in who:
+            who = "这张表的负责人"
+
+        # 知道是谁只是缺邮箱 vs 连是谁都不知道 —— 问法不同，
+        # 且**按对方的语言问**，不要用中文回英文邮件
+        if not d["raw"]:
+            q = ("方便告诉我具体该找谁吗？给个邮箱我直接联系。" if cjk else
+                 "Could you point me to the specific person and their email? "
+                 "I'll follow up directly.")
+        elif d.get("is_role"):
+            q = (f"{who}是哪位？方便给个邮箱吗？我直接联系确认。" if cjk else
+                 f"Who is {who}? Could you share their email so I can follow up directly?")
+        else:
+            q = (f"能给一下{who}的邮箱吗？我直接联系确认。" if cjk else
+                 f"Could you share {who}'s email? I'll follow up with them directly.")
+        return {"action": "clarify_who", "target": who, "question": q,
+                "note": "转介目标未解析——这是新的一次提问，计入 WIP"}
+
+    if it == "NOT_MY_SCOPE":
+        return {"action": "find_other_owner",
+                "question": _q_lang(body, "了解。那这块应该找谁？", "Understood. Who should I talk to about this instead?"),
+                "note": "不再催这个人（10.2）"}
+
+    if it == "QUESTION":
+        return {"action": "answer_then_reask",
+                "note": "先回答对方的问题，再重新发起审批"}
+
+    if it == "DECISION":
+        return {"action": "await_click",
+                "note": "正文表态不作数，等待签名链接被点击（第 9 节）"}
+
+    if it == "NOISE":
+        return {"action": "ignore_keep_timer",
+                "note": "记录但不重置超时计时器（10.2）"}
+
+    return {"action": "clarify_intent",
+            "question": _q_lang(body, "抱歉没太看懂，能再说明一下吗？", "Sorry, I didn't quite follow. Could you clarify?"),
+            "note": "低置信度默认动作是问，不是猜"}
 
 
 def decision_still_requires_click(intent_result: dict) -> bool:

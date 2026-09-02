@@ -16,6 +16,10 @@ import re
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# 「看起来是空」的常见写法。真实数据里这些比 NULL 更常见
+BLANK_TOKENS = "('null', 'none', 'n/a', 'na', 'nan', '-', '--', " \
+               "'未知', '无', '空', 'unknown', 'not available')"
+
 
 class BadIdentifier(ValueError):
     """表名/列名不合法。参数化的第一道关：标识符必须是纯标识符。"""
@@ -71,11 +75,17 @@ def profile_table(source_id: str, table: str, sample_rows: int = 50000) -> dict:
         return {"table": table, "error": "无列信息"}
 
     # 一次查询算完所有列，而不是每列一次 —— 减少对源库的往返
+    # bronze 原样落地意味着「空」有多种形式：NULL、空串、以及各类占位符。
+    # 只算 IS NULL 会严重低估——真实脏数据里空串和「未知」比 NULL 更常见。
     parts = ["count(*) AS _n"]
     for c in cols:
         _ident(c, "列名")
         parts.append(f'count("{c}") AS "{c}__nonnull"')
         parts.append(f'count(DISTINCT "{c}") AS "{c}__distinct"')
+        parts.append(
+            f'count(*) FILTER (WHERE "{c}" IS NULL '
+            f'OR btrim("{c}"::text) = \'\' '
+            f'OR lower(btrim("{c}"::text)) IN {BLANK_TOKENS}) AS "{c}__blank"')
     sql = (f'SELECT {", ".join(parts)} FROM '
            f'(SELECT * FROM "{table}" LIMIT {int(sample_rows)}) _s')
     r = _q(source_id, sql, purpose="profiling")
@@ -88,9 +98,11 @@ def profile_table(source_id: str, table: str, sample_rows: int = 50000) -> dict:
     for c in cols:
         nonnull = int(v[f"{c}__nonnull"])
         distinct = int(v[f"{c}__distinct"])
+        blank = int(v.get(f"{c}__blank", 0) or 0)
         out.append({
             "column": c,
-            "null_rate": round(1 - nonnull / n, 4),
+            "null_rate": round(1 - nonnull / n, 4),      # 严格 NULL
+            "blank_rate": round(blank / n, 4),           # NULL + 空串 + 占位符
             "distinct": distinct,
             "distinct_rate": round(distinct / n, 4) if n else 0,
             "is_constant": distinct <= 1 and n > 1,
@@ -126,10 +138,14 @@ def run_dq_check(source_id: str, table: str, thresholds: dict | None = None) -> 
             findings.append({"column": c["column"], "issue": "primary_key_not_unique",
                              "severity": "high",
                              "detail": f"主键列去重后 {c['distinct']} < 采样 {prof['sampled_rows']}"})
-        if c["null_rate"] > th["null_rate_max"]:
+        # 用 blank_rate 判定：bronze 里空串与占位符和 NULL 是一回事
+        rate = max(c.get("blank_rate", 0), c["null_rate"])
+        if rate > th["null_rate_max"]:
+            how = ("空值" if c["null_rate"] >= c.get("blank_rate", 0)
+                   else "空值/占位符")
             findings.append({"column": c["column"], "issue": "high_null_rate",
                              "severity": "medium",
-                             "detail": f"空值率 {c['null_rate']:.1%} 超过阈值 {th['null_rate_max']:.0%}"})
+                             "detail": f"{how}率 {rate:.1%} 超过阈值 {th['null_rate_max']:.0%}"})
         if c["is_constant"]:
             findings.append({"column": c["column"], "issue": "constant_column",
                              "severity": "low", "detail": "全表同一个值，可能是废弃字段"})
