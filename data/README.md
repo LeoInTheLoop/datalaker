@@ -1,34 +1,44 @@
-# 验证数据集
+# 数据集
 
-按 readme 第 16.4 节分层。**数据文件已 gitignore，只有本说明入库。**
+**大数据集放外置盘，项目里只留符号链接。**
 
-## 放哪里
-
-| 数据集 | 大小 | 建议位置 |
-|---|---|---|
-| Northwind | 342K | 项目内 `data/`（默认） |
-| Olist | ~45MB | 项目内 `data/` |
-| Home Credit | 2.68GB | **项目外**，用 `.env` 的 `DATASETS_DIR` 指向 |
-
-理由：git 不适合存数据一律不入库；小的放项目内省事；
-大的放项目内会撑大 docker build context 和备份。
-
-> ⚠️ 若把 `DATASETS_DIR` 指到外置盘，注意 Mac 睡眠后外置盘会掉线——
-> 这台机器的 Docker 数据盘就在外置盘上，踩过一次。
-
-| 数据集 | 规模 | 用途 | 获取 |
+| 数据集 | 位置 | 大小 | 用途 |
 |---|---|---|---|
-| Northwind | 7 表，极小 | CI regression，每次改动几分钟跑完 | 公开，无需认证 |
-| Olist | 9 表 / 10 万订单 | 主 Demo | Kaggle，需 API key |
-| Home Credit | 10 文件 / 2.68GB | 压力测试，证明非 hard-code | Kaggle，需 API key |
+| Northwind | `data/northwind/`（项目内） | 342K | CI regression |
+| **Olist** | 符号链接 → 外置盘 | 126MB | 主 Demo（真实脏数据） |
+| Home Credit | 未下载 | 2.68GB | R5 压力测试 |
+| exports | `data/exports/`（项目内） | 小 | 接入路径等价性测试的导出文件 |
 
-## Kaggle 认证
+外置盘路径：`/Volumes/kong disk 727899339/datalaker-datasets/`
 
-kaggle.com → Account → Create New API Token → 下载 `kaggle.json` 到 `~/.kaggle/`，
-然后 `chmod 600 ~/.kaggle/kaggle.json`。
+## ⚠️ 外置盘掉线时
+
+Mac 睡眠后外置盘会断开，此时：
+
+- `data/olist` 符号链接**指向不存在的路径**
+- Docker 也会连带出问题（数据盘在同一块盘上）
+
+判断方法：
 
 ```bash
-pip install kaggle
-kaggle datasets download -d olistbr/brazilian-ecommerce -p data/olist --unzip
-kaggle competitions download -c home-credit-default-risk -p data/homecredit
+ls -lh data/olist/          # 断了会报 No such file or directory
+```
+
+处理：插回盘即可，符号链接自动恢复。**不要删链接重建。**
+
+## Kaggle
+
+凭证在 `~/.kaggle/kaggle.json`（0600）。新版 token 只需 `key`，无需 username。
+
+```bash
+.venv/bin/python -c "
+import kaggle; kaggle.api.authenticate()
+kaggle.api.dataset_download_files('olistbr/brazilian-ecommerce',
+    path='/Volumes/kong disk 727899339/datalaker-datasets/olist', unzip=True)"
+```
+
+Home Credit（R5 再下）：
+
+```bash
+kaggle competitions download -c home-credit-default-risk -p <外置盘路径>
 ```

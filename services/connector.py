@@ -43,6 +43,8 @@ _BOOTSTRAP = {
                  or (_E.get("SOURCE_DSN", "").replace("/olist", "/northwind")),
     "acme": _E.get("ACME_DSN", "")
             or (_E.get("SOURCE_DSN", "").replace("/olist", "/acme")),
+    "olist_raw": _E.get("OLIST_DSN", "")
+                 or (_E.get("SOURCE_DSN", "").replace("/olist", "/olist_raw")),
 }
 
 _REGISTERED: dict = {}
