@@ -17,11 +17,38 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 
 
 def _ensure_path():
-    """把 datalaker 的模块路径接上。延迟到真正要用时才做。"""
+    """把 datalaker 的模块路径接上，并把 `plugins` 这个名字要回来。
+
+    **两个项目都有顶层 `plugins/` 包。** Hermes 启动时会导入它自己的
+    （它就是从 `<repo>/plugins/` 加载插件的），于是 `sys.modules["plugins"]`
+    早就被占了，我们的 `from plugins.datasteward_gate...` 一律 ModuleNotFoundError。
+    25 个文件在用这个路径，全改是 M7 的事；在那之前用别名把它桥过去。
+
+    这不是权宜之计的借口 —— 它恰恰是「我们的 plugins/ 必须改名」
+    最硬的证据，记在 docs/restructure.md 的 M7 里。
+    """
     for p in ("", "services", "plugins"):
         d = os.path.join(ROOT, p) if p else ROOT
         if d not in sys.path:
             sys.path.insert(0, d)
+
+    if "plugins.datasteward_gate" in sys.modules:
+        return
+    try:
+        import importlib
+        ours = importlib.import_module("datasteward_gate")
+    except Exception:                                        # noqa: BLE001
+        return
+    sys.modules["plugins.datasteward_gate"] = ours
+    for sub in ("approvals", "policy"):
+        try:
+            sys.modules[f"plugins.datasteward_gate.{sub}"] = importlib.import_module(
+                f"datasteward_gate.{sub}")
+        except Exception:                                    # noqa: BLE001
+            pass
+    host = sys.modules.get("plugins")
+    if host is not None and not hasattr(host, "datasteward_gate"):
+        setattr(host, "datasteward_gate", ours)
 
 
 def register(ctx):

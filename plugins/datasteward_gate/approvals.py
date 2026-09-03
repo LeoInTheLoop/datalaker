@@ -215,13 +215,27 @@ class PgStore:
     def __exit__(self, *exc):
         self.close()
 
-    def find_valid(self, action_hash_, run_id):
+    def find_valid(self, action_hash_, run_id=None):
+        """有效票据 = 已批准 + 未消费 + 未过期。
+
+        **按动作指纹匹配，run_id 只记录不参与。**
+
+        原先把 run_id 也放进 WHERE，后果是审批只在同一个进程/会话里有效：
+        Agent 一重启，人批过的东西就作废，得重新打扰一遍 —— 这与 readme 4.1
+        「状态不能只活在进程里」直接冲突。接上 Hermes 之后立刻暴露：
+        每次 `hermes -z` 是新会话，同一个动作的 action_hash 一模一样，
+        run_id 却是新 UUID，于是批准永远消费不掉。
+
+        去掉 run_id 不放松安全：批的是「接入 shippers」这件事，
+        动作指纹逐字节相同就意味着效果相同（机制二）；一次性（`used_at`）
+        与 72 小时过期（`expires_at`）两道限制都还在。
+        """
         with self.db.cursor() as c:
             c.execute(
                 "SELECT a.id FROM approvals a JOIN decisions d ON d.approval_id = a.id "
-                "WHERE a.action_hash=%s AND a.run_id=%s AND d.decision='approve' "
+                "WHERE a.action_hash=%s AND d.decision='approve' "
                 "AND a.used_at IS NULL AND a.expires_at > now() LIMIT 1",
-                (action_hash_, run_id))
+                (action_hash_,))
             return c.fetchone()
 
     def is_denied(self, action_hash_):
@@ -230,12 +244,20 @@ class PgStore:
                       "WHERE a.action_hash=%s AND d.decision='deny' LIMIT 1", (action_hash_,))
             return c.fetchone() is not None
 
-    def pending(self, action_hash_, run_id):
+    def pending(self, action_hash_, run_id=None):
+        """已在等的同一动作。**同样不看 run_id。**
+
+        看 run_id 的后果是每个新会话都为同一件事再发一份审批 ——
+        实测三次 `hermes -z` 之后 approvals 里躺着三行同指纹的待决请求。
+        人会被同一件事重复打扰，而 readme 10.7 的 WIP 限制存在的理由
+        正是「不允许把任何人淹没」。
+        """
         with self.db.cursor() as c:
             c.execute(
                 "SELECT a.id FROM approvals a LEFT JOIN decisions d ON d.approval_id = a.id "
-                "WHERE a.action_hash=%s AND a.run_id=%s AND d.id IS NULL "
-                "AND a.expires_at > now() LIMIT 1", (action_hash_, run_id))
+                "WHERE a.action_hash=%s AND d.id IS NULL "
+                "AND a.abandoned_at IS NULL AND a.expires_at > now() LIMIT 1",
+                (action_hash_,))
             r = c.fetchone()
             return str(r[0]) if r else None
 
@@ -462,13 +484,26 @@ class Store:
     action_hash = staticmethod(action_hash)
 
     # ---------- Agent 侧：读 ----------
-    def find_valid(self, action_hash_, run_id):
-        """有效票据 = 已批准 + 未消费 + 未过期。"""
+    def find_valid(self, action_hash_, run_id=None):
+        """有效票据 = 已批准 + 未消费 + 未过期。
+
+        **按动作指纹匹配，run_id 只记录不参与。**
+
+        原先把 run_id 也放进 WHERE，后果是审批只在同一个进程/会话里有效：
+        Agent 一重启，人批过的东西就作废，得重新打扰一遍 —— 这与 readme 4.1
+        「状态不能只活在进程里」直接冲突。接上 Hermes 之后立刻暴露：
+        每次 `hermes -z` 是新会话，同一个动作的 action_hash 一模一样，
+        run_id 却是新 UUID，于是批准永远消费不掉。
+
+        去掉 run_id 不放松安全：批的是「接入 shippers」这件事，
+        动作指纹逐字节相同就意味着效果相同（机制二）；一次性（`used_at`）
+        与 72 小时过期（`expires_at`）两道限制都还在。
+        """
         return self.db.execute(
             "SELECT a.id FROM approvals a JOIN decisions d ON d.approval_id = a.id "
-            "WHERE a.action_hash=? AND a.run_id=? AND d.decision='approve' "
+            "WHERE a.action_hash=? AND d.decision='approve' "
             "AND a.used_at IS NULL AND a.expires_at > ? LIMIT 1",
-            (action_hash_, run_id, time.time()),
+            (action_hash_, time.time()),
         ).fetchone()
 
     def is_denied(self, action_hash_):
@@ -478,11 +513,19 @@ class Store:
             (action_hash_,),
         ).fetchone() is not None
 
-    def pending(self, action_hash_, run_id):
+    def pending(self, action_hash_, run_id=None):
+        """已在等的同一动作。**同样不看 run_id。**
+
+        看 run_id 的后果是每个新会话都为同一件事再发一份审批 ——
+        实测三次 `hermes -z` 之后 approvals 里躺着三行同指纹的待决请求。
+        人会被同一件事重复打扰，而 readme 10.7 的 WIP 限制存在的理由
+        正是「不允许把任何人淹没」。
+        """
         row = self.db.execute(
             "SELECT a.id FROM approvals a LEFT JOIN decisions d ON d.approval_id = a.id "
-            "WHERE a.action_hash=? AND a.run_id=? AND d.id IS NULL AND a.expires_at > ? LIMIT 1",
-            (action_hash_, run_id, time.time()),
+            "WHERE a.action_hash=? AND d.id IS NULL AND a.abandoned_at IS NULL "
+            "AND a.expires_at > ? LIMIT 1",
+            (action_hash_, time.time()),
         ).fetchone()
         return row[0] if row else None
 

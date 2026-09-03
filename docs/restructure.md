@@ -129,7 +129,7 @@ datalaker/
 | 阶段 | 做什么 | 完成的标志 |
 |---|---|---|
 | **M1 打通一条** ✅ | `list_source_tables` 注册进 Hermes，真模型问一句「northwind 有哪些表」→ 它调工具 → Connector 读真库 → 答出 14 张表与真实行数 | 已实测 |
-| **M2 挂上门禁** | 同一条路上换成 `ingest_table`（L3），验证挂起 → 邮件 → 点击 → 恢复**全程在 Hermes 里** | 挂起恢复不靠我的脚本 |
+| **M2 挂上门禁** ✅ | `ingest_table`（L3）挂起 → 批准 → 恢复 → 真写 bronze，全程在 Hermes 里 | 已实测；顺带修掉「审批绑会话」与「plugins 包撞车」 |
 | **M3 工具搬家** | `services/data_tools` 等一批批注册成 Hermes 工具，每搬一个跑一次回归 | 616 保持全绿 |
 | **M4 删重复** | 删掉 email 传输层、scheduler 循环，改用 Hermes 的 | 行数净减少 |
 | **M5 驱动反转** | `run_case_full.py` 从扮演 Agent 改成扮演人 | 大 case 里 Hermes 是主语 |
@@ -168,7 +168,37 @@ Hermes 零改动，插件住在 `datalaker/.hermes/plugins/claw/`，
 辅助请求不带 `tools`。早先不加区分，**辅助请求把剧本步骤吃掉了**，
 表现为工具从来没被调用而日志一切正常。现在按有无 `tools` 路由。
 
-### M2 进行中（2026-09-03 停在这里）
+### M2 完成（2026-09-04）
+
+完整闭环第一次全程在 Hermes 里：**L3 被拦 → 外部批准 → 下一次运行消费票据
+→ 真写了 bronze（5 行）→ 票据一次性，第三次重新挂起。**
+
+途中修掉两个**一直都在、只是以前不会暴露**的问题：
+
+#### ① 审批绑了会话，进程一重启就作废
+
+`find_valid` 与 `pending` 都把 `run_id` 放进 WHERE。以前驱动方是同一个
+长活脚本，run_id 不变，所以看不出来。接上 Hermes 之后每次 `hermes -z`
+是新会话：`action_hash` 逐字节相同（`d48622ae…`），`run_id` 却是新 UUID，
+于是**批准永远消费不掉**，而且每次会话都为同一件事再发一份审批 ——
+三次运行之后 approvals 里躺着三行同指纹的待决请求，人被同一件事打扰三遍。
+
+这与 readme 4.1「状态不能只活在进程里」直接冲突，也与 10.7「不允许把
+任何人淹没」冲突。改成**按动作指纹匹配，run_id 只记录不参与**：
+批的是「接入 shippers」这件事，指纹相同就意味着效果相同（机制二）；
+一次性（`used_at`）与 72 小时过期（`expires_at`）两道限制都还在。
+
+#### ② 两个项目都有顶层 `plugins/` 包
+
+Hermes 启动时导入它自己的 `plugins`（它就是从那儿加载插件的），
+`sys.modules["plugins"]` 被占，我们的 `from plugins.datasteward_gate...`
+一律 ModuleNotFoundError —— **25 个文件在用这个路径**。
+
+现在在插件的 `_ensure_path()` 里用别名桥过去。**这是 M7 必须改包名最硬的
+证据**：两个 `plugins` 撞车不是靠 sys.path 顺序能解决的，Hermes 先导入就先占名。
+M7 把 `plugins/datasteward_gate/` 搬成 `claw/gate/` 之后，那段桥接删掉。
+
+### M2 原始记录（2026-09-03）
 
 **已验证成立**（`tests/test_hermes_tool_loop.py`，17/18）：
 
