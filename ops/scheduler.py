@@ -4,8 +4,13 @@
 **独立于 Agent 运行**：Agent 挂了，催办和周报也不能停。
 这正是场景 3 缺的那个计时器——脚本本身不会自己跑。
 
+    每 1 分钟    恢复「等的人已经回了」的任务
     每 1 小时    超时逐级升级 → 优雅放弃
     每周一 09:00 周报（无进展也发）
+
+恢复放在这里而不是 callback 里，是因为**审批落库与任务往下走是两件事**：
+点击的人只负责给出决定，任务什么时候被拉起由调度决定。
+这样一条线崩了不会阻塞点击响应，也不需要 callback 认识任何 Pipeline。
 
 ponytail: 用一个循环 + 状态文件，不引入 APScheduler/Celery。
 容器重启后从状态文件恢复，不会重复发周报。
@@ -20,6 +25,7 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 STATE = pathlib.Path(os.environ.get("SCHEDULER_STATE", "/tmp/claw-scheduler.json"))
 ESCALATE_EVERY = int(os.environ.get("ESCALATE_INTERVAL_SEC", "3600"))
+RESUME_EVERY = int(os.environ.get("RESUME_INTERVAL_SEC", "60"))
 REPORT_DOW = int(os.environ.get("REPORT_DAY_OF_WEEK", "0"))    # 0=周一
 REPORT_HOUR = int(os.environ.get("REPORT_HOUR", "9"))
 
@@ -28,7 +34,7 @@ def load():
     try:
         return json.loads(STATE.read_text())
     except Exception:
-        return {"last_escalate": 0, "last_report_day": ""}
+        return {"last_escalate": 0, "last_report_day": "", "last_resume": 0}
 
 
 def save(st):
@@ -49,12 +55,16 @@ def run(script):
 
 
 def main():
-    print(f"scheduler 启动：升级每 {ESCALATE_EVERY}s，"
+    print(f"scheduler 启动：恢复每 {RESUME_EVERY}s，升级每 {ESCALATE_EVERY}s，"
           f"周报每周 {REPORT_DOW} 的 {REPORT_HOUR}:00", flush=True)
     while True:
         st = load()
         now = time.time()
         lt = time.localtime(now)
+
+        if now - st.get("last_resume", 0) >= RESUME_EVERY:
+            run("resume.py")
+            st["last_resume"] = now
 
         if now - st["last_escalate"] >= ESCALATE_EVERY:
             run("escalate.py")
@@ -72,6 +82,7 @@ def main():
 
 if __name__ == "__main__":
     if "--once" in sys.argv:
+        run("resume.py")
         run("escalate.py")
         run("weekly-report.py")
     else:

@@ -38,6 +38,9 @@ import data_tools
 class State(TypedDict, total=False):
     run_id: str
     source_id: str
+    watermark_col: str
+    allow_schema_change: bool
+    bronze: dict
     table: str
     profile: dict
     dq: dict
@@ -102,9 +105,26 @@ def node_gate(s: State) -> State:
 
 
 def node_apply(s: State) -> State:
-    """落 bronze。真正的写入在 R3 接上 Iceberg，这里先记结果。"""
-    return {"status": "ingested",
-            "message": f"{s['table']} 已接入 bronze（采样 {s['profile']['sampled_rows']} 行）"}
+    """落 bronze —— **真写**，经 Trino 以 `claw` 身份操作 Iceberg。
+
+    在此之前这个节点只是「记结果」，于是整条 Pipeline 跑完 lake 里什么都没有。
+    接上 `sync.sync_table` 之后，`iceberg.bronze` 里能查到真实行数，
+    「Agent 能不能把数据接进来」才第一次有了可验证的答案。
+
+    写入失败**不假装成功**：状态标 `ingest_failed`，消息带原因。
+    """
+    import sync
+
+    try:
+        r = sync.sync_table(s["source_id"], s["table"],
+                            watermark_col=s.get("watermark_col"),
+                            allow_schema_change=s.get("allow_schema_change", False))
+    except Exception as e:                                    # noqa: BLE001
+        return {"status": "ingest_failed",
+                "message": f"{s['table']} 写入 bronze 失败：{type(e).__name__}: {e}"}
+    return {"status": "ingested", "bronze": r,
+            "message": f"{s['table']} 已落 {r['bronze_table']}"
+                       f"（{r['row_count']:,} 行，策略 {r['strategy']}）"}
 
 
 def route_after_gate(s: State) -> str:
@@ -146,3 +166,54 @@ if __name__ == "__main__":
     if out.get("dq"):
         print(f"DQ     : passed={out['dq']['passed']}, "
               f"{len(out['dq']['findings'])} 项发现")
+
+
+# ---------------------------------------------------------------- 长时任务适配
+def as_run(run_id: str, params: dict, checkpoint: dict | None = None) -> dict:
+    """把这条 Pipeline 接进任务注册表（`services/runs.py`）。
+
+    Pipeline 本身**不阻塞等待人工** —— 它跑到门禁就正常结束。
+    这里负责把「结束的原因」翻译成 run 的状态：
+
+        pending_approval → waiting_human（记下在等哪份审批）
+        ingested         → done
+        denied           → abandoned（不会就同一动作重复发起）
+        其他             → failed
+
+    审批落库后由 `runs.resume_one` 重新调进来，Pipeline 从头跑一遍：
+    profiling 是幂等的，而 gate 这次会放行。**幂等比 checkpoint 便宜**。
+    """
+    import runs
+    from datasteward_gate import store
+    from datasteward_gate.approvals import action_hash
+
+    src, tbl = params["source_id"], params["table"]
+    s = run(src, tbl, run_id=run_id)
+    status, msg = s.get("status", ""), s.get("message", "")
+
+    if status == "pending_approval":
+        aid = store().pending(action_hash("ingest_table",
+                                          {"table": tbl, "source": src}), run_id)
+        runs.suspend(run_id, aid, {"stage": "gate", "table": tbl}, msg)
+    elif "WIP_LIMIT" in msg:
+        # **被 WIP 挡回来不是失败**，是「别人待办太多，等等再说」。
+        # 记成 failed 的话这条线就永远起不来了。
+        runs.suspend(run_id, None, {"stage": "wip", "table": tbl}, msg)
+    elif status == "ingested":
+        runs.finish(run_id, "done", msg)
+    elif status == "denied":
+        runs.finish(run_id, "abandoned", msg)
+    else:
+        runs.finish(run_id, "failed", msg or status)
+    return s
+
+
+def _register():
+    import runs
+    runs.register("ingest_table", as_run)
+
+
+try:                                     # 导入即注册，恢复器不必知道有哪些 Pipeline
+    _register()
+except Exception:                        # noqa: BLE001  —— 注册失败不该拖垮导入
+    pass
