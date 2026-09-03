@@ -137,6 +137,10 @@ else
 fi
 
 echo ""
+echo "########## 5.5 Hermes 工具环路（工具真跑在 Hermes 里 + 门禁在路上） ##########"
+$PY tests/test_hermes_tool_loop.py || rc=1
+
+echo ""
 echo "########## 6. 通知失败 ≠ 门禁打开 ##########"
 ( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_mail_iso.db python3 tests/test_mail_isolation.py ) || rc=1
 

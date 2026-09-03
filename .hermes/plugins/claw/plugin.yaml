@@ -1,0 +1,16 @@
+name: claw
+label: Data Steward Claw
+kind: standalone
+version: 0.1.0
+description: >
+  数据管家：把源系统的发现、画像、质量判定与接入做成参数化工具，
+  并在 pre_tool_call 上挂门禁 —— 未经审批的动作不会执行。
+author: datalaker
+# 声明才会加载 tools.py（Hermes 不靠「有没有这个文件」推断，
+# 否则插件把内部辅助函数放进 tools.py 就被误当成对外工具）
+provides_tools:
+  - list_source_tables
+hooks:
+  - pre_tool_call
+  - post_tool_call
+  - pre_approval_request

@@ -34,3 +34,8 @@ spike/
 # ---- 运行产物 ----
 /tmp/
 *.log
+
+# Hermes 的运行时 home：配置里有密钥，目录里有会话与状态 —— 不入库。
+# 插件本身（.hermes/plugins/）是代码，要入库。
+.hermes/home/
+.hermes/test-home/

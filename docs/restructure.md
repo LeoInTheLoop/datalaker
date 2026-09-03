@@ -128,7 +128,7 @@ datalaker/
 
 | 阶段 | 做什么 | 完成的标志 |
 |---|---|---|
-| **M1 打通一条** | 把 `list_source_tables` 一个工具注册进 Hermes，配好 email 平台，**用邮件跟它说一句「公司有哪些表」**，它调工具、门禁放行、回信 | 一次真实往返 |
+| **M1 打通一条** ✅ | `list_source_tables` 注册进 Hermes，真模型问一句「northwind 有哪些表」→ 它调工具 → Connector 读真库 → 答出 14 张表与真实行数 | 已实测 |
 | **M2 挂上门禁** | 同一条路上换成 `ingest_table`（L3），验证挂起 → 邮件 → 点击 → 恢复**全程在 Hermes 里** | 挂起恢复不靠我的脚本 |
 | **M3 工具搬家** | `services/data_tools` 等一批批注册成 Hermes 工具，每搬一个跑一次回归 | 616 保持全绿 |
 | **M4 删重复** | 删掉 email 传输层、scheduler 循环，改用 Hermes 的 | 行数净减少 |
@@ -147,6 +147,42 @@ M5 是真正的分水岭 —— 在它之前，所有「Agent 干得对不对」
    的组件，理由写在铁律 2。
 3. **判分器仍在体外**。`evals/` 不 import 被测代码这条不因重排松动 ——
    与铁律 2 同一条理由。
+
+### M1 实测记录（2026-09-03）
+
+Hermes 零改动，插件住在 `datalaker/.hermes/plugins/claw/`，
+靠 `HERMES_ENABLE_PROJECT_PLUGINS=1` 加载。途中摸清四件文档没写的事：
+
+| 发现 | 说明 |
+|---|---|
+| **standalone 插件的工具要在 `register()` 里注册** | manifest 的 `provides_tools` + `tools.py` 那条路只对 `kind: platform` 生效（网关启动时预加载）。照文档写不会报错，工具就是不出现 |
+| **插件默认不启用** | 扫到 57 个，没写进 `plugins.enabled` 的一律跳过。跟我们的工具白名单是同一条原则 |
+| **配置压过环境变量** | `model.base_url` 写死后 `OPENAI_BASE_URL` 不生效（与 `NOTIFY_CHANNEL` 那个坑同款） |
+| **非核心工具走延迟下发** | prompt 里只有 `tool_search` / `tool_call` / `tool_describe`，claw 的工具按需取 —— 与我们「不注入省 1.4 万 token」是同一个目的，**这条已经由上游解决了** |
+
+同时补了**模型桩**（`tests/model_stub.py`）：本地 OpenAI 兼容端点，由剧本
+驱动，Hermes 照常做工具分发与门禁。它让机制类断言可重复、不联网、零成本；
+「真模型会不会选对工具」仍由真端点单独验。
+
+桩本身也踩了一个坑：Hermes 一次运行会发多个请求（主对话 + 标题 + 记忆抽取），
+辅助请求不带 `tools`。早先不加区分，**辅助请求把剧本步骤吃掉了**，
+表现为工具从来没被调用而日志一切正常。现在按有无 `tools` 路由。
+
+## 7.5 关于改不改 Hermes 本体
+
+**可以改，但尽量不改** —— 因为这个 checkout 最终就是产品本身
+（Hermes → Data Steward Claw）。优先级：
+
+```
+① 项目插件（./.hermes/plugins/）  零改动，Hermes 可随时 rebase 上游
+② 配置 / 环境变量                 零改动
+③ 改 Hermes 本体                  可以，但每处都要能说清「为什么插件做不到」
+```
+
+M1 走的是 ①：`HERMES_ENABLE_PROJECT_PLUGINS=1` 时 Hermes 会扫
+`./.hermes/plugins/`，**插件住在 datalaker 仓库里**，Hermes 目录保持干净。
+等到需要改品牌、改默认 SOUL、或者某个钩子上游根本没有时，再动 ③ ——
+届时把每处改动记在这一节，rebase 上游时才知道要保住什么。
 
 ## 8. 已知的待定项
 
