@@ -161,8 +161,20 @@ aid = st.pending(action_hash("ingest_table", args_fin), "scen")
 chk(11, "审批请求已落库", aid is not None)
 admin.decide(aid, "approve", st.resolve_role("owner:fin"))
 chk(11, "批准后放行", gate("ingest_table", args_fin, "scen") is None)
+# 发信在后台线程（gate 有超时上限，SMTP 往返不能拖垮 hook），
+# 因此断言必须等它落地 —— 直接读 REC.sent 是竞态，会时红时绿。
+def _sent_to(addr, timeout=5.0):
+    import time as _t
+    end = _t.time() + timeout
+    while _t.time() < end:
+        if any(s[0] == "approval" and s[1] == addr for s in REC.sent):
+            return True
+        _t.sleep(0.05)
+    return False
+
+
 chk(11, "审批邮件确实发给了当前角色持有人",
-    any(s[0] == "approval" and s[1] == SCEN["roles"]["owner:fin"] for s in REC.sent),
+    _sent_to(SCEN["roles"]["owner:fin"]),
     str([s[1] for s in REC.sent if s[0] == "approval"]))
 
 # ---- 幕 9：⚠️ 拿财务票据接 CRM 的 PII 表 ----

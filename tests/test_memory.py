@@ -1,7 +1,22 @@
 """记忆断言（readme 4.6 支柱三）+ 迭代上限（5.3）。"""
-import os, sys, uuid
+import json, os, sys, uuid
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "services"))
+
+# **测试自己准备数据。**（R3 handoff 的教训：跨测试的数据依赖必然出问题）
+# 审批偏好统计原先读的是 ~/.datalaker/approvals.db —— 那里有没有已决记录
+# 取决于之前跑过什么，于是这条断言时红时绿。
+os.environ.pop("DATASTEWARD_DSN", None)
+os.environ["DATASTEWARD_DB"] = f"/tmp/dl_memory_{uuid.uuid4().hex[:8]}.db"
+
+from plugins.datasteward_gate.approvals import Store, action_hash
+_seed = Store(os.environ["DATASTEWARD_DB"], readonly=False)
+for i, dec in enumerate(("approve", "approve", "deny")):
+    aid, _ = _seed.request(f"seed-{i}", action_hash("ingest_table", {"t": i}),
+                           "ingest_table", json.dumps({"t": i}), "owner")
+    _seed.decide(aid, dec, "wang@acme.com")
+
 import memory as M
 
 ok, bad = [], []

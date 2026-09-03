@@ -16,6 +16,33 @@ import pathlib
 import time
 import uuid
 
+_TRACING = None      # None=没查过  False=不可用（Hermes 的 .venv-h、容器里都没装 SDK）
+
+
+def _tracing():
+    """旁路观测：装了就打点，没装当没有。**不能因为它不在就少记一条轨迹。**"""
+    global _TRACING
+    if _TRACING is None:
+        try:
+            import tracing
+            _TRACING = tracing
+        except Exception:                                    # noqa: BLE001
+            _TRACING = False
+    return _TRACING or None
+
+
+def _emit(method, *a, **kw):
+    """打点失败一律吞掉。**轨迹是主流程，trace 是旁路**——
+    旁路坏了不能让主流程少记一条事件。"""
+    t = _tracing()
+    if not t:
+        return
+    try:
+        getattr(t, method)(*a, **kw)
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
 EVENT_TYPES = (
     "tool_call",        # 调用了工具
     "gate_block",       # 被门禁拦下（PENDING / DENIED / L4 / BUDGET / WIP / NOT_DECLARED）
@@ -48,6 +75,8 @@ class Trajectory:
         self.started_ms = int(time.time() * 1000)
         self.status = "running"
         self.error_kind = None
+        _emit("start_root", f"run:{self.case_id}", start_ms=self.started_ms,
+              **{"claw.run_id": self.run_id, "claw.case_id": case_id})
 
     # ------------------------------------------------------------ 记录
     def _add(self, event_type: str, name: str, **kw) -> dict:
@@ -64,6 +93,7 @@ class Trajectory:
             "metadata": kw,
         }
         self.events.append(ev)
+        _emit("event_span", ev, run_id=self.run_id, case_id=self.case_id)
         return ev
 
     def tool_call(self, tool, args=None, summary=None, status="ok", **kw):
@@ -111,6 +141,7 @@ class Trajectory:
     def finish(self, status="success", error_kind=None):
         self.status = status
         self.error_kind = error_kind
+        _emit("end_root", status)
         return self
 
     def to_dict(self) -> dict:

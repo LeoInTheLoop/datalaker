@@ -58,6 +58,46 @@ else
 fi
 
 echo ""
+echo "########## 1.3 停止点判定 + DQ 门槛（5.2 / 5.3） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_stop_dq.py ) || rc=1
+
+echo ""
+echo "########## 1.32 审批人解析（归属 → 前缀 → 兜底） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_ownership_routing.py ) || rc=1
+
+echo ""
+echo "########## 1.33 DQ 规则库（纯函数，不连库） ##########"
+python3 tests/test_dq_rules.py || rc=1
+
+echo ""
+echo "########## 1.36 治理产出：Ledger + 权限发现 ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_ledger.py ) || rc=1
+if docker exec datalaker-source_pg-1 pg_isready -U postgres >/dev/null 2>&1; then
+  ( unset DATASTEWARD_DSN; $PY tests/test_perm_discovery.py ) || rc=1
+  ( unset DATASTEWARD_DSN; $PY tests/test_policy_sync.py ) || rc=1
+  ( unset DATASTEWARD_DSN; $PY tests/test_clean.py ) || rc=1
+else
+  echo "  SKIP  Postgres 未启动"
+fi
+
+echo ""
+echo "########## 1.34 时间引擎：12 天升级链路（秒级） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_clock.py ) || rc=1
+
+echo ""
+echo "########## 1.35 长时任务：并行挂起与恢复 ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_runs.py ) || rc=1
+
+echo ""
+echo "########## 1.37 可观测：OpenTelemetry → Phoenix ##########"
+# no-op 与「组件挂了照跑」不依赖任何服务；连 Phoenix 那一段测试自己会 SKIP
+( unset DATASTEWARD_DSN; $PY tests/test_tracing.py ) || rc=1
+
+echo ""
+echo "########## 1.4 SaaS 源（导出数据面 / 只读控制面） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_saas.py ) || rc=1
+
+echo ""
 echo "########## 1.5 R2 Harness（角色化/WIP/提问/沉淀/升级） ##########"
 ( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_r2.db python3 tests/test_r2_harness.py ) || rc=1
 rm -f /tmp/dl_esc.db*
@@ -115,7 +155,8 @@ fi
 echo ""
 echo "########## 9. 审批闭环（端到端） ##########"
 rm -f "$DATASTEWARD_DB" "$DATASTEWARD_DB-wal" "$DATASTEWARD_DB-shm"
-python3 services/approval_callback.py > /tmp/cb_test.log 2>&1 &
+NOTIFY_CHANNEL=outbox NOTIFY_OUTBOX=/tmp/cb_outbox.jsonl \
+  python3 services/approval_callback.py > /tmp/cb_test.log 2>&1 &
 CB=$!
 python3 - <<'PY'
 import urllib.request, time, os
@@ -127,6 +168,21 @@ for _ in range(50):
 PY
 ( unset DATASTEWARD_DSN; python3 tests/test_callback_e2e.py ) || rc=1
 kill $CB 2>/dev/null
+
+echo ""
+echo "########## 9.5 大 case：5 源 · 10 人 · 多线并行 · 跨 12 天 ##########"
+# 探活走和干活同一条路（带凭证）——否则加了认证之后会静默跳过整组
+if $PY -c "import sys;sys.path[:0]=['services','plugins'];import sync;sync._trino('SELECT 1')" >/dev/null 2>&1; then
+  ( unset DATASTEWARD_DSN; $PY tests/run_case_full.py > /tmp/full_case.log 2>&1 ) \
+    && sed -n '/=== 判定 ===/,$p' /tmp/full_case.log \
+    || { sed -n '/=== 判定 ===/,$p' /tmp/full_case.log; tail -20 /tmp/full_case.log; rc=1; }
+else
+  echo "  SKIP  Trino 未启动"
+fi
+
+echo ""
+echo "########## 10. Eval 体外隔离（判分器不许 import 被测代码） ##########"
+python3 evals/test_isolation.py || rc=1
 
 echo ""
 if [ "$rc" -eq 0 ]; then echo "✅ 全部通过"; else echo "❌ 有失败项"; fi

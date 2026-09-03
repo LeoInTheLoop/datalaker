@@ -25,12 +25,54 @@ def check(n, c, d=""):
     print(f"  {'PASS' if c else 'FAIL'}  {n}" + (f"  [{d}]" if d else ""))
 
 
+OUTBOX = os.environ.get("NOTIFY_OUTBOX", "/tmp/cb_outbox.jsonl")
+
+
 def hit(path, token):
     try:
         with urllib.request.urlopen(f"{BASE}{path}?t={token}") as r:
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+def confirm_token(after=0.0):
+    """从 outbox 里取出确认信中的第二枚令牌。
+
+    双重确认（R3 决策 25）之后，第一次点击只发确认信、不落库。
+    真实用户要在**注册邮箱收到的那封信里**再点一次 —— 测试就照着做，
+    而不是把 REQUIRE_DOUBLE_CONFIRM 关掉绕过去。
+    """
+    import json as _j
+    import re as _re
+    import time as _t
+    end = _t.time() + 5
+    while _t.time() < end:
+        try:
+            recs = [_j.loads(l) for l in open(OUTBOX, encoding="utf-8") if l.strip()]
+        except FileNotFoundError:
+            recs = []
+        for r in reversed(recs):
+            if r["kind"] == "notice" and r["ts"] > after:
+                m = _re.search(r"[?&]t=([A-Za-z0-9._\-]+)", r.get("body", ""))
+                if m:
+                    return m.group(1)
+        _t.sleep(0.05)
+    return None
+
+
+def two_stage(path, token):
+    """完整走一遍：点击 → 收确认信 → 再点。返回 (状态码, 页面, 确认令牌)。"""
+    import time as _t
+    t0 = _t.time()
+    code, body = hit(path, token)
+    if code != 200 or "确认" not in body:
+        return code, body, None            # 未开启双重确认时就是一步到位
+    t2 = confirm_token(after=t0)
+    if not t2:
+        return 0, "确认信里没找到令牌", None
+    code, body = hit(path, t2)
+    return code, body, t2
 
 
 print("\n=== 端到端：审批闭环 ===\n")
@@ -59,8 +101,8 @@ code, _ = hit("/approve", t_ok[:-4] + "AAAA")
 check("篡改签名被拒", code == 403, f"http {code}")
 
 # 5. 正常批准
-code, body = hit("/approve", t_ok)
-check("点击批准成功", code == 200 and "已批准" in body, f"http {code}")
+code, body, t_ok2 = two_stage("/approve", t_ok)
+check("点击批准成功（含双重确认）", code == 200 and "已批准" in body, f"http {code}")
 
 # 6. Agent 恢复后放行
 check("Agent 恢复后放行", gate("ingest_table", args, RUN) is None)
@@ -69,15 +111,15 @@ check("Agent 恢复后放行", gate("ingest_table", args, RUN) is None)
 check("票据消费后再次挂起", gate("ingest_table", args, RUN) is not None)
 
 # 8. 重放同一链接
-code, body = hit("/approve", t_ok)
+code, body = hit("/approve", t_ok2 or t_ok)
 check("链接重放被拒", code == 409, f"http {code}")
 
 # 9. deny 路径
 args2 = {"table": "HR.salary"}
 gate("ingest_table", args2, RUN)
 aid2 = store().pending(action_hash("ingest_table", args2), RUN)
-code, body = hit("/deny", tokens.issue(aid2, "deny", "owner@corp.com"))
-check("点击拒绝成功", code == 200 and "已拒绝" in body, f"http {code}")
+code, body, _ = two_stage("/deny", tokens.issue(aid2, "deny", "owner@corp.com"))
+check("点击拒绝成功（含双重确认）", code == 200 and "已拒绝" in body, f"http {code}")
 r = gate("ingest_table", args2, RUN)
 check("拒绝后进 deny list", r and "DENIED" in r.get("message", ""))
 

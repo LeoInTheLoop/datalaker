@@ -8,6 +8,7 @@ WIP 限制都不关心消息是从邮件还是飞书发出去的。
     NOTIFY_CHANNEL=feishu   飞书交互卡片
     NOTIFY_CHANNEL=wecom    企业微信模板卡片
 """
+import os
 import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -50,13 +51,19 @@ class Notifier:
 
 
 def get(channel=None) -> Notifier:
-    ch = (channel or E.get("NOTIFY_CHANNEL", "email")).lower()
+    # 进程环境变量优先于 .env —— 否则测试/演练无法临时切通道，
+    # 只能去改仓库里的配置文件。
+    ch = (channel or os.environ.get("NOTIFY_CHANNEL")
+          or E.get("NOTIFY_CHANNEL", "email")).lower()
     if ch == "feishu":
         from .feishu import FeishuNotifier
         return FeishuNotifier()
     if ch == "wecom":
         from .wecom import WecomNotifier
         return WecomNotifier()
+    if ch == "outbox":
+        from .outbox import OutboxNotifier
+        return OutboxNotifier()
     from .email_channel import EmailNotifier
     return EmailNotifier()
 

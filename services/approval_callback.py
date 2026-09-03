@@ -85,7 +85,15 @@ class Handler(BaseHTTPRequestHandler):
         # 3. 双重确认（readme 10.5）：第一次点击不落库，只发确认信。
         #    链接被转发多少次都无所谓 —— 确认信只到 approver 的注册邮箱。
         if REQUIRE_CONFIRM and payload.get("st") == "click":
-            _send_confirm(payload)
+            if not _send_confirm(payload):
+                # 发不出确认信 ≠ 服务崩溃。决定没落库，动作依然不会执行；
+                # 但必须给点击的人一个明确交代，而不是把连接掐掉。
+                return self._send(503, page(
+                    "确认邮件发送失败",
+                    "决定尚未生效，动作也不会执行。请稍后重试，"
+                    "或直接回信告知处理人。",
+                    "未生效", "#fde8e8", "#b42318",
+                    "通知通道异常不会让门禁放行 —— 这是设计如此。"))
             return self._send(200, page(
                 "已发出确认邮件",
                 "为防止链接被转发后被他人误点，我们向你的注册邮箱发了一封确认信。"
@@ -120,18 +128,34 @@ class Handler(BaseHTTPRequestHandler):
             f"审批人 {payload['who']} · 如需改变，请让 Agent 提出新的方案。"))
 
 
-def _send_confirm(payload):
-    """发确认信：内含 stage=confirm 的第二枚令牌。"""
+def _send_confirm(payload) -> bool:
+    """发确认信：内含 stage=confirm 的第二枚令牌。
+
+    **通道异常必须被吃掉。** 原先这里的异常会冒到 handler 外，
+    Python 的 HTTPServer 直接断开连接（客户端看到 RemoteDisconnected），
+    整个服务看起来像挂了——而真正的问题只是缺一个邮件依赖。
+
+    返回 False 表示没发出去。决定不落库，动作照样不会执行。
+    """
     import notify
     base = os.environ.get("APPROVAL_BASE_URL", f"http://127.0.0.1:{PORT}").rstrip("/")
     t2 = tokens.issue(payload["aid"], payload["d"], payload["who"], stage="confirm")
     path = "approve" if payload["d"] == "approve" else "deny"
     verb = "批准" if payload["d"] == "approve" else "拒绝"
-    notify.get().send_notice(
-        payload["who"], f"[数据管家] 请确认你的{verb}操作",
-        f"有人点击了{verb}链接。若确实是你本人操作，请点击下面的链接确认：\n\n"
-        f"{base}/{path}?t={t2}\n\n"
-        f"若不是你操作的，忽略本邮件即可——该动作不会执行。")
+    try:
+        notify.get().send_notice(
+            payload["who"], f"[数据管家] 请确认你的{verb}操作",
+            f"有人点击了{verb}链接。若确实是你本人操作，请点击下面的链接确认：\n\n"
+            f"{base}/{path}?t={t2}\n\n"
+            f"若不是你操作的，忽略本邮件即可——该动作不会执行。")
+        return True
+    except Exception as e:                                    # noqa: BLE001
+        try:
+            with open_store(readonly=False, init_schema=False) as st:
+                st.append_event(payload["aid"], "CONFIRM_MAIL_FAILED", str(e)[:180])
+        except Exception:                                     # noqa: BLE001
+            pass
+        return False
 
 
 def _receipt(store, payload):
