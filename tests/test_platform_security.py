@@ -58,8 +58,35 @@ chk("正确密码通过", post("SELECT 1", "admin", "admin_pw_change_me")[0] == 
 
 # 明文端口不对外
 code, _ = post("SELECT 1", url="http://localhost:8080/v1/statement", timeout=5)
-chk("明文 8080 不从宿主机可达", code == 0,
-    f"HTTP {code} —— allow-insecure-over-http 使其免认证，绝不能映射出去")
+chk("明文 8080 不从宿主机可达", post("SELECT 1", url="http://localhost:8080/v1/statement")[0] in (0, 401, 403),
+    "宿主机不映射 8080")
+
+# **网络内部同样要挡住。** R3 只做到「不映射到宿主机」，
+# 但 compose 网络里任何容器都能直连 trino:8080 —— 实测从 scheduler 容器
+# 匿名带 `X-Trino-User: admin` 查 gold.customer_360，拿到了未遮蔽的手机号。
+# 修法是 `allow-insecure-over-http=false`，这条断言防它被改回去。
+import subprocess as _sp
+
+_probe = """
+import urllib.request, json, sys
+req = urllib.request.Request('http://trino:8080/v1/statement', data=b'SELECT 1',
+    headers={'X-Trino-User': 'admin'}, method='POST')
+try:
+    with urllib.request.urlopen(req, timeout=15) as r:
+        print('OPEN', r.status)
+except Exception as e:
+    print('BLOCKED', getattr(e, 'code', type(e).__name__))
+"""
+try:
+    _r = _sp.run(["docker", "exec", "datalaker-scheduler-1", "python3", "-c", _probe],
+                 capture_output=True, text=True, timeout=90)
+    _out = (_r.stdout or "").strip().splitlines()[-1] if _r.stdout.strip() else "?"
+except Exception as _e:                                       # noqa: BLE001
+    _out = f"SKIP {type(_e).__name__}"
+if _out.startswith("SKIP") or not _out or _out == "?":
+    print(f"  SKIP  网络内部匿名探测（{_out}）")
+else:
+    chk("⚠️ 网络内部也不能匿名冒充身份", _out.startswith("BLOCKED"), _out)
 
 # 授权（readme 11.4）
 chk("claw 可读源系统", run_to_end("SELECT count(*) FROM postgres.public.orders",

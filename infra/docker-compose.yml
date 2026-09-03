@@ -93,10 +93,13 @@ services:
       retries: 12
 
   # ---------------- obs：可观测性 ----------------
+  # 起来之后把 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 给到进程，
+  # `services/tracing.py` 才开始上报；不给这个变量就是彻底的 no-op。
+  # 实测与 core 同开占用 +0.4GB，两组可以并存（governance 那条限制不适用于它）。
   phoenix:
     image: arizephoenix/phoenix:latest
     profiles: [obs]
-    ports: ["6006:6006", "4317:4317"]
+    ports: ["6006:6006", "4317:4317"]    # 6006=UI/REST  4317=OTLP gRPC
 
   # ---------------- agent 平面 ----------------
   # 两个服务，两个数据库账号 —— CLAUDE.md 铁律 2。
@@ -163,6 +166,10 @@ services:
       - ../ops:/app/ops
       - ../plugins:/app/plugins
       - ../services:/app/services
+      # 恢复器要 import 各条 Pipeline 才知道怎么把任务往下推
+      # （`runs.RUNNERS` 是导入时注册的）。少挂这一个目录，
+      # `ops/resume.py` 每分钟失败一次而 scheduler 本身看着还活着。
+      - ../pipelines:/app/pipelines
       - scheduler_state:/app/state
     command: python /app/ops/scheduler.py
     restart: unless-stopped

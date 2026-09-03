@@ -22,7 +22,9 @@ TRINO_C = os.environ.get("TRINO_CONTAINER", "datalaker-trino-1")
 TRINO_USER = os.environ.get("TRINO_WRITE_USER", "claw")
 BRONZE = "iceberg.bronze"
 # source_id -> Trino catalog。历史原因 olist 的 catalog 名叫 postgres
-CATALOG = {"olist": "postgres", "northwind": "northwind"}
+# source_id → Trino catalog。默认同名，这里只登记不同名的那些。
+# 新增一个源 = 加一个 catalog 文件 + 必要时在这里加一行。
+CATALOG = {"olist": "postgres"}
 
 
 class SyncError(RuntimeError):
@@ -37,19 +39,96 @@ class SchemaDrift(SyncError):
     """
 
 
-def _trino(sql: str, timeout=180):
-    r = subprocess.run(
-        ["docker", "exec", TRINO_C, "trino", "--user", TRINO_USER,
-         "--output-format", "CSV_UNQUOTED", "--execute", sql],
-        capture_output=True, text=True, timeout=timeout)
+TRINO_URL = os.environ.get("TRINO_URL", "")
+def _envfile():
+    import pathlib
+    d, f = {}, pathlib.Path(ROOT) / ".env"
+    if f.exists():
+        for line in f.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                d[k] = v
+    return d
+
+
+_E = _envfile()
+# 默认值与 password.db 里的开发口令一致；生产必须改（11.6）
+TRINO_PASSWORD = (os.environ.get("TRINO_PASSWORD")
+                  or _E.get("TRINO_PASSWORD") or "claw_pw_change_me")
+TRINO_SERVER = os.environ.get("TRINO_SERVER", "https://localhost:8443")
+
+
+def _trino_http(sql: str, timeout=180):
+    """走 Trino 的 REST 协议。
+
+    **容器里没有 docker CLI。** 早先只有 `docker exec` 一条路，
+    意味着 Agent 一旦真的跑在受限容器里就写不了 bronze —— 这个洞
+    只有把 Agent 塞进容器才会暴露出来，在宿主机上跑一万遍都发现不了。
+
+    身份走用户名 + 密码，因此 `rules.json` 的授权对它同样生效：
+    容器用 claw 的凭证，就只能读源、只能写 iceberg。
+    """
+    import base64
+    import urllib.request
+
+    url = TRINO_URL.rstrip("/") + "/v1/statement"
+    hdr = {"X-Trino-User": TRINO_USER, "Content-Type": "text/plain"}
+    if TRINO_PASSWORD:
+        tok = base64.b64encode(
+            f"{TRINO_USER}:{TRINO_PASSWORD}".encode()).decode()
+        hdr["Authorization"] = f"Basic {tok}"
+
+    rows, err = [], None
+    req = urllib.request.Request(url, data=sql.encode("utf-8"),
+                                 headers=hdr, method="POST")
+    while True:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = json.load(r)
+        if body.get("error"):
+            err = body["error"].get("message", "unknown")
+            break
+        for row in body.get("data") or []:
+            rows.append(",".join("" if v is None else str(v) for v in row))
+        nxt = body.get("nextUri")
+        if not nxt:
+            break
+        req = urllib.request.Request(nxt, headers=hdr)
+    if err:
+        raise SyncError(err[:300])
+    return rows
+
+
+def _trino_exec(sql: str, timeout=180):
+    """宿主机开发路径：docker exec 调 CLI。
+
+    **也要带凭证。** 早先它连的是免认证的 8080 —— 那个免认证正是
+    「网络内谁都能冒充 admin」这个洞的来源。堵掉洞之后这条路必须
+    跟别人一样报身份，否则等于给开发留了后门。
+    """
+    cmd = ["docker", "exec"]
+    if TRINO_PASSWORD:
+        cmd += ["-e", f"TRINO_PASSWORD={TRINO_PASSWORD}"]
+    cmd += [TRINO_C, "trino", "--server", TRINO_SERVER, "--user", TRINO_USER,
+            "--output-format", "CSV_UNQUOTED", "--execute", sql]
+    if TRINO_PASSWORD:
+        cmd += ["--password", "--insecure"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         raise SyncError((r.stderr or r.stdout).strip()[:300])
-    return [l for l in r.stdout.strip().split("\n") if l]
+    return [l for l in r.stdout.strip().split("\n")
+            if l and "JAVA_TOOL_OPTIONS" not in l]
 
+def _trino(sql: str, timeout=180):
+    """配了 TRINO_URL 就走 HTTP（容器内唯一可行），否则 docker exec。"""
+    return (_trino_http(sql, timeout) if TRINO_URL
+            else _trino_exec(sql, timeout))
 
 def _store(readonly=False):
     from plugins.datasteward_gate.approvals import open_store
-    return open_store(readonly=readonly, init_schema=False)
+    # 写入侧要保证 schema 在（DDL 全是 IF NOT EXISTS，幂等且便宜）。
+    # 老库里没有 sync_state，不在这里补就永远缺一张表。
+    return open_store(readonly=readonly, init_schema=not readonly)
 
 
 def _schema_hash(cols) -> str:
@@ -86,7 +165,26 @@ def get_state(asset: str) -> dict | None:
 
 def save_state(asset, strategy, watermark=None, schema_hash=None, row_count=None,
                sla_h=24, error=None):
+    """落同步状态。
+
+    两个后端的 upsert 语法与时间函数都不同，`get_state` 早就分了岔，
+    这里原先只写了 Postgres 一路 —— 本地默认是 SQLite，于是整条同步路径不通。
+    """
     st = _store()
+    if hasattr(st.db, "execute") and not hasattr(st.db, "cursor_factory"):
+        now = time.time()
+        st.db.execute(
+            "INSERT INTO sync_state (asset, strategy, watermark, last_synced_at,"
+            " data_as_of, freshness_sla_h, schema_hash, row_count, last_error)"
+            " VALUES (?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(asset) DO UPDATE SET strategy=excluded.strategy,"
+            " watermark=excluded.watermark, last_synced_at=excluded.last_synced_at,"
+            " data_as_of=excluded.data_as_of, schema_hash=excluded.schema_hash,"
+            " row_count=excluded.row_count, last_error=excluded.last_error",
+            (asset, strategy, watermark, now, now, sla_h, schema_hash,
+             row_count, error))
+        st.db.commit()
+        return
     with st.db.cursor() as c:
         c.execute(
             "INSERT INTO sync_state (asset, strategy, watermark, last_synced_at,"
@@ -134,14 +232,15 @@ def _pg_type_to_trino(t: str) -> str:
 
 
 def sync_table(source_id: str, table: str, watermark_col: str | None = None,
-               sla_h: int = 24, allow_schema_change: bool = False) -> dict:
+               sla_h: int = 24, allow_schema_change: bool = False,
+               schema: str = "public", bronze_name: str | None = None) -> dict:
     """同步一张表到 bronze。
 
     策略由是否有可用水位列决定：有则增量追加，无则全量刷新。
     **schema 漂移会中止同步并要求人确认**——不是自动接受。
     """
     import data_tools
-    asset = f"{source_id}.{table}"
+    asset = f"{source_id}.{table}" if schema == "public" else f"{source_id}.{schema}.{table}"
     meta = data_tools.get_table_metadata(source_id, table)
     sh = _schema_hash(meta["columns"])
     prev = get_state(asset)
@@ -154,7 +253,9 @@ def sync_table(source_id: str, table: str, watermark_col: str | None = None,
     _trino(f"CREATE SCHEMA IF NOT EXISTS {BRONZE}")
     cols_ddl = ", ".join(f'"{c["name"]}" {_pg_type_to_trino(c["type"])}'
                          for c in meta["columns"])
-    tgt = f'{BRONZE}."{source_id}__{table}"'
+    tgt = (f'{BRONZE}."{bronze_name}"' if bronze_name else
+           f'{BRONZE}."{source_id}__{table}"' if schema == "public"
+           else f'{BRONZE}."{source_id}__{schema}__{table}"')
 
     strategy = "incremental_append" if watermark_col else "full_refresh"
     if strategy == "full_refresh":
@@ -167,7 +268,9 @@ def sync_table(source_id: str, table: str, watermark_col: str | None = None,
         where = f" WHERE \"{watermark_col}\" > TIMESTAMP '{wm}'" if wm else ""
 
     collist = ", ".join(f'"{c["name"]}"' for c in meta["columns"])
-    src = f'{CATALOG.get(source_id, source_id)}.public."{table}"'
+    # schema 可指定 —— eval 把脏副本放在 eval_<case> 而不是 public，
+    # 写死 public 会让整条 eval 读不到自己刚布置的考场。
+    src = f'{CATALOG.get(source_id, source_id)}."{schema}"."{table}"'
     _trino(f"INSERT INTO {tgt} ({collist}) SELECT {collist} FROM {src}{where}")
 
     n = int(_trino(f"SELECT count(*) FROM {tgt}")[0])
@@ -182,7 +285,8 @@ def sync_table(source_id: str, table: str, watermark_col: str | None = None,
             "row_count": n, "watermark": new_wm}
 
 
-def reconcile_deletes(source_id: str, table: str, pk: str) -> dict:
+def reconcile_deletes(source_id: str, table: str, pk: str,
+                      schema: str = "public") -> dict:
     """硬删除对账（readme 6.1 四个坑之一）。
 
     增量同步看不到源系统的物理删除，lake 里会留下幽灵数据。
@@ -190,8 +294,9 @@ def reconcile_deletes(source_id: str, table: str, pk: str) -> dict:
     """
     import data_tools
     _ = data_tools  # 保持依赖显式
-    tgt = f'{BRONZE}."{source_id}__{table}"'
-    src = f'{CATALOG.get(source_id, source_id)}.public."{table}"'
+    tgt = (f'{BRONZE}."{source_id}__{table}"' if schema == "public"
+           else f'{BRONZE}."{source_id}__{schema}__{table}"')
+    src = f'{CATALOG.get(source_id, source_id)}."{schema}"."{table}"'
     rows = _trino(
         f'SELECT count(*) FROM (SELECT "{pk}" FROM {tgt} '
         f'EXCEPT SELECT "{pk}" FROM {src}) g')

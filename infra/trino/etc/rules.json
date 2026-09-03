@@ -1,29 +1,180 @@
 {
   "catalogs": [
-    {"user": "admin", "allow": "all"},
-    {"user": "claw", "catalog": "iceberg", "allow": "all"},
-    {"user": "claw", "catalog": "postgres", "allow": "read-only"},
-    {"user": "claw", "catalog": "northwind", "allow": "read-only"},
-    {"user": "admin", "catalog": "northwind", "allow": "all"},
-    {"user": "analyst", "catalog": "iceberg", "allow": "read-only"},
-    {"user": ".*", "catalog": "system", "allow": "read-only"}
+    {
+      "user": "admin",
+      "allow": "all"
+    },
+    {
+      "user": "admin",
+      "catalog": "stage",
+      "allow": "all"
+    },
+    {
+      "user": "admin",
+      "catalog": "acme",
+      "allow": "all"
+    },
+    {
+      "user": "admin",
+      "catalog": "olist_raw",
+      "allow": "all"
+    },
+    {
+      "user": "claw",
+      "catalog": "iceberg",
+      "allow": "all"
+    },
+    {
+      "user": "claw",
+      "catalog": "stage",
+      "allow": "read-only"
+    },
+    {
+      "user": "claw",
+      "catalog": "postgres",
+      "allow": "read-only"
+    },
+    {
+      "user": "claw",
+      "catalog": "acme",
+      "allow": "read-only"
+    },
+    {
+      "user": "claw",
+      "catalog": "northwind",
+      "allow": "read-only"
+    },
+    {
+      "user": "claw",
+      "catalog": "olist_raw",
+      "allow": "read-only"
+    },
+    {
+      "user": "admin",
+      "catalog": "northwind",
+      "allow": "all"
+    },
+    {
+      "user": "analyst",
+      "catalog": "iceberg",
+      "allow": "read-only"
+    },
+    {
+      "user": ".*",
+      "catalog": "system",
+      "allow": "read-only"
+    }
   ],
   "schemas": [
-    {"user": "admin", "owner": true},
-    {"user": "claw", "catalog": "iceberg", "owner": true},
-    {"user": "analyst", "catalog": "iceberg", "schema": "gold", "owner": false}
+    {
+      "user": "admin",
+      "owner": true
+    },
+    {
+      "user": "claw",
+      "catalog": "iceberg",
+      "owner": true
+    },
+    {
+      "user": "analyst",
+      "catalog": "iceberg",
+      "schema": "gold",
+      "owner": false
+    }
   ],
   "tables": [
-    {"user": "admin", "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP"]},
-    {"user": "claw", "catalog": "iceberg",
-     "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP"]},
-    {"user": "claw", "catalog": "postgres", "privileges": ["SELECT"]},
-    {"user": "claw", "catalog": "northwind", "privileges": ["SELECT"]},
-    {"user": "analyst", "catalog": "iceberg", "schema": "gold",
-     "privileges": ["SELECT"],
-     "columns": [
-       {"name": "phone", "mask": "'***'"},
-       {"name": "email", "mask": "'***'"}
-     ]}
+    {
+      "user": "admin",
+      "privileges": [
+        "SELECT",
+        "INSERT",
+        "DELETE",
+        "UPDATE",
+        "OWNERSHIP"
+      ]
+    },
+    {
+      "user": "claw",
+      "catalog": "iceberg",
+      "privileges": [
+        "SELECT",
+        "INSERT",
+        "DELETE",
+        "UPDATE",
+        "OWNERSHIP"
+      ]
+    },
+    {
+      "user": "claw",
+      "catalog": "postgres",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "user": "claw",
+      "catalog": "northwind",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "user": "claw",
+      "catalog": "stage",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "user": "claw",
+      "catalog": "acme",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "user": "claw",
+      "catalog": "olist_raw",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "user": "analyst",
+      "catalog": "iceberg",
+      "schema": "gold",
+      "privileges": [
+        "SELECT"
+      ],
+      "columns": [
+        {
+          "name": "phone",
+          "mask": "'***'"
+        },
+        {
+          "name": "email",
+          "mask": "'***'"
+        }
+      ]
+    },
+    {
+      "user": "analyst",
+      "catalog": "iceberg",
+      "schema": "gold",
+      "table": "customer_360",
+      "privileges": [
+        "SELECT"
+      ],
+      "columns": [
+        {
+          "name": "email",
+          "mask": "'***'"
+        },
+        {
+          "name": "phone",
+          "mask": "'***'"
+        }
+      ]
+    }
   ]
 }

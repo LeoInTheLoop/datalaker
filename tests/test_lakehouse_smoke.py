@@ -16,18 +16,25 @@ ok, bad = [], []
 
 # 加了授权（R3）之后，容器内 CLI 也必须报身份——
 # rules.json 里只有 admin/claw/analyst 有权限，默认用户只能读 system。
-# 运维与测试脚本用 admin；容器内走 HTTP，免密码。
+#
+# **而且必须带密码。** 早先注释写着「容器内走 HTTP，免密码」，
+# 那个免密码正是「compose 网络内谁都能冒充 admin」的来源：
+# 实测从 scheduler 容器匿名查 gold.customer_360 拿到了未遮蔽的手机号。
+# 关掉 allow-insecure-over-http 之后，这条路也得跟别人一样报身份。
 TRINO_USER = os.environ.get("TRINO_USER", "admin")
+TRINO_PASSWORD = os.environ.get("TRINO_PASSWORD", "admin_pw_change_me")
+TRINO_SERVER = os.environ.get("TRINO_SERVER", "https://localhost:8443")
 
 
 def q(sql, fmt="CSV_UNQUOTED"):
-    r = subprocess.run(
-        ["docker", "exec", C, "trino", "--user", TRINO_USER,
-         "--output-format", fmt, "--execute", sql],
-        capture_output=True, text=True, timeout=180)
+    cmd = ["docker", "exec", "-e", f"TRINO_PASSWORD={TRINO_PASSWORD}", C, "trino",
+           "--server", TRINO_SERVER, "--user", TRINO_USER,
+           "--password", "--insecure", "--output-format", fmt, "--execute", sql]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout)[:300])
-    return [l for l in r.stdout.strip().split("\n") if l]
+    return [l for l in r.stdout.strip().split("\n")
+            if l and "JAVA_TOOL_OPTIONS" not in l]
 
 
 def check(n, c, d=""):
@@ -116,7 +123,7 @@ try:
 except Exception as e:
     check("7 Postgres 联邦查询", False, str(e)[:70])
 
-# 8. 跨 catalog join —— 「源系统不 join，在 lake 里 join」的兑现证据
+# 8. 跨 catalog join —— 证明 lake 能联邦读取；模型 lake 查询另由 SQL gate 限定 iceberg.*
 try:
     rows = q("""SELECT count(*) FROM iceberg.smoke.customers c
                 CROSS JOIN postgres.public.orders p""")

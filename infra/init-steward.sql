@@ -54,3 +54,76 @@ GRANT INSERT, SELECT ON decisions TO approver_role;
 -- 业务知识沉淀：Agent 可更新（口径会修订）。
 -- 与 decisions 的只读约束是两回事——那张表关乎审批权威，这张不。
 GRANT UPDATE ON asset_semantics TO agent_role;
+
+-- 增量同步状态（readme 6.1）
+CREATE TABLE IF NOT EXISTS sync_state (
+    asset            TEXT PRIMARY KEY,
+    strategy         TEXT NOT NULL,
+    watermark        TEXT,
+    last_synced_at   TIMESTAMPTZ,
+    data_as_of       TIMESTAMPTZ,
+    freshness_sla_h  INTEGER NOT NULL DEFAULT 24,
+    schema_hash      TEXT,
+    row_count        BIGINT,
+    last_error       TEXT
+);
+GRANT SELECT, INSERT, UPDATE ON sync_state TO agent_role;
+
+-- 任务注册表（readme 2 / 4.1）：多条长时任务并行挂起与恢复
+CREATE TABLE IF NOT EXISTS runs (
+    run_id      TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    params      TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    waiting_on  TEXT,
+    checkpoint  TEXT,
+    note        TEXT,
+    owner_role  TEXT,
+    created_at  DOUBLE PRECISION NOT NULL,
+    updated_at  DOUBLE PRECISION NOT NULL,
+    resumed     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
+GRANT SELECT, INSERT, UPDATE ON runs TO agent_role;
+
+-- Remediation Ledger（readme 7）：治理动作的审计轨 + 给源系统的整改清单。
+--
+-- **只在 lake 里清洗，等于给源头的缺陷付永久利息。**
+-- 因此这张表的价值不在建议的数量，而在被采纳的比例，以及
+-- 「清洗规则数量在下降」这个反直觉的成功指标。
+CREATE TABLE IF NOT EXISTS remediation_ledger (
+    rl_id            TEXT PRIMARY KEY,
+    source_table     TEXT NOT NULL,
+    field            TEXT,
+    issue_type       TEXT NOT NULL,
+    category         TEXT NOT NULL DEFAULT 'data',   -- data / permission
+    observed_pattern TEXT,
+    action_taken     TEXT,
+    confirmed_by     TEXT,
+    message_id       TEXT,
+    suggestion       TEXT,
+    owner_role       TEXT,
+    status           TEXT NOT NULL DEFAULT 'open',   -- open/proposed/accepted/fixed/rejected
+    reject_reason    TEXT,
+    recurrences      INTEGER NOT NULL DEFAULT 1,
+    rows_cleaned     BIGINT NOT NULL DEFAULT 0,
+    rule_revisions   INTEGER NOT NULL DEFAULT 0,
+    first_seen       DOUBLE PRECISION NOT NULL,
+    last_seen        DOUBLE PRECISION NOT NULL,
+    due_at           DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS ix_rl_status ON remediation_ledger(status);
+
+-- 清洗规则。**每条都要标注它在补哪个洞**（readme 7）——
+-- 没有 ledger_ref 的规则无法退役，因为没人知道它为什么存在。
+CREATE TABLE IF NOT EXISTS cleaning_rules (
+    name         TEXT PRIMARY KEY,
+    ledger_ref   TEXT NOT NULL,
+    fixes        TEXT NOT NULL,
+    retire_when  TEXT,
+    active       INTEGER NOT NULL DEFAULT 1,
+    revisions    INTEGER NOT NULL DEFAULT 0,
+    created_at   DOUBLE PRECISION NOT NULL,
+    retired_at   DOUBLE PRECISION
+);
+GRANT SELECT, INSERT, UPDATE ON remediation_ledger, cleaning_rules TO agent_role;

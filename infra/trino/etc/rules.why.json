@@ -1,0 +1,7 @@
+[
+  {
+    "table": "customer_360",
+    "user": "analyst",
+    "reason": "列分类 ['email', 'phone'] → 遮蔽"
+  }
+]
