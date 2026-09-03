@@ -69,11 +69,11 @@ schema drift 追不动。第一次接入时把映射跟人确认一次，记进�
 
 | 约束 | 落在哪 |
 |---|---|
-| 源上单表、禁 join | Connector `_admit()`（sqlglot AST） |
+| 模型 SQL 的放行 / 审批 / 拒绝 | Connector `review_sql()` + gate `_sql_guard()`（sqlglot AST，按 `plane=source|lake` 区分外部源和已入湖表） |
 | 源账号只读 | 源库 GRANT + 容器隔离 |
 | 接入必须先有审批 | `register_source(approval_id=...)` |
 | 附件发件人 / 类型 / 大小 | 入站附件路径 |
-| 工具分级、未声明即 L2 | `plugins/datasteward_gate/policy.py` |
+| 工具分级、未声明即拒绝 | `plugins/datasteward_gate/policy.py` |
 
 **自检：把这个文件整个删掉，系统还安全吗？**
 答案必须是「是」。如果某条删掉就不安全了，说明它写错地方了，该搬进 gate。

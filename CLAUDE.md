@@ -19,12 +19,15 @@
 审批 callback 服务**必须是独立进程 + 独立数据库账号**。
 与 Agent 同进程时列级 GRANT 形同虚设，机制三直接失效。
 
-### 3. 源系统只读，且永不 join
+### 3. 源系统只读，且负载可控
 - 给 Agent 的源系统账号只有 `SELECT`
-- 源库上只允许**单表** `SELECT / SHOW / DESCRIBE`
-- 所有关联分析在 Iceberg / Trino 上做
+- 模型生成的 SQL 必须声明 `plane=source|lake`，并先过 `sqlglot` AST preflight
+- `plane=source` 是外部源系统：破坏性语句默认拒绝，高负载读必须先问人
+- `plane=lake` 是已复制到 datalake 的表：允许 JOIN / 聚合，但只能查 `iceberg.*`
+- 禁止用 `plane=lake` 查询 `postgres` / `northwind` / `stage` 等外部 catalog
+- 所有源查询都受 `LIMIT` 注入、`EXPLAIN` 扫描估算、超时、串行队列和负载账本约束
 
-> 理由：join 代价不可预估，单表扫描可用行数估算。不可预估的操作只能发生在自己的地盘。
+> 理由：只读不等于无害。一条模型生成的 SQL 即使不改数据，也可能把生产源系统拖死。
 
 **SaaS 源按「数据面 / 控制面」切开**（readme 8.2），不要为每个 SaaS 写一套管道：
 
@@ -79,13 +82,17 @@ spike/                        R0 概念验证，可随时删除
 - `core`（MinIO + Iceberg + Trino）与 `governance`（OpenMetadata 全家桶）**不能同时启动**
 - OpenMetadata 全家桶约 4.5GB，本机跑不起来 → R1–R4 用轻量 `assets` 表替代
 - Trino 必须限制 `-Xmx1G`，默认配置会吃掉大部分内存
+- Docker 数据盘在外置盘上；Mac 睡眠后若 `docker ps` 超时、daemon 连不上或 I/O error，
+  先确认外置盘挂载。若盘已挂载，下一次优先试验：
+  `open -a Docker` → `cd infra && docker compose --env-file ../.env --profile core --profile agent up -d`。
+  这条是待验证恢复流程；不管用就删。
 
 ## 开发约定
 
 - **gate 依赖 `sqlglot`**（AST 准入），新增依赖须同步三处：
   项目 `.venv`、容器镜像（`docker/Dockerfile`）、Hermes 的 `.venv-h`
   （uv 建的无 pip，用 `VIRTUAL_ENV=<path> uv pip install`）
-- 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`（**99 条断言必须全绿**）
+- 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`（**592 条断言必须全绿**）
 - 看状态：`python3 ops/claw-status.py`（退出码 2 = 有告警）
   - 不设 `HERMES` 时会跳过真实集成那一段
   - Hermes 需要 python 3.11–3.13，本机 3.14 不兼容：用 `uv venv --python 3.13 .venv-h`
@@ -99,3 +106,76 @@ spike/                        R0 概念验证，可随时删除
   - `pre_tool_call` 契约：`website/docs/user-guide/features/hooks.md`
   - Email 适配器：`plugins/platforms/email/adapter.py`
 - 推理端点：`https://inference-api.nousresearch.com/v1`（OpenAI 兼容）
+
+### OpenMetadata —— 只抄 schema，不用其 agent / ingestion 层
+
+> 结论先行：**只当「连接参数工具箱」+ 读侧 catalog。它的 agent / MCP 层和
+> ingestion 取数进程一概不用。** 评估于 2026-09-02，OM 2.0.1。
+
+OM 2.0 把自己重新定位成 "Open Context Layer for Data and AI"，宣传里有
+context / ontology / memory / MCP server / AI SDK。名字听起来跟本项目重叠，
+实际分工完全不同，容易误判，所以在这里写死。
+
+#### 能用的：连接参数 schema（当文件读，不装包不起服务）
+
+OM 为 130+ 种源维护了连接参数的 JSON Schema，**是纯文件，可以单独抄**：
+
+```
+open-metadata/OpenMetadata
+  openmetadata-spec/src/main/resources/json/schema/entity/services/connections/
+    database/    postgresConnection.json  snowflakeConnection.json
+                 bigQueryConnection.json  databricksConnection.json
+                 athenaConnection.json    deltaLakeConnection.json  ...
+    dashboard/ · pipeline/ · messaging/ · storage/ · api/
+```
+
+拉一个文件即可（不必 clone 整个仓库）：
+
+```bash
+P=openmetadata-spec/src/main/resources/json/schema/entity/services/connections
+gh api "repos/open-metadata/OpenMetadata/contents/$P/database" --jq '.[].name'
+gh api "repos/open-metadata/OpenMetadata/contents/$P/database/snowflakeConnection.json" \
+  --jq '.content' | base64 -d
+```
+网页版同路径可直接看：`https://github.com/open-metadata/OpenMetadata/tree/main/$P`
+
+**什么时候用**：给 `services/connector.py` 新增一个源时，照着抄该源的连接字段名、
+必填项、认证方式分支（password / IAM / OAuth / keypair）、SSL 与代理选项。
+省掉翻各家驱动文档的时间。**只抄字段定义，不引入 `openmetadata-ingestion` 包**
+——那个包会拖进 Airflow 一系列依赖，本机装不下也用不上。
+
+#### 能用的：读侧 catalog（位置不变，时机推后）
+
+readme 第 3、13 节给 OM 的位置（Catalog / Lineage / Owner / DQ / Classification，
+走 REST API 自封 tool）**不变**。但受环境约束（全家桶 ~4.5GB，Docker VM 只有 3.83GiB），
+R1–R4 用轻量 `assets` 表顶替，接口保持一致，R5 需要策略引擎时再决定是否真上。
+
+#### 不用的：MCP / agent 层
+
+**它当前不是权限边界，拿它当门禁会让铁律 1 失效。** 证据（都在 OM 自己的 issue 里）：
+
+- [#30023](https://github.com/open-metadata/OpenMetadata/issues/30023) `search_metadata` / `semantic_search` 两个 MCP 工具不做 domain RBAC——
+  `SearchUtils.shouldApplyRbacConditions()` 要求 `!subjectContext.isBot()`，
+  而 **bot token 正是接 MCP 的标准方式**，于是直接跳过。官方 2026-08 回复推到 2.1+
+- [#32355](https://github.com/open-metadata/OpenMetadata/issues/32355) MCP 的 `patch_entity` 直接调 repository，绕过 PATCH 授权与实体生命周期
+- [#32457](https://github.com/open-metadata/OpenMetadata/issues/32457) 官方在评论里自己写死：persona 的 context scope
+  「**是相关性过滤，不是权限边界**」，agent 每次调用可带 `ignore_persona_scope` 退出
+
+本项目的门禁必须留在 `plugins/datasteward_gate/`（铁律 1）与
+`services/connector.py` 的 `_admit()`（铁律 3）。
+
+#### 不用的：ingestion 取数
+
+OM 的 connector 是**定时抓元数据的 pipeline**，不是取数网关——它给 schema /
+owner / lineage / profile，不提供按行取数的接口（sample data 只够喂 profiler）。
+bronze 层拉数据它做不了。而且：
+
+- ingestion 跑在**独立进程**（Airflow / ingestion agent），`pre_tool_call` 拦不到，
+  源库访问一旦走那条路，「Agent 绕不过」就无法证明——破铁律 1
+- 它的 profiler 默认对源表做统计与采样，属于「代价不可预估的操作」——破铁律 3
+
+#### 什么时候该重新评估
+
+OM 2.1+ 修掉 #30023（bot token 的 RBAC 绕过）之后，可以重新看它的 MCP 层
+能否承担**读侧**的元数据检索。**写侧与源库取数不在重估范围内**——
+那两条由铁律 1 / 3 决定，与 OM 的成熟度无关。

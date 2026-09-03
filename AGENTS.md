@@ -23,7 +23,7 @@
 
 1. 限制一律走 hook，不写进 prompt
 2. Agent 对 `decisions` 表无写权限，审批 callback 必须独立进程
-3. 源系统只读，且永不 join
+3. 源系统只读，且源库负载必须经 SQL gate 控制
 4. 不修改源系统
 5. 新工具必须在 `policy.py` 显式声明——**未声明的一律拒绝**
 
@@ -31,9 +31,14 @@
 
 ```bash
 cd infra && docker compose --env-file ../.env --profile core --profile agent up -d
-HERMES=<hermes-agent 路径> ./tests/run_all.sh     # 119 条断言必须全绿
+HERMES=<hermes-agent 路径> ./tests/run_all.sh     # 538 条断言必须全绿
 python3 ops/claw-status.py                        # 运维面板
 ```
 
 > ⚠️ Docker 数据盘在外置硬盘上，Mac 睡眠后会掉线。
-> `docker ps` 超时或报 I/O error 时**先查盘**，不要尝试其他修复。
+> `docker ps` 超时、daemon 连不上或报 I/O error 时**先查盘**：
+> `diskutil list external physical` + `ls /Volumes`。
+> 如果盘已挂载，优先试这个恢复顺序：
+> `open -a Docker`，等 `docker ps` 通，再执行
+> `cd infra && docker compose --env-file ../.env --profile core --profile agent up -d`。
+> 这是待验证经验；下次不管用就删掉这条。
