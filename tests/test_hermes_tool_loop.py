@@ -112,6 +112,89 @@ chk("L0 工具被放行（门禁没有误拦）",
 chk("放行的结果里没有门禁消息",
     all("PENDING_APPROVAL" not in c["content"] for c in called2))
 
+print("\n=== M2：L3 动作在 Hermes 里被挂起 ===\n")
+
+# oneshot 会开 HERMES_YOLO_MODE 绕过 Hermes 自带的审批。
+# **我们的门禁是 pre_tool_call 钩子，不受它影响** —— 这正是铁律 1 的意思：
+# 限制在钩子里，不在提示词里，也不在 Hermes 的审批开关里。
+DB = str(ROOT / ".hermes" / "test-home" / "m2.db")
+for suf in ("", "-wal", "-shm"):
+    f = pathlib.Path(DB + suf)
+    if f.exists():
+        f.unlink()
+
+script3 = [CALL("ingest_table", source="northwind", table="shippers"),
+           {"text": "已发起审批。"}]
+with StubServer(script3, port=STUB_PORT) as s4:
+    env_extra = {"DATASTEWARD_DB": DB, "NOTIFY_CHANNEL": "outbox",
+                 "NOTIFY_OUTBOX": DB + ".outbox.jsonl"}
+    saved = dict(os.environ)
+    os.environ.update(env_extra)
+    try:
+        out4, _ = run_hermes("把 northwind 的 shippers 接进数据湖", s4)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    called4 = s4.tool_calls_made()
+
+blob = " ".join(c["content"] or "" for c in called4)
+chk("L3 动作被门禁拦下（YOLO 也拦得住）", "PENDING_APPROVAL" in blob,
+    blob[:90] or "（没有工具结果）")
+chk("拦截消息告诉模型别重试", "不要重试" in blob or "重新唤醒" in blob)
+chk("**没有真的写 bronze**", "已落" not in blob and "行，策略" not in blob)
+
+import sqlite3
+try:
+    con = sqlite3.connect(DB)
+    n = con.execute("SELECT count(*) FROM approvals").fetchone()[0]
+    d = con.execute("SELECT count(*) FROM decisions").fetchone()[0]
+    con.close()
+except Exception as e:                                        # noqa: BLE001
+    n, d = -1, -1
+chk("审批请求落库了", n >= 1, f"approvals={n}")
+chk("**Agent 侧没有产生任何决定**（机制三）", d == 0, f"decisions={d}")
+
+print("\n=== M2：批准之后恢复 ===\n")
+
+# 用**独立连接**落决定 —— 模拟审批 callback 那个独立进程（铁律 2）。
+sys.path.insert(0, str(ROOT / "plugins"))
+from datasteward_gate.approvals import Store                   # noqa: E402
+
+admin = Store(DB, readonly=False)
+row = admin.db.execute("SELECT id, run_id, action_hash FROM approvals "
+                       "ORDER BY created_at DESC LIMIT 1").fetchone()
+chk("拿到了刚才那份待决审批", bool(row), str(row and row[0][:8]))
+if row:
+    admin.decide(row[0], "approve", "wang@acme.com")
+
+with StubServer(script3, port=STUB_PORT) as s5:
+    saved = dict(os.environ)
+    os.environ.update(env_extra)
+    try:
+        out5, _ = run_hermes("把 northwind 的 shippers 接进数据湖", s5)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    called5 = s5.tool_calls_made()
+
+blob5 = " ".join(c["content"] or "" for c in called5)
+chk("批准后放行并真的写了 bronze",
+    "已落" in blob5 and "行，策略" in blob5, blob5[:100])
+chk("恢复不依赖我的脚本推动 —— 是 Hermes 自己再调一次工具",
+    any("tool_call" in (c["name"] or "") for c in called5))
+
+# 票据一次性：再跑一次应当重新挂起
+with StubServer(script3, port=STUB_PORT) as s6:
+    saved = dict(os.environ)
+    os.environ.update(env_extra)
+    try:
+        run_hermes("再把 northwind 的 shippers 接一次", s6)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    blob6 = " ".join(c["content"] or "" for c in s6.tool_calls_made())
+chk("**票据一次性**：再来一次重新挂起", "PENDING_APPROVAL" in blob6, blob6[:70])
+
 print("\n=== 桩本身可信 ===\n")
 
 with StubServer([{"text": "只说话不调工具"}], port=STUB_PORT) as s3:

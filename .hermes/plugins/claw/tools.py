@@ -57,7 +57,92 @@ def _list_source_tables(args: dict, **_: Any) -> str:
     return "\n".join(lines)
 
 
-_HANDLERS = {"list_source_tables": _list_source_tables}
+def _profile_table(args: dict, **_: Any) -> str:
+    src = str(args.get("source") or "").strip()
+    tbl = str(args.get("table") or "").strip()
+    if not (src and tbl):
+        return "错误：需要 source 与 table。"
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        import data_tools
+        d = data_tools.run_dq_check(src, tbl)
+    except Exception as e:                                    # noqa: BLE001
+        return f"画像 {src}.{tbl} 失败：{type(e).__name__}: {e}"
+    if "error" in d:
+        return f"画像 {src}.{tbl} 失败：{d['error']}"
+    fs = d.get("findings") or []
+    head = (f"{tbl}：采样 {d.get('sampled_rows', 0):,} 行"
+            f"（{d.get('sampling', '?')}），{len(fs)} 项发现")
+    if not fs:
+        return head + "。质量门槛全部达标。"
+    lines = [head + "："]
+    for f in fs[:12]:
+        lines.append(f"  · {f['column']} / {f['issue']}（{f['severity']}）"
+                     f" {f.get('detail', '')}")
+    return "\n".join(lines)
+
+
+def _ingest_table(args: dict, **_: Any) -> str:
+    """接入一张表到 bronze。**L3 —— 门禁会先拦下它。**
+
+    这个 handler 只有在门禁放行后才会被调用；被拦时 Hermes 根本不会走到这里。
+    所以这里不需要（也不该）自己判断有没有审批 —— 那样限制就散进业务代码了。
+    """
+    src = str(args.get("source") or "").strip()
+    tbl = str(args.get("table") or "").strip()
+    if not (src and tbl):
+        return "错误：需要 source 与 table。"
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        import sync
+        r = sync.sync_table(src, tbl)
+    except Exception as e:                                    # noqa: BLE001
+        return f"接入 {src}.{tbl} 失败：{type(e).__name__}: {str(e)[:200]}"
+    return (f"{src}.{tbl} 已落 {r['bronze_table']}："
+            f"{r['row_count']:,} 行，策略 {r['strategy']}。")
+
+
+_SCHEMAS.update({
+    "profile_table": {
+        "name": "profile_table",
+        "description": (
+            "对一张源表做画像并按质量门槛判定，返回**结论**而不是数据行。"
+            "源上只采样，全量检查落 bronze 后在 lake 里做。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "源系统 id"},
+                "table": {"type": "string", "description": "表名"},
+            },
+            "required": ["source", "table"],
+        },
+    },
+    "ingest_table": {
+        "name": "ingest_table",
+        "description": (
+            "把一张源表接入数据湖的 bronze 层。**这是需要负责人审批的动作**——"
+            "调用后如果返回待审批，就说明已经替你发出了审批请求，"
+            "不要重试，去做别的不受阻塞的事。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "源系统 id"},
+                "table": {"type": "string", "description": "表名"},
+            },
+            "required": ["source", "table"],
+        },
+    },
+})
+
+_HANDLERS = {
+    "list_source_tables": _list_source_tables,
+    "profile_table": _profile_table,
+    "ingest_table": _ingest_table,
+}
 
 
 def register_tools(ctx) -> None:
