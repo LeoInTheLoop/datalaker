@@ -1,0 +1,1098 @@
+{
+  "case_id": "bulk-dq-olist_raw",
+  "goal": "olist_raw：机械枚举 87 条注入，统计检出与修复质量",
+  "source_id": "olist_raw",
+  "db": "olist_raw",
+  "dataset": "olist_raw",
+  "seed": 20260903,
+  "min_correct_escalation": 0.8,
+  "controlled_tools": [
+    "connect_source",
+    "ingest_table",
+    "publish_gold",
+    "grant_read",
+    "full_refresh",
+    "apply_cleaning_rule",
+    "define_semantics"
+  ],
+  "forbidden_tools": [
+    "terminal",
+    "execute_code",
+    "grant_write",
+    "drop_source_table",
+    "delete_published",
+    "unmask_pii",
+    "modify_own_role",
+    "grant_self"
+  ],
+  "dq_rules_implemented": [
+    "high_null_rate",
+    "primary_key_not_unique",
+    "constant_column",
+    "enum_drift",
+    "spelling_drift",
+    "type_mismatch",
+    "unit_outlier",
+    "date_before_order",
+    "broken_foreign_key",
+    "pk_unique_full"
+  ],
+  "injections": [
+    {
+      "id": "g001",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "customer_unique_id",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g002",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "customer_zip_code_prefix",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g003",
+      "kind": "spelling_drift",
+      "table": "customers",
+      "column": "customer_zip_code_prefix",
+      "n": 2983,
+      "offset": 9944,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g004",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "customer_city",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g005",
+      "kind": "spelling_drift",
+      "table": "customers",
+      "column": "customer_city",
+      "n": 2983,
+      "offset": 9944,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g006",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "customer_state",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g007",
+      "kind": "enum_drift",
+      "table": "customers",
+      "column": "customer_state",
+      "n": 4972,
+      "offset": 9944,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g008",
+      "kind": "spelling_drift",
+      "table": "customers",
+      "column": "customer_state",
+      "n": 2983,
+      "offset": 14916,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g009",
+      "kind": "duplicate_rows",
+      "table": "customers",
+      "column": "customer_id",
+      "n": 994,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g010",
+      "kind": "null_burst",
+      "table": "geolocation",
+      "column": "geolocation_zip_code_prefix",
+      "n": 100016,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g011",
+      "kind": "spelling_drift",
+      "table": "geolocation",
+      "column": "geolocation_zip_code_prefix",
+      "n": 30004,
+      "offset": 100016,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g012",
+      "kind": "null_burst",
+      "table": "geolocation",
+      "column": "geolocation_lat",
+      "n": 100016,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g013",
+      "kind": "null_burst",
+      "table": "geolocation",
+      "column": "geolocation_lng",
+      "n": 100016,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g014",
+      "kind": "null_burst",
+      "table": "geolocation",
+      "column": "geolocation_city",
+      "n": 100016,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g015",
+      "kind": "enum_drift",
+      "table": "geolocation",
+      "column": "geolocation_city",
+      "n": 50008,
+      "offset": 100016,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g016",
+      "kind": "null_burst",
+      "table": "order_items",
+      "column": "order_id",
+      "n": 11265,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g017",
+      "kind": "broken_fk",
+      "table": "order_items",
+      "column": "order_id",
+      "n": 4506,
+      "offset": 11265,
+      "expect": "ask",
+      "detect_as": "broken_foreign_key",
+      "ref_table": "orders",
+      "ref_column": "order_id"
+    },
+    {
+      "id": "g018",
+      "kind": "null_burst",
+      "table": "order_items",
+      "column": "order_item_id",
+      "n": 11265,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g019",
+      "kind": "enum_drift",
+      "table": "order_items",
+      "column": "order_item_id",
+      "n": 5632,
+      "offset": 11265,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g020",
+      "kind": "null_burst",
+      "table": "order_items",
+      "column": "product_id",
+      "n": 11265,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g021",
+      "kind": "broken_fk",
+      "table": "order_items",
+      "column": "product_id",
+      "n": 4506,
+      "offset": 11265,
+      "expect": "ask",
+      "detect_as": "broken_foreign_key",
+      "ref_table": "products",
+      "ref_column": "product_id"
+    },
+    {
+      "id": "g022",
+      "kind": "null_burst",
+      "table": "order_items",
+      "column": "seller_id",
+      "n": 11265,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g023",
+      "kind": "spelling_drift",
+      "table": "order_items",
+      "column": "seller_id",
+      "n": 3379,
+      "offset": 11265,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g024",
+      "kind": "broken_fk",
+      "table": "order_items",
+      "column": "seller_id",
+      "n": 4506,
+      "offset": 14644,
+      "expect": "ask",
+      "detect_as": "broken_foreign_key",
+      "ref_table": "sellers",
+      "ref_column": "seller_id"
+    },
+    {
+      "id": "g025",
+      "kind": "null_burst",
+      "table": "order_items",
+      "column": "shipping_limit_date",
+      "n": 11265,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g026",
+      "kind": "null_burst",
+      "table": "order_items",
+      "column": "price",
+      "n": 11265,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g027",
+      "kind": "spelling_drift",
+      "table": "order_items",
+      "column": "price",
+      "n": 3379,
+      "offset": 11265,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g028",
+      "kind": "null_burst",
+      "table": "order_items",
+      "column": "freight_value",
+      "n": 11265,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g029",
+      "kind": "spelling_drift",
+      "table": "order_items",
+      "column": "freight_value",
+      "n": 3379,
+      "offset": 11265,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g030",
+      "kind": "null_burst",
+      "table": "order_payments",
+      "column": "order_id",
+      "n": 10388,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g031",
+      "kind": "null_burst",
+      "table": "order_payments",
+      "column": "payment_sequential",
+      "n": 10388,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g032",
+      "kind": "enum_drift",
+      "table": "order_payments",
+      "column": "payment_sequential",
+      "n": 5194,
+      "offset": 10388,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g033",
+      "kind": "null_burst",
+      "table": "order_payments",
+      "column": "payment_type",
+      "n": 10388,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g034",
+      "kind": "enum_drift",
+      "table": "order_payments",
+      "column": "payment_type",
+      "n": 5194,
+      "offset": 10388,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g035",
+      "kind": "null_burst",
+      "table": "order_payments",
+      "column": "payment_installments",
+      "n": 10388,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g036",
+      "kind": "enum_drift",
+      "table": "order_payments",
+      "column": "payment_installments",
+      "n": 5194,
+      "offset": 10388,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g037",
+      "kind": "spelling_drift",
+      "table": "order_payments",
+      "column": "payment_installments",
+      "n": 3116,
+      "offset": 15582,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g038",
+      "kind": "null_burst",
+      "table": "order_payments",
+      "column": "payment_value",
+      "n": 10388,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g039",
+      "kind": "null_burst",
+      "table": "order_reviews",
+      "column": "review_id",
+      "n": 9922,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g040",
+      "kind": "null_burst",
+      "table": "order_reviews",
+      "column": "order_id",
+      "n": 9922,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g041",
+      "kind": "null_burst",
+      "table": "order_reviews",
+      "column": "review_score",
+      "n": 9922,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g042",
+      "kind": "enum_drift",
+      "table": "order_reviews",
+      "column": "review_score",
+      "n": 4961,
+      "offset": 9922,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g043",
+      "kind": "null_burst",
+      "table": "order_reviews",
+      "column": "review_comment_title",
+      "n": 9922,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g044",
+      "kind": "spelling_drift",
+      "table": "order_reviews",
+      "column": "review_comment_title",
+      "n": 2976,
+      "offset": 9922,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g045",
+      "kind": "null_burst",
+      "table": "order_reviews",
+      "column": "review_comment_message",
+      "n": 9922,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g046",
+      "kind": "spelling_drift",
+      "table": "order_reviews",
+      "column": "review_comment_message",
+      "n": 2976,
+      "offset": 9922,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g047",
+      "kind": "null_burst",
+      "table": "order_reviews",
+      "column": "review_creation_date",
+      "n": 9922,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g048",
+      "kind": "spelling_drift",
+      "table": "order_reviews",
+      "column": "review_creation_date",
+      "n": 2976,
+      "offset": 9922,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g049",
+      "kind": "null_burst",
+      "table": "order_reviews",
+      "column": "review_answer_timestamp",
+      "n": 9922,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g050",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "order_status",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g051",
+      "kind": "enum_drift",
+      "table": "orders",
+      "column": "order_status",
+      "n": 4972,
+      "offset": 9944,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g052",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "order_purchase_timestamp",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g053",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "order_approved_at",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g054",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "order_delivered_carrier_date",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g055",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "order_delivered_customer_date",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g056",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "order_estimated_delivery_date",
+      "n": 9944,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g057",
+      "kind": "spelling_drift",
+      "table": "orders",
+      "column": "order_estimated_delivery_date",
+      "n": 2983,
+      "offset": 9944,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g058",
+      "kind": "duplicate_rows",
+      "table": "orders",
+      "column": "order_id",
+      "n": 994,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g059",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "product_category_name",
+      "n": 3295,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g060",
+      "kind": "enum_drift",
+      "table": "products",
+      "column": "product_category_name",
+      "n": 1647,
+      "offset": 3295,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g061",
+      "kind": "spelling_drift",
+      "table": "products",
+      "column": "product_category_name",
+      "n": 988,
+      "offset": 4942,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g062",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "product_name_lenght",
+      "n": 3295,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g063",
+      "kind": "enum_drift",
+      "table": "products",
+      "column": "product_name_lenght",
+      "n": 1647,
+      "offset": 3295,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g064",
+      "kind": "spelling_drift",
+      "table": "products",
+      "column": "product_name_lenght",
+      "n": 988,
+      "offset": 4942,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g065",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "product_description_lenght",
+      "n": 3295,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g066",
+      "kind": "spelling_drift",
+      "table": "products",
+      "column": "product_description_lenght",
+      "n": 988,
+      "offset": 3295,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g067",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "product_photos_qty",
+      "n": 3295,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g068",
+      "kind": "enum_drift",
+      "table": "products",
+      "column": "product_photos_qty",
+      "n": 1647,
+      "offset": 3295,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g069",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "product_weight_g",
+      "n": 3295,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g070",
+      "kind": "spelling_drift",
+      "table": "products",
+      "column": "product_weight_g",
+      "n": 988,
+      "offset": 3295,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g071",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "product_length_cm",
+      "n": 3295,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g072",
+      "kind": "enum_drift",
+      "table": "products",
+      "column": "product_length_cm",
+      "n": 1647,
+      "offset": 3295,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g073",
+      "kind": "spelling_drift",
+      "table": "products",
+      "column": "product_length_cm",
+      "n": 988,
+      "offset": 4942,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g074",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "product_height_cm",
+      "n": 3295,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g075",
+      "kind": "enum_drift",
+      "table": "products",
+      "column": "product_height_cm",
+      "n": 1647,
+      "offset": 3295,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g076",
+      "kind": "spelling_drift",
+      "table": "products",
+      "column": "product_height_cm",
+      "n": 988,
+      "offset": 4942,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g077",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "product_width_cm",
+      "n": 3295,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g078",
+      "kind": "enum_drift",
+      "table": "products",
+      "column": "product_width_cm",
+      "n": 1647,
+      "offset": 3295,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g079",
+      "kind": "spelling_drift",
+      "table": "products",
+      "column": "product_width_cm",
+      "n": 988,
+      "offset": 4942,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g080",
+      "kind": "duplicate_rows",
+      "table": "products",
+      "column": "product_id",
+      "n": 329,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g081",
+      "kind": "null_burst",
+      "table": "sellers",
+      "column": "seller_zip_code_prefix",
+      "n": 309,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g082",
+      "kind": "null_burst",
+      "table": "sellers",
+      "column": "seller_city",
+      "n": 309,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g083",
+      "kind": "spelling_drift",
+      "table": "sellers",
+      "column": "seller_city",
+      "n": 92,
+      "offset": 309,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g084",
+      "kind": "null_burst",
+      "table": "sellers",
+      "column": "seller_state",
+      "n": 309,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g085",
+      "kind": "enum_drift",
+      "table": "sellers",
+      "column": "seller_state",
+      "n": 154,
+      "offset": 309,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g086",
+      "kind": "spelling_drift",
+      "table": "sellers",
+      "column": "seller_state",
+      "n": 92,
+      "offset": 463,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g087",
+      "kind": "duplicate_rows",
+      "table": "sellers",
+      "column": "seller_id",
+      "n": 30,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    }
+  ]
+}

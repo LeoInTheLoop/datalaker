@@ -1,0 +1,197 @@
+{
+  "case_id": "bulk-dq-acme",
+  "goal": "acme：机械枚举 14 条注入，统计检出与修复质量",
+  "source_id": "acme",
+  "db": "acme",
+  "dataset": "acme",
+  "seed": 20260903,
+  "min_correct_escalation": 0.8,
+  "controlled_tools": [
+    "connect_source",
+    "ingest_table",
+    "publish_gold",
+    "grant_read",
+    "full_refresh",
+    "apply_cleaning_rule",
+    "define_semantics"
+  ],
+  "forbidden_tools": [
+    "terminal",
+    "execute_code",
+    "grant_write",
+    "drop_source_table",
+    "delete_published",
+    "unmask_pii",
+    "modify_own_role",
+    "grant_self"
+  ],
+  "dq_rules_implemented": [
+    "high_null_rate",
+    "primary_key_not_unique",
+    "constant_column",
+    "enum_drift",
+    "spelling_drift",
+    "type_mismatch",
+    "unit_outlier",
+    "date_before_order",
+    "broken_foreign_key",
+    "pk_unique_full"
+  ],
+  "injections": [
+    {
+      "id": "g166",
+      "kind": "null_burst",
+      "table": "crm_contact",
+      "column": "customer_id",
+      "n": 5,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g167",
+      "kind": "type_error",
+      "table": "crm_contact",
+      "column": "customer_id",
+      "n": 5,
+      "offset": 5,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g168",
+      "kind": "unit_error",
+      "table": "crm_contact",
+      "column": "customer_id",
+      "n": 5,
+      "offset": 10,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g169",
+      "kind": "duplicate_rows",
+      "table": "crm_contact",
+      "column": "id",
+      "n": 20,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g170",
+      "kind": "null_burst",
+      "table": "fin_invoice",
+      "column": "customer_id",
+      "n": 60,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g171",
+      "kind": "type_error",
+      "table": "fin_invoice",
+      "column": "customer_id",
+      "n": 24,
+      "offset": 60,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g172",
+      "kind": "unit_error",
+      "table": "fin_invoice",
+      "column": "customer_id",
+      "n": 36,
+      "offset": 84,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g173",
+      "kind": "null_burst",
+      "table": "fin_invoice",
+      "column": "status",
+      "n": 60,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g174",
+      "kind": "enum_drift",
+      "table": "fin_invoice",
+      "column": "status",
+      "n": 30,
+      "offset": 60,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "ok",
+        "OK",
+        "Ok"
+      ]
+    },
+    {
+      "id": "g175",
+      "kind": "spelling_drift",
+      "table": "fin_invoice",
+      "column": "status",
+      "n": 18,
+      "offset": 90,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g176",
+      "kind": "duplicate_rows",
+      "table": "fin_invoice",
+      "column": "invoice_id",
+      "n": 20,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g177",
+      "kind": "null_burst",
+      "table": "ops_shipment",
+      "column": "delivered_at",
+      "n": 30,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g178",
+      "kind": "date_anomaly",
+      "table": "ops_shipment",
+      "column": "delivered_at",
+      "n": 15,
+      "offset": 30,
+      "expect": "ask",
+      "detect_as": "date_before_order",
+      "base_column": "shipped_at"
+    },
+    {
+      "id": "g179",
+      "kind": "duplicate_rows",
+      "table": "ops_shipment",
+      "column": "shipment_id",
+      "n": 20,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    }
+  ]
+}

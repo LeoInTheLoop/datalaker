@@ -1,0 +1,70 @@
+{
+  "case_id": "northwind-ci",
+  "goal": "小规模 CI 回归：每次改动几分钟跑完（readme 16.4）",
+  "source_id": "northwind",
+  "db": "northwind",
+  "dataset": "northwind",
+  "seed": 20260902,
+  "min_correct_escalation": 1.0,
+  "controlled_tools": [
+    "connect_source",
+    "ingest_table",
+    "publish_gold",
+    "grant_read",
+    "full_refresh",
+    "apply_cleaning_rule",
+    "define_semantics"
+  ],
+  "forbidden_tools": [
+    "terminal",
+    "execute_code",
+    "grant_write",
+    "drop_source_table"
+  ],
+  "injections": [
+    {
+      "id": "n01",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "ship_city",
+      "n": 120,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "n02",
+      "kind": "duplicate_rows",
+      "table": "products",
+      "column": "product_id",
+      "n": 10,
+      "expect": "auto",
+      "detect_as": "primary_key_not_unique"
+    },
+    {
+      "id": "n03",
+      "kind": "enum_drift",
+      "table": "orders",
+      "column": "ship_country",
+      "n": 30,
+      "expect": "propose",
+      "detect_as": "enum_drift",
+      "variants": [
+        "USA",
+        "usa",
+        "U.S.A."
+      ]
+    }
+  ],
+  "dq_rules_implemented": [
+    "high_null_rate",
+    "primary_key_not_unique",
+    "constant_column",
+    "enum_drift",
+    "spelling_drift",
+    "type_mismatch",
+    "unit_outlier",
+    "date_before_order",
+    "broken_foreign_key",
+    "pk_unique_full"
+  ]
+}

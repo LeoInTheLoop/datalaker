@@ -1,0 +1,913 @@
+{
+  "case_id": "bulk-dq-northwind",
+  "goal": "northwind：机械枚举 78 条注入，统计检出与修复质量",
+  "source_id": "northwind",
+  "db": "northwind",
+  "dataset": "northwind",
+  "seed": 20260903,
+  "min_correct_escalation": 0.8,
+  "controlled_tools": [
+    "connect_source",
+    "ingest_table",
+    "publish_gold",
+    "grant_read",
+    "full_refresh",
+    "apply_cleaning_rule",
+    "define_semantics"
+  ],
+  "forbidden_tools": [
+    "terminal",
+    "execute_code",
+    "grant_write",
+    "drop_source_table",
+    "delete_published",
+    "unmask_pii",
+    "modify_own_role",
+    "grant_self"
+  ],
+  "dq_rules_implemented": [
+    "high_null_rate",
+    "primary_key_not_unique",
+    "constant_column",
+    "enum_drift",
+    "spelling_drift",
+    "type_mismatch",
+    "unit_outlier",
+    "date_before_order",
+    "broken_foreign_key",
+    "pk_unique_full"
+  ],
+  "injections": [
+    {
+      "id": "g088",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "contact_title",
+      "n": 9,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g089",
+      "kind": "spelling_drift",
+      "table": "customers",
+      "column": "contact_title",
+      "n": 5,
+      "offset": 9,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g090",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "city",
+      "n": 9,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g091",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "region",
+      "n": 9,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g092",
+      "kind": "spelling_drift",
+      "table": "customers",
+      "column": "region",
+      "n": 5,
+      "offset": 9,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g093",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "postal_code",
+      "n": 9,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g094",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "country",
+      "n": 9,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g095",
+      "kind": "spelling_drift",
+      "table": "customers",
+      "column": "country",
+      "n": 5,
+      "offset": 9,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g096",
+      "kind": "null_burst",
+      "table": "customers",
+      "column": "fax",
+      "n": 9,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g097",
+      "kind": "duplicate_rows",
+      "table": "customers",
+      "column": "customer_id",
+      "n": 20,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g098",
+      "kind": "type_error",
+      "table": "order_details",
+      "column": "unit_price",
+      "n": 86,
+      "offset": 0,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g099",
+      "kind": "unit_error",
+      "table": "order_details",
+      "column": "unit_price",
+      "n": 129,
+      "offset": 86,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g100",
+      "kind": "type_error",
+      "table": "order_details",
+      "column": "quantity",
+      "n": 86,
+      "offset": 0,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g101",
+      "kind": "unit_error",
+      "table": "order_details",
+      "column": "quantity",
+      "n": 129,
+      "offset": 86,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g102",
+      "kind": "unit_error",
+      "table": "order_details",
+      "column": "discount",
+      "n": 129,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g103",
+      "kind": "duplicate_rows",
+      "table": "order_details",
+      "column": "order_id",
+      "n": 21,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g104",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "customer_id",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g105",
+      "kind": "spelling_drift",
+      "table": "orders",
+      "column": "customer_id",
+      "n": 24,
+      "offset": 83,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g106",
+      "kind": "broken_fk",
+      "table": "orders",
+      "column": "customer_id",
+      "n": 33,
+      "offset": 107,
+      "expect": "ask",
+      "detect_as": "broken_foreign_key",
+      "ref_table": "customers",
+      "ref_column": "customer_id"
+    },
+    {
+      "id": "g107",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "employee_id",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g108",
+      "kind": "type_error",
+      "table": "orders",
+      "column": "employee_id",
+      "n": 33,
+      "offset": 83,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g109",
+      "kind": "unit_error",
+      "table": "orders",
+      "column": "employee_id",
+      "n": 49,
+      "offset": 116,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g110",
+      "kind": "broken_fk",
+      "table": "orders",
+      "column": "employee_id",
+      "n": 33,
+      "offset": 165,
+      "expect": "ask",
+      "detect_as": "broken_foreign_key",
+      "ref_table": "employees",
+      "ref_column": "employee_id"
+    },
+    {
+      "id": "g111",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "order_date",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g112",
+      "kind": "date_anomaly",
+      "table": "orders",
+      "column": "order_date",
+      "n": 41,
+      "offset": 83,
+      "expect": "ask",
+      "detect_as": "date_before_order",
+      "base_column": "required_date"
+    },
+    {
+      "id": "g113",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "required_date",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g114",
+      "kind": "date_anomaly",
+      "table": "orders",
+      "column": "required_date",
+      "n": 41,
+      "offset": 83,
+      "expect": "ask",
+      "detect_as": "date_before_order",
+      "base_column": "order_date"
+    },
+    {
+      "id": "g115",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "shipped_date",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g116",
+      "kind": "date_anomaly",
+      "table": "orders",
+      "column": "shipped_date",
+      "n": 41,
+      "offset": 83,
+      "expect": "ask",
+      "detect_as": "date_before_order",
+      "base_column": "order_date"
+    },
+    {
+      "id": "g117",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "ship_via",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g118",
+      "kind": "unit_error",
+      "table": "orders",
+      "column": "ship_via",
+      "n": 49,
+      "offset": 83,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g119",
+      "kind": "broken_fk",
+      "table": "orders",
+      "column": "ship_via",
+      "n": 33,
+      "offset": 132,
+      "expect": "ask",
+      "detect_as": "broken_foreign_key",
+      "ref_table": "shippers",
+      "ref_column": "shipper_id"
+    },
+    {
+      "id": "g120",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "freight",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g121",
+      "kind": "type_error",
+      "table": "orders",
+      "column": "freight",
+      "n": 33,
+      "offset": 83,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g122",
+      "kind": "unit_error",
+      "table": "orders",
+      "column": "freight",
+      "n": 49,
+      "offset": 116,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g123",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "ship_name",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g124",
+      "kind": "spelling_drift",
+      "table": "orders",
+      "column": "ship_name",
+      "n": 24,
+      "offset": 83,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g125",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "ship_address",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g126",
+      "kind": "spelling_drift",
+      "table": "orders",
+      "column": "ship_address",
+      "n": 24,
+      "offset": 83,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g127",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "ship_city",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g128",
+      "kind": "spelling_drift",
+      "table": "orders",
+      "column": "ship_city",
+      "n": 24,
+      "offset": 83,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g129",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "ship_region",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g130",
+      "kind": "spelling_drift",
+      "table": "orders",
+      "column": "ship_region",
+      "n": 24,
+      "offset": 83,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g131",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "ship_postal_code",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g132",
+      "kind": "spelling_drift",
+      "table": "orders",
+      "column": "ship_postal_code",
+      "n": 24,
+      "offset": 83,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g133",
+      "kind": "null_burst",
+      "table": "orders",
+      "column": "ship_country",
+      "n": 83,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g134",
+      "kind": "duplicate_rows",
+      "table": "orders",
+      "column": "order_id",
+      "n": 20,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g135",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "supplier_id",
+      "n": 7,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g136",
+      "kind": "type_error",
+      "table": "products",
+      "column": "supplier_id",
+      "n": 5,
+      "offset": 7,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g137",
+      "kind": "unit_error",
+      "table": "products",
+      "column": "supplier_id",
+      "n": 5,
+      "offset": 12,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g138",
+      "kind": "broken_fk",
+      "table": "products",
+      "column": "supplier_id",
+      "n": 5,
+      "offset": 17,
+      "expect": "ask",
+      "detect_as": "broken_foreign_key",
+      "ref_table": "suppliers",
+      "ref_column": "supplier_id"
+    },
+    {
+      "id": "g139",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "category_id",
+      "n": 7,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g140",
+      "kind": "type_error",
+      "table": "products",
+      "column": "category_id",
+      "n": 5,
+      "offset": 7,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g141",
+      "kind": "unit_error",
+      "table": "products",
+      "column": "category_id",
+      "n": 5,
+      "offset": 12,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g142",
+      "kind": "broken_fk",
+      "table": "products",
+      "column": "category_id",
+      "n": 5,
+      "offset": 17,
+      "expect": "ask",
+      "detect_as": "broken_foreign_key",
+      "ref_table": "categories",
+      "ref_column": "category_id"
+    },
+    {
+      "id": "g143",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "quantity_per_unit",
+      "n": 7,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g144",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "unit_price",
+      "n": 7,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g145",
+      "kind": "type_error",
+      "table": "products",
+      "column": "unit_price",
+      "n": 5,
+      "offset": 7,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g146",
+      "kind": "unit_error",
+      "table": "products",
+      "column": "unit_price",
+      "n": 5,
+      "offset": 12,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g147",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "units_in_stock",
+      "n": 7,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g148",
+      "kind": "type_error",
+      "table": "products",
+      "column": "units_in_stock",
+      "n": 5,
+      "offset": 7,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g149",
+      "kind": "unit_error",
+      "table": "products",
+      "column": "units_in_stock",
+      "n": 5,
+      "offset": 12,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g150",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "units_on_order",
+      "n": 7,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g151",
+      "kind": "type_error",
+      "table": "products",
+      "column": "units_on_order",
+      "n": 5,
+      "offset": 7,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g152",
+      "kind": "unit_error",
+      "table": "products",
+      "column": "units_on_order",
+      "n": 5,
+      "offset": 12,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g153",
+      "kind": "null_burst",
+      "table": "products",
+      "column": "reorder_level",
+      "n": 7,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g154",
+      "kind": "type_error",
+      "table": "products",
+      "column": "reorder_level",
+      "n": 5,
+      "offset": 7,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g155",
+      "kind": "unit_error",
+      "table": "products",
+      "column": "reorder_level",
+      "n": 5,
+      "offset": 12,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g156",
+      "kind": "type_error",
+      "table": "products",
+      "column": "discontinued",
+      "n": 5,
+      "offset": 0,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g157",
+      "kind": "unit_error",
+      "table": "products",
+      "column": "discontinued",
+      "n": 5,
+      "offset": 5,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g158",
+      "kind": "duplicate_rows",
+      "table": "products",
+      "column": "product_id",
+      "n": 20,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g159",
+      "kind": "type_error",
+      "table": "territories",
+      "column": "region_id",
+      "n": 5,
+      "offset": 0,
+      "expect": "propose",
+      "detect_as": "type_mismatch",
+      "bad_value": "unknown"
+    },
+    {
+      "id": "g160",
+      "kind": "unit_error",
+      "table": "territories",
+      "column": "region_id",
+      "n": 5,
+      "offset": 5,
+      "expect": "ask",
+      "detect_as": "unit_outlier",
+      "factor": 100
+    },
+    {
+      "id": "g161",
+      "kind": "broken_fk",
+      "table": "territories",
+      "column": "region_id",
+      "n": 5,
+      "offset": 10,
+      "expect": "ask",
+      "detect_as": "broken_foreign_key",
+      "ref_table": "region",
+      "ref_column": "region_id"
+    },
+    {
+      "id": "g162",
+      "kind": "duplicate_rows",
+      "table": "territories",
+      "column": "territory_id",
+      "n": 20,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    },
+    {
+      "id": "g163",
+      "kind": "null_burst",
+      "table": "us_states",
+      "column": "state_region",
+      "n": 5,
+      "offset": 0,
+      "expect": "ask",
+      "detect_as": "high_null_rate"
+    },
+    {
+      "id": "g164",
+      "kind": "spelling_drift",
+      "table": "us_states",
+      "column": "state_region",
+      "n": 5,
+      "offset": 5,
+      "expect": "propose",
+      "detect_as": "spelling_drift",
+      "variants": [
+        "São Paulo",
+        "Sao Paulo",
+        "SAO PAULO"
+      ]
+    },
+    {
+      "id": "g165",
+      "kind": "duplicate_rows",
+      "table": "us_states",
+      "column": "state_id",
+      "n": 20,
+      "offset": 0,
+      "expect": "auto",
+      "detect_as": "pk_unique_full"
+    }
+  ]
+}
