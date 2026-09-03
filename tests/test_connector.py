@@ -24,9 +24,9 @@ check("无 LIMIT 自动注入", "LIMIT 1000" in connector.LEDGER[-1]["sql"])
 # 4. join 被拒
 try:
     connector.query("olist", "SELECT * FROM orders o JOIN orders b ON o.id=b.id")
-    check("源系统禁止 join", False)
+    check("JOIN 默认不直接执行", False)
 except QueryRejected as e:
-    check("源系统禁止 join", True, str(e)[:32])
+    check("JOIN 默认不直接执行", True, str(e)[:40])
 
 # 5. 非 SELECT 被拒
 for stmt in ("UPDATE orders SET status='x'", "DROP TABLE orders", "INSERT INTO orders VALUES (9)"):
@@ -43,8 +43,10 @@ except connector.ConnectorError:
 
 # 7. 负载记账
 rep = connector.load_report("olist")
-check("负载记账可用", rep["queries"] >= 2 and rep["rejected"] >= 4,
-      f"{rep['queries']} 次查询 / {rep['rejected']} 次拒绝")
+check("负载记账可用", rep["queries"] >= 2 and rep["rejected"] >= 3
+      and rep["pending_approval"] >= 1,
+      f"{rep['queries']} 次查询 / {rep['rejected']} 次拒绝 / "
+      f"{rep['pending_approval']} 次待审批")
 
 # 8. 低峰时间窗口只约束批量抽取
 import os

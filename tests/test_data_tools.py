@@ -10,7 +10,7 @@ ok, bad = [], []
 def chk(n, c, d=""):
     (ok if c else bad).append(n); print(f"  {'PASS' if c else 'FAIL'}  {n}" + (f"  [{d}]" if d else ""))
 
-print("\n=== 数据工具（参数化，不接受自由 SQL）===\n")
+print("\n=== 数据工具（默认参数化；模型 SQL 走受审入口）===\n")
 
 t = D.list_source_tables("northwind")
 chk("列出源表", len(t["tables"]) >= 10, f"{len(t['tables'])} 张")
@@ -40,12 +40,18 @@ for evil in ("orders; DROP TABLE x", "orders'--", "a b", ""):
     except (BadIdentifier, Exception) as e:
         chk(f"标识符注入被拒: {evil[:18]!r}", True, type(e).__name__)
 
-# 元数据通道不绕过业务护栏
+try:
+    D.sql_query(source_id="northwind", plane="mars", sql="SELECT 1")
+    chk("未知 SQL plane 被拒", False)
+except connector.QueryRejected:
+    chk("未知 SQL plane 被拒", True)
+
+# 元数据通道不绕过业务 SQL gate
 try:
     connector.query("northwind", "SELECT * FROM orders o JOIN customers c ON 1=1")
-    chk("业务查询仍禁 join", False)
+    chk("业务 JOIN 需审批", False)
 except connector.QueryRejected:
-    chk("业务查询仍禁 join", True)
+    chk("业务 JOIN 需审批", True)
 
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 sys.exit(1 if bad else 0)

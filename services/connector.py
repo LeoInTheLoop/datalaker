@@ -11,6 +11,8 @@ import os
 import pathlib
 import threading
 import time
+from dataclasses import dataclass
+from typing import Literal
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -45,6 +47,10 @@ _BOOTSTRAP = {
             or (_E.get("SOURCE_DSN", "").replace("/olist", "/acme")),
     "olist_raw": _E.get("OLIST_DSN", "")
                  or (_E.get("SOURCE_DSN", "").replace("/olist", "/olist_raw")),
+    # 文件 / SaaS 导出的暂存区（readme 8.2）。它不是源系统，
+    # 但 Agent 对它同样只读 —— 写入由 export_ingest 用独立账号做。
+    "stage": _E.get("STAGE_DSN", "")
+             or (_E.get("SOURCE_DSN", "").replace("/olist", "/stage")),
 }
 
 _REGISTERED: dict = {}
@@ -85,6 +91,15 @@ _LOCKS = {sid: threading.Lock() for sid in _BOOTSTRAP}
 
 MAX_SCAN_ROWS = int(_E.get("CONNECTOR_MAX_SCAN_ROWS", "5000000"))
 STATEMENT_TIMEOUT_MS = int(_E.get("CONNECTOR_STATEMENT_TIMEOUT_MS", "30000"))
+DEFAULT_LIMIT = int(_E.get("CONNECTOR_DEFAULT_LIMIT", "1000"))
+SAFE_RESULT_ROWS = int(_E.get("CONNECTOR_SAFE_RESULT_ROWS", str(DEFAULT_LIMIT)))
+MAX_RESULT_ROWS = int(_E.get("CONNECTOR_MAX_RESULT_ROWS", "100000"))
+APPROVAL_SCAN_ROWS = int(_E.get("CONNECTOR_APPROVAL_SCAN_ROWS", "100000"))
+LAKE_CATALOGS = {
+    x.strip().lower()
+    for x in _E.get("CONNECTOR_LAKE_CATALOGS", "iceberg").split(",")
+    if x.strip()
+}
 
 # 负载记账（readme 8.1）：本周对该源造成了多少负载
 LEDGER: list[dict] = []
@@ -98,10 +113,185 @@ class QueryRejected(ConnectorError):
     """未通过准入。Agent 应当改写查询而非重试。"""
 
 
-DEFAULT_LIMIT = int(_E.get("CONNECTOR_DEFAULT_LIMIT", "1000"))
+class QueryApprovalRequired(QueryRejected):
+    """查询不是默认拒绝，但需要人确认后才能打到源系统。"""
 
 
-def _admit(sql: str) -> str:
+@dataclass(frozen=True)
+class SQLReview:
+    action: Literal["allow", "modify", "needs_approval", "reject"]
+    sql: str
+    reasons: tuple[str, ...] = ()
+    message: str = ""
+    approver_role: str = "owner"
+
+
+def _write_classes(exp):
+    names = ("Insert", "Update", "Delete", "Drop", "Create", "Alter",
+             "TruncateTable", "Merge")
+    return tuple(cls for cls in (getattr(exp, n, None) for n in names) if cls)
+
+
+def _read_roots(exp):
+    names = ("Select", "Show", "Describe", "Union", "Except", "Intersect")
+    return tuple(cls for cls in (getattr(exp, n, None) for n in names) if cls)
+
+
+def _set_classes(exp):
+    names = ("Union", "Except", "Intersect")
+    return tuple(cls for cls in (getattr(exp, n, None) for n in names) if cls)
+
+
+def _limit_value(tree) -> int | None:
+    """只认固定数字 LIMIT；表达式/参数化 LIMIT 交给人工确认。"""
+    limit = tree.args.get("limit")
+    if not limit:
+        return None
+    expr = getattr(limit, "expression", None)
+    if expr is None:
+        expr = getattr(limit, "args", {}).get("expression")
+    if expr is None:
+        return None
+    try:
+        if getattr(expr, "is_int", False):
+            return int(expr.this)
+        return int(expr)
+    except Exception:
+        return None
+
+
+def _has_implicit_multi_from(tree, exp) -> bool:
+    for scope in tree.find_all(exp.From):
+        n = 1 if getattr(scope, "this", None) is not None else 0
+        n += len(getattr(scope, "expressions", None) or [])
+        if n > 1:
+            return True
+    return False
+
+
+def _parse_read_sql(sql: str, dialect: str = "postgres"):
+    import sqlglot
+    from sqlglot import exp
+
+    raw = (sql or "").strip()
+    if not raw:
+        return None, exp, "空语句"
+
+    try:
+        stmts = sqlglot.parse(raw, read=dialect)
+    except Exception as e:
+        return None, exp, f"SQL 无法解析，拒绝执行：{str(e)[:80]}"
+
+    stmts = [st for st in stmts if st is not None]
+    if len(stmts) != 1:
+        return None, exp, f"只允许单条语句，收到 {len(stmts)} 条"
+
+    tree = stmts[0]
+    if not isinstance(tree, _read_roots(exp)):
+        return None, exp, (
+            f"仅允许 SELECT / SHOW / DESCRIBE，收到 {type(tree).__name__.upper()}")
+
+    for node in tree.walk():
+        if isinstance(node, _write_classes(exp)):
+            return None, exp, f"语句中包含写操作 {type(node).__name__.upper()}"
+
+    return tree, exp, ""
+
+
+def _table_scope_error(tree, exp, plane: str, dialect: str) -> str:
+    tables = list(tree.find_all(exp.Table))
+    if plane == "lake":
+        unqualified = []
+        external = []
+        for t in tables:
+            catalog = (t.catalog or "").lower()
+            rendered = t.sql(dialect=dialect)
+            if not catalog:
+                unqualified.append(rendered)
+            elif catalog not in LAKE_CATALOGS:
+                external.append(rendered)
+        if external:
+            return ("lake 模式只允许查询已复制到 datalake 的表，发现外部 catalog："
+                    f"{', '.join(external[:3])}")
+        if unqualified:
+            return ("lake 模式必须显式写出 lake catalog，例如 "
+                    "`iceberg.bronze.table`，不能使用未限定表："
+                    f"{', '.join(unqualified[:3])}")
+    else:
+        cataloged = [t.sql(dialect=dialect) for t in tables if t.catalog]
+        if cataloged:
+            return ("source 模式不允许三段式 catalog 查询；外部源只能经 "
+                    "Connector 当前 source_id 执行，lake 表请使用 plane='lake'："
+                    f"{', '.join(cataloged[:3])}")
+    return ""
+
+
+def review_sql(sql: str, *, approved: bool = False,
+               model_generated: bool = False,
+               plane: Literal["source", "lake"] = "source") -> SQLReview:
+    """SQL 执行前审查：默认放行、需要审批、默认拒绝分开。
+
+    这里解决的是「模型生成的 SQL 不能直接打源系统」：
+
+    - 写入/DDL/多语句：默认拒绝
+    - 可能明显放大源系统负载的读：先问人
+    - 轻量读：放行；无 LIMIT 时自动补默认 LIMIT
+
+    底层仍用 `sqlglot` 看 AST，不用正则。
+    """
+    if plane not in ("source", "lake"):
+        return SQLReview("reject", sql, message=f"未知 SQL plane: {plane!r}")
+
+    dialect = "trino" if plane == "lake" else "postgres"
+    tree, exp, err = _parse_read_sql(sql, dialect=dialect)
+    if err:
+        return SQLReview("reject", sql, message=err)
+
+    err = _table_scope_error(tree, exp, plane, dialect)
+    if err:
+        return SQLReview("reject", sql, message=err)
+
+    reasons: list[str] = []
+    if plane == "source" and (list(tree.find_all(exp.Join))
+                              or _has_implicit_multi_from(tree, exp)):
+        reasons.append("包含 JOIN/多表关联，可能放大源系统扫描与锁等待")
+    if plane == "source" and isinstance(tree, _set_classes(exp)):
+        reasons.append("包含集合查询，可能触发多路扫描")
+
+    if isinstance(tree, exp.Select):
+        limit = tree.args.get("limit")
+        limit_value = _limit_value(tree)
+        if limit is None:
+            tree = tree.limit(DEFAULT_LIMIT)
+        elif limit_value is None:
+            reasons.append("LIMIT 不是固定数字，无法静态判断返回规模")
+        elif limit_value > MAX_RESULT_ROWS:
+            return SQLReview(
+                "reject", tree.sql(dialect=dialect),
+                message=(f"请求返回 {limit_value:,} 行，超过硬上限 "
+                         f"{MAX_RESULT_ROWS:,}，不会发起审批。"))
+        elif plane == "source" and limit_value > SAFE_RESULT_ROWS:
+            reasons.append(
+                f"请求返回 {limit_value:,} 行，超过默认安全上限 {SAFE_RESULT_ROWS:,}")
+
+        if (plane == "source" and model_generated and tree.args.get("order")
+                and not tree.args.get("where")):
+            reasons.append("无过滤排序可能触发大表排序")
+        if (plane == "source" and model_generated and not tree.args.get("where")
+                and (tree.args.get("group") or list(tree.find_all(exp.AggFunc)))):
+            reasons.append("无过滤聚合可能触发全表扫描")
+
+    rewritten = tree.sql(dialect=dialect)
+    if reasons and not approved:
+        return SQLReview("needs_approval", rewritten, tuple(reasons),
+                         "；".join(reasons), "owner")
+    if rewritten.strip() != (sql or "").strip():
+        return SQLReview("modify", rewritten)
+    return SQLReview("allow", rewritten)
+
+
+def _admit(sql: str, *, approved: bool = False,
+           plane: Literal["source", "lake"] = "source") -> str:
     """语句准入：**AST 解析，不是关键字匹配**（readme 8.1）。
 
     关键字匹配挡不住的，AST 能挡：
@@ -115,55 +305,25 @@ def _admit(sql: str) -> str:
 
     反过来，注释里出现 "join" 这个词不再误伤——**看结构不看字面**。
     """
-    import sqlglot
-    from sqlglot import exp
-
-    raw = (sql or "").strip()
-    if not raw:
-        raise QueryRejected("空语句")
-
-    try:
-        stmts = sqlglot.parse(raw, read="postgres")
-    except Exception as e:
-        raise QueryRejected(f"SQL 无法解析，拒绝执行：{str(e)[:80]}")
-
-    stmts = [st for st in stmts if st is not None]
-    if len(stmts) != 1:
-        raise QueryRejected(f"只允许单条语句，收到 {len(stmts)} 条")
-
-    tree = stmts[0]
-    if not isinstance(tree, (exp.Select, exp.Show, exp.Describe)):
-        raise QueryRejected(
-            f"仅允许 SELECT / SHOW / DESCRIBE，收到 {type(tree).__name__.upper()}")
-
-    # 整棵树里不允许出现写操作（含 CTE、子查询内部）
-    WRITE = (exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Create,
-             exp.Alter, exp.TruncateTable, exp.Merge)
-    for node in tree.walk():
-        if isinstance(node, WRITE):
-            raise QueryRejected(f"语句中包含写操作 {type(node).__name__.upper()}")
-
-    # join 检查遍历整棵树 —— 子查询与 CTE 里的 join 同样拦下
-    if list(tree.find_all(exp.Join)):
-        raise QueryRejected("源系统上不允许 join —— 请分别抽取后在 lake 中关联")
-    # 逗号连接的隐式 join：FROM a, b
-    for scope in tree.find_all(exp.From):
-        if len(scope.expressions) > 1:
-            raise QueryRejected("源系统上不允许 join（FROM 多表）")
-
-    if isinstance(tree, exp.Select) and not tree.args.get("limit"):
-        tree = tree.limit(DEFAULT_LIMIT)
-
-    return tree.sql(dialect="postgres")
+    review = review_sql(sql, approved=approved, plane=plane)
+    if review.action == "reject":
+        raise QueryRejected(review.message)
+    if review.action == "needs_approval":
+        raise QueryApprovalRequired(review.message)
+    return review.sql
 
 
 def _estimate(cur, sql: str) -> float:
-    """先 EXPLAIN 估算扫描行数，超阈值直接拒绝（readme 8.1 单查询护栏）。"""
+    """先 EXPLAIN 估算扫描行数，超过审批阈值问人，超过硬上限拒绝。"""
+    def rows(plan):
+        own = float(plan.get("Plan Rows", 0) or 0)
+        child = max((rows(p) for p in plan.get("Plans", []) or []), default=0.0)
+        return max(own, child)
+
     try:
         cur.execute(f"EXPLAIN (FORMAT JSON) {sql}")
         plan = cur.fetchone()[0]
-        rows = plan[0]["Plan"].get("Plan Rows", 0)
-        return float(rows)
+        return rows(plan[0]["Plan"])
     except Exception:
         return -1.0        # 估不出来不阻断，但记账时标记
 
@@ -181,7 +341,8 @@ def _in_bulk_window() -> bool:
     return now >= start or now <= end          # 跨零点
 
 
-def query(source_id: str, sql: str, purpose: str = "") -> dict:
+def query(source_id: str, sql: str, purpose: str = "",
+          approved: bool = False) -> dict:
     """Agent 访问源系统的唯一入口。
 
     purpose='bulk' 的查询受低峰时间窗口约束；探查类不受限。
@@ -198,7 +359,11 @@ def query(source_id: str, sql: str, purpose: str = "") -> dict:
 
     t0 = time.time()
     try:
-        sql = _admit(sql)
+        sql = _admit(sql, approved=approved)
+    except QueryApprovalRequired as e:
+        _record(source_id, sql, purpose, 0, time.time() - t0, -1,
+                f"PENDING_APPROVAL: {e}")
+        raise
     except QueryRejected as e:
         # 被拒的查询同样入账 —— 「Agent 尝试过什么危险操作」是审计的一部分
         _record(source_id, sql, purpose, 0, time.time() - t0, -1, f"REJECTED: {e}")
@@ -214,6 +379,12 @@ def query(source_id: str, sql: str, purpose: str = "") -> dict:
                             f"REJECTED: 预估 {est:.0f} 行超限")
                     raise QueryRejected(
                         f"预估扫描 {est:.0f} 行，超过上限 {MAX_SCAN_ROWS}。请缩小范围或走增量。")
+                if est > APPROVAL_SCAN_ROWS and not approved:
+                    _record(source_id, sql, purpose, 0, time.time() - t0, est,
+                            f"PENDING_APPROVAL: 预估 {est:.0f} 行")
+                    raise QueryApprovalRequired(
+                        f"预估扫描 {est:.0f} 行，超过默认安全上限 "
+                        f"{APPROVAL_SCAN_ROWS}。需要 Owner 确认后执行。")
                 cur.execute(sql)
                 cols = [d.name for d in cur.description] if cur.description else []
                 rows = cur.fetchall()
@@ -300,7 +471,7 @@ def today_usage():
 # 元数据查询：与业务查询分开
 #
 # 系统目录（pg_catalog / information_schema）查询天然要 join，
-# 但数据量只有几十行，不构成负担——用「禁 join」拦它是误伤。
+# 但数据量只有几十行，不构成负担；它走固定参数化通道，不走模型 SQL。
 #
 # 不给护栏开 purpose 豁免（Agent 可以声称自己在做 discovery），
 # 而是**把元数据查询也参数化**：SQL 写死在这里，调用方只能传表名，
@@ -324,11 +495,28 @@ def _meta_exec(source_id: str, sql: str, args=(), purpose="metadata"):
 
 
 def list_tables(source_id: str) -> list:
-    """表清单与行数估算。SQL 固定，无参数。"""
+    """表清单与行数估算。SQL 固定，无参数。
+
+    两处曾经出错，都不是小事：
+
+    1. **不限 schema** —— `pg_stat_user_tables` 覆盖所有 schema，
+       同名表会重复出现，别的 schema（比如 eval 的脏副本）会污染源清单。
+       现在只看 `current_schema()`，也就是连接串里 search_path 指到的那个。
+    2. **只看 `n_live_tup`** —— 它由统计收集器维护，容器重启后归零。
+       而「单表扫描可用行数估算」是铁律 3 的前提，估算给 0 等于前提失效。
+       `pg_class.reltuples` 存在系统目录里，重启不丢，用它兜底。
+       都拿不到时返回 -1 **表示未知**，而不是 0 —— 0 会被当成空表。
+    """
     r = _meta_exec(source_id,
-                   "SELECT relname, n_live_tup FROM pg_stat_user_tables "
-                   "ORDER BY n_live_tup DESC")
-    return [(a, int(b)) for a, b in r["rows"]]
+                   "SELECT c.relname,"
+                   " GREATEST(COALESCE(s.n_live_tup, 0), COALESCE(c.reltuples, -1))"
+                   " FROM pg_class c"
+                   " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                   " LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid"
+                   " WHERE c.relkind = 'r' AND n.nspname = current_schema()"
+                   " ORDER BY 2 DESC, 1")
+    return [(a, int(b) if b is not None and int(b) >= 0 else -1)
+            for a, b in r["rows"]]
 
 
 def describe_table(source_id: str, table: str) -> dict:
@@ -373,7 +561,94 @@ def load_report(source_id: str | None = None) -> dict:
     return {
         "queries": len(rs),
         "rejected": sum(1 for r in rs if r["status"].startswith("REJECTED")),
+        "pending_approval": sum(1 for r in rs
+                                if r["status"].startswith("PENDING_APPROVAL")),
         "rows_returned": sum(r["rows"] for r in rs),
         "total_ms": round(sum(r["duration_ms"] for r in rs), 1),
         "slowest": max((r for r in rs), key=lambda r: r["duration_ms"], default=None),
     }
+
+
+# ---------------------------------------------------------------- 权限元数据
+# 与 `_meta_exec` 同一条分界：**元数据通道允许关系展开**（readme 8.2）。
+# 系统目录上的 join 量小、低频，且禁掉只会逼出更贵的 N+1。
+# SQL 全部写死在这里，调用方传不了任意语句。
+def list_grants(source_id: str) -> list:
+    """谁对哪些表有什么权限。只读、只观测（铁律 4）。"""
+    r = _meta_exec(source_id,
+                   "SELECT grantee, table_name, privilege_type, is_grantable"
+                   " FROM information_schema.role_table_grants"
+                   " WHERE table_schema = current_schema()"
+                   " ORDER BY grantee, table_name, privilege_type")
+    return [{"grantee": a, "table": b, "privilege": c, "grantable": d == "YES"}
+            for a, b, c, d in r["rows"]]
+
+
+def list_roles(source_id: str) -> list:
+    """角色现状：能不能登录、是不是超级用户、继承了谁。"""
+    r = _meta_exec(source_id,
+                   "SELECT r.rolname, r.rolsuper, r.rolcanlogin, r.rolbypassrls,"
+                   " COALESCE(string_agg(m.rolname, ','), '')"
+                   " FROM pg_roles r"
+                   " LEFT JOIN pg_auth_members am ON am.member = r.oid"
+                   " LEFT JOIN pg_roles m ON m.oid = am.roleid"
+                   " WHERE left(r.rolname, 3) <> 'pg_'"   # psycopg 会把 % 当占位符
+                   " GROUP BY r.rolname, r.rolsuper, r.rolcanlogin, r.rolbypassrls"
+                   " ORDER BY r.rolname")
+    return [{"role": a, "superuser": b, "can_login": c, "bypass_rls": d,
+             "member_of": [x for x in (e or "").split(",") if x]}
+            for a, b, c, d, e in r["rows"]]
+
+
+# ---------------------------------------------------------------- 画像取样
+# **不给护栏开豁免，改成参数化入口** —— 与 R3 决策 22（元数据查询）同一条原则。
+#
+# 内容型 DQ 规则（enum 漂移、拼写漂移、类型污染…）必须看原始值，
+# 而 `query()` 会把无 LIMIT 的语句夹到 1000 行、显式大 LIMIT 又要审批。
+# 那道护栏防的是**模型自由生成的大结果进上下文**，这里两条都不成立：
+#
+#   · SQL 由代码拼，只传表名与列名，且都过标识符校验
+#   · 取回的行**不进模型上下文**，只喂给纯函数算结论（readme 13.1）
+#
+# 因此单开一个入口，自带独立上限，而不是让调用方传 approved=True。
+PROFILE_SAMPLE_ROWS = int(_E.get("CONNECTOR_PROFILE_SAMPLE_ROWS", "50000"))
+
+
+def sample_rows(source_id: str, table: str, columns: list,
+                pct: float | None = None, seed: int | None = None,
+                method: str = "BERNOULLI", cap: int = 20000) -> dict:
+    """按比例取样若干列的原始值。仍是单表 SELECT，禁 join 一条不放松。"""
+    import psycopg
+
+    if not _IDENT.match(table or ""):
+        raise QueryRejected(f"表名不合法：{table!r}")
+    for c in columns:
+        if not _IDENT.match(c or ""):
+            raise QueryRejected(f"列名不合法：{c!r}")
+    if method not in ("BERNOULLI", "SYSTEM"):
+        raise QueryRejected(f"未知采样方式：{method}")
+    cap = max(1, min(int(cap), PROFILE_SAMPLE_ROWS))
+
+    cols = ", ".join(f'"{c}"' for c in columns)
+    samp = ""
+    if pct and 0 < pct < 100:
+        rep = f" REPEATABLE ({int(seed)})" if seed is not None else ""
+        samp = f" TABLESAMPLE {method} ({pct:.3f}){rep}"
+    sql = f'SELECT {cols} FROM "{table}"{samp} LIMIT {cap}'
+
+    t0 = time.time()
+    with _LOCKS.setdefault(source_id, threading.Lock()):
+        with psycopg.connect(_dsn(source_id), connect_timeout=10) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
+                est = _estimate(cur, sql)
+                if est > MAX_SCAN_ROWS:
+                    _record(source_id, sql, "profiling", 0, time.time() - t0, est,
+                            f"REJECTED: 预估 {est:.0f} 行超限")
+                    raise QueryRejected(
+                        f"画像取样预估扫描 {est:.0f} 行，超过上限 {MAX_SCAN_ROWS}")
+                cur.execute(sql)
+                names = [d.name for d in cur.description]
+                rows = cur.fetchall()
+    _record(source_id, sql, "profiling", len(rows), time.time() - t0, est, "OK")
+    return {"columns": names, "rows": rows, "row_count": len(rows)}
