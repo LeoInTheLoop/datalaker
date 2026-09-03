@@ -1,0 +1,156 @@
+# 程序重排：Hermes 是主程序
+
+> 定稿于 2026-09-03。这份文件描述**目标形态**与**迁移顺序**，
+> 不是现状。现状见 `docs/handoff/R4.md`。
+
+## 0. 一句话
+
+**Hermes 就是 Data Steward Claw 本体。** 邮件、loop、会话持久化、记忆
+全都在它上面缝；体外只留一层管起停与限额的监控；再外面是能独立运行的 lakehouse。
+
+## 1. 四层
+
+```
+┌─────────────────────────────────────────────────┐
+│ ④ supervisor    起停 Hermes · token 限额 · 健康   │  体外，Hermes 挂了它还活着
+├─────────────────────────────────────────────────┤
+│ ③ Hermes（主程序）= Data Steward Claw            │
+│    loop / 工具分发 / 邮件收发 / 会话 / 记忆        │  ← 上游提供
+│    ┌───────────────────────────────────────┐    │
+│    │ claw/  我们缝上去的插件与工具           │    │  ← 我们写
+│    │  门禁(pre_tool_call) · 数据工具 ·        │    │
+│    │  Connector 护栏 · 台账 · Policy Sync    │    │
+│    └───────────────────────────────────────┘    │
+├─────────────────────────────────────────────────┤
+│ ② approval      独立进程 + 独立 DB 账号（铁律 2） │  故意不在 Hermes 里
+├─────────────────────────────────────────────────┤
+│ ① lakehouse     Trino / Iceberg / MinIO / 源库    │  Claw 挂了它仍是完整交付物
+└─────────────────────────────────────────────────┘
+```
+
+层与层之间只走**接口**，不走 import：supervisor 用进程信号与用量 API，
+Hermes 用工具签名，lakehouse 用 SQL。
+
+## 2. 现状与目标最大的一条差
+
+**现在 Hermes 什么都没跑。** 16 条线的大 case、批量 eval，全是
+`tests/run_case_full.py` 和 `tests/run_eval_case.py` 这两个脚本**扮演 Agent**
+在驱动 —— 它们直接 import `services/*` 并按剧本调用。Hermes 侧唯一实测的
+是 11 条「门禁能挂上去且能否决」。
+
+目标形态里，这两个脚本要**换边**：从扮演 Agent 变成扮演人。
+
+```
+现在   脚本 ──调用──► services/*                     Hermes 在旁边看着
+目标   脚本 ──发消息──► Hermes ──调用工具──► claw/*    脚本扮演王姐、李哥
+```
+
+这不是重构，是**把被测对象换了**。在此之前测的是「我写的函数对不对」，
+之后测的才是「这个 Agent 干得对不对」。
+
+## 3. 可以删的：Hermes 已经有了
+
+装上真实 Hermes 之后逐项比对的结果。**这一栏是重排的第一价值**：
+
+| 我们写的 | Hermes 已有 | 处置 |
+|---|---|---|
+| `services/notify/email_channel.py` SMTP/Gmail | `plugins/platforms/email/adapter.py`（1601 行，含 TLS / IMAP 轮询 / 重连） | **删**，配置 email 平台 |
+| `services/inbound.py` 的收信与白名单 | 同上，`EMAIL_ALLOWED_USERS` + `_is_automated_sender` | **删传输层**，留语义层（见下） |
+| `ops/scheduler.py` 循环 | `cron/` + `hermes_cli/loops.py` | **删**，改注册 cron |
+| `services/tracing.py` | `plugins/observability/` | 评估后合并 |
+| token 限额 | `hermes_cli/model_cost_guard.py`、`resource_limits.py` | supervisor 对接，不自己数 |
+| `services/memory.py` 的通用部分 | `plugins/memory/` | 只留领域记忆（口径、归属） |
+
+`services/notify/{feishu,wecom}.py` 同理 —— Hermes 的 `plugins/platforms/`
+下有 22 个适配器，飞书企微都在。
+
+## 4. 必须留的：领域特有，Hermes 不可能有
+
+| 留什么 | 为什么不能交给 Hermes |
+|---|---|
+| **门禁**（`pre_tool_call`） | Hermes 自带的审批管的是危险终端命令（`rm_rf`/`sudo` 模式）；「谁有权批准接入财务表」是业务判断。而且 `pre_approval_request` **是 observer-only 不能否决**，文档明写「要拦工具用 `pre_tool_call`」—— **铁律 1 因此仍然成立** |
+| **Connector 护栏** | AST 准入、行数估算、单表禁 join、账本。这是铁律 3 的落点 |
+| **审批两表 + 独立进程** | 铁律 2：与 Agent 同进程时列级 GRANT 形同虚设 |
+| **入站语义层** | 四层归属、意图分类、转介解析、双重确认。传输归 Hermes，**「这封信是在回哪件事、算不算批准」归我们** |
+| DQ 规则 / 停止点 / 清洗档位 | 纯领域逻辑 |
+| 台账 / 权限发现 / Policy Sync | 同上 |
+| `runs` 注册表 | 待评估：Hermes 有会话持久化，但「N 条线各挂在不同人身上、谁先批谁先走」是领域语义 |
+
+## 5. 目标目录
+
+```
+datalaker/
+├── lakehouse/                ① 独立可交付的数据平台
+│   ├── infra/                compose · trino 配置 · 初始化 SQL
+│   ├── sync.py               源 → bronze（增量 / 全量 / 漂移检测）
+│   ├── clean.py              bronze → silver（三档：auto/propose/ask）
+│   ├── dq_lake.py            lake 侧全量检查（那个被挪进来的 join）
+│   └── policy_sync.py        分类 → Trino 授权规则
+│
+├── approval/                 ② 独立进程 + 独立 DB 账号
+│   ├── callback.py           点击链接 → 落决定
+│   ├── tokens.py             HMAC 签名令牌
+│   └── store.py              两表 append-only（Agent 侧只读）
+│
+├── claw/                     ③ 缝在 Hermes 上的插件
+│   ├── plugin.yaml           照 plugins/platforms/email 的格式
+│   ├── gate/                 pre_tool_call 门禁 + policy 表
+│   ├── connector/            源系统唯一出入口 + 账本 + 画像取样入口
+│   ├── tools/                注册给 Hermes 的工具，一个文件一组
+│   │   ├── discover.py       list_source_tables · get_table_metadata
+│   │   ├── profile.py        profile_table · run_dq_check · dq_verdict
+│   │   ├── ingest.py         ingest_table · ingest_export
+│   │   ├── clean.py          propose_cleaning · apply_cleaning_rule
+│   │   ├── govern.py         台账 · 权限发现 · policy_sync
+│   │   └── ask.py            停止点 → 走 Hermes 的 clarify 工具集
+│   ├── inbound/              入站语义层（归属 / 意图 / 转介 / 双重确认）
+│   ├── domain/               纯函数：dq_rules · stop_points
+│   └── store/                runs 注册表 · 领域记忆
+│
+├── supervisor/               ④ 体外监控
+│   ├── run.py                起停 Hermes · 健康探活 · 崩溃重启
+│   ├── budget.py             token 限额（读 Hermes 用量，超限停）
+│   └── status.py             运维面板（现 ops/claw-status.py）
+│
+├── evals/                    体外判分（形态已经对，不动）
+└── tests/
+    ├── unit/                 纯函数
+    ├── contract/             插件挂载 · 门禁否决（对真实 Hermes）
+    └── conversation/         ★ 新形态：跟活的 Hermes 对话
+        ├── personas.py       10 个人（现 services/persona.py）
+        ├── drive.py          发消息给 Hermes · 收它的回复 · 记轨迹
+        └── cases/            剧本（现 evals/cases/acme_full.json）
+```
+
+## 6. 迁移顺序：薄切片优先，物理搬迁放最后
+
+**不要先搬目录。** 先证明形态成立，再机械移动。
+
+| 阶段 | 做什么 | 完成的标志 |
+|---|---|---|
+| **M1 打通一条** | 把 `list_source_tables` 一个工具注册进 Hermes，配好 email 平台，**用邮件跟它说一句「公司有哪些表」**，它调工具、门禁放行、回信 | 一次真实往返 |
+| **M2 挂上门禁** | 同一条路上换成 `ingest_table`（L3），验证挂起 → 邮件 → 点击 → 恢复**全程在 Hermes 里** | 挂起恢复不靠我的脚本 |
+| **M3 工具搬家** | `services/data_tools` 等一批批注册成 Hermes 工具，每搬一个跑一次回归 | 616 保持全绿 |
+| **M4 删重复** | 删掉 email 传输层、scheduler 循环，改用 Hermes 的 | 行数净减少 |
+| **M5 驱动反转** | `run_case_full.py` 从扮演 Agent 改成扮演人 | 大 case 里 Hermes 是主语 |
+| **M6 supervisor** | 起停 + 限额 | 杀掉 Hermes 能自动拉起；超预算能停 |
+| **M7 目录搬迁** | 纯机械移动 + 改 import | 树与第 5 节一致 |
+
+M5 是真正的分水岭 —— 在它之前，所有「Agent 干得对不对」的数字都还是
+我的脚本在自问自答。
+
+## 7. 重排中绝不能丢的三件
+
+1. **门禁仍在 `pre_tool_call`**，不因为「工具搬进 Hermes 了」就改成工具内部自检。
+   限制散进业务代码分支，就再也证明不了「Agent 绕不过」。
+2. **审批服务仍是独立进程 + 独立账号**。它是唯一一个**故意不放进 Hermes**
+   的组件，理由写在铁律 2。
+3. **判分器仍在体外**。`evals/` 不 import 被测代码这条不因重排松动 ——
+   与铁律 2 同一条理由。
+
+## 8. 已知的待定项
+
+- `runs` 注册表与 Hermes 会话持久化的边界：跨天挂起是 Hermes 的 session
+  能力还是我们的领域状态？M2 会给出答案。
+- `services/tracing.py` 与 `plugins/observability/` 是否重复，M4 时评估。
+- Hermes 的 `plugins/memory/` 能否承载「口径记忆」，还是只放通用记忆。
