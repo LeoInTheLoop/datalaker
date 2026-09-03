@@ -12,25 +12,36 @@ Hermes 契约要点：
   - 回调超时或异常 → Hermes fail closed（阻断而非放行）
 """
 import json
+import threading
 import os
 
 from .approvals import Store, open_store
 from .policy import HERMES_DANGEROUS, Level, is_declared, lookup
 
 DB_PATH = os.environ.get("DATASTEWARD_DB", os.path.expanduser("~/.datalaker/approvals.db"))
-_store: Store | None = None
+# 每个线程一个句柄：Hermes 在线程池里跑工具，SQLite 连接不许跨线程用
+_local = threading.local()
 
 
 def store():
-    """Agent 侧存储句柄。
+    """Agent 侧存储句柄。**每个线程一个。**
 
     DATASTEWARD_DSN 存在 -> Postgres（生产 / 容器内，列级 GRANT 在此生效）
     否则                  -> SQLite（无 docker 时的本地快测）
+
+    早先缓存成模块级单例，在单线程驱动下没问题。搬进 Hermes 之后立刻炸：
+    它在线程池里跑工具 handler，SQLite 连接不许跨线程用 ——
+    报「object was created in thread id X and this is thread id Y」，
+    而错误被 handler 吞成一句「失败」，表面上像是工具本身有问题。
+
+    `_notify_async` 里其实早就写过这条注释（「后台线程必须建自己的连接」），
+    但只修了那一处。这次改成线程本地，所有路径一起管。
     """
-    global _store
-    if _store is None:
-        _store = open_store(readonly=True)       # Agent 侧只读（readme 9.4 机制三）
-    return _store
+    h = getattr(_local, "store", None)
+    if h is None:
+        h = open_store(readonly=True)            # Agent 侧只读（readme 9.4 机制三）
+        _local.store = h
+    return h
 
 
 # --------------------------------------------------------------------------

@@ -10,7 +10,10 @@ author: datalaker
 # 否则插件把内部辅助函数放进 tools.py 就被误当成对外工具）
 provides_tools:
   - list_source_tables
+  - get_table_metadata
   - profile_table
+  - propose_cleaning
+  - record_finding
   - ingest_table
 hooks:
   - pre_tool_call

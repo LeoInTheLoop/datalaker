@@ -24,6 +24,11 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     "profile_table":        (Level.L1, None),
     "run_dq_check":         (Level.L1, None),
     "sql_query":            (Level.L1, None),
+    # 只产出结论、不改任何东西：提案本身不需要审批，
+    # 真正要审批的是「按这条规则去洗」（apply_cleaning_rule，L2）
+    "propose_cleaning":     (Level.L1, None),
+    # 写的是我们自己的整改台账，不碰源系统也不碰 lake
+    "record_finding":       (Level.L1, None),
     # --- L2 需 Steward 确认 ---
     "define_semantics":     (Level.L2, "steward"),
     "apply_cleaning_rule":  (Level.L2, "steward"),

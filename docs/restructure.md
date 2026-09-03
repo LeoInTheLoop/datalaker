@@ -130,7 +130,7 @@ datalaker/
 |---|---|---|
 | **M1 打通一条** ✅ | `list_source_tables` 注册进 Hermes，真模型问一句「northwind 有哪些表」→ 它调工具 → Connector 读真库 → 答出 14 张表与真实行数 | 已实测 |
 | **M2 挂上门禁** ✅ | `ingest_table`（L3）挂起 → 批准 → 恢复 → 真写 bronze，全程在 Hermes 里 | 已实测；顺带修掉「审批绑会话」与「plugins 包撞车」 |
-| **M3 工具搬家** | `services/data_tools` 等一批批注册成 Hermes 工具，每搬一个跑一次回归 | 616 保持全绿 |
+| **M3 工具搬家** 🟡 | 已搬 6 个（发现 / 结构 / 画像 / 清洗提案 / 台账 / 接入），多步对话串通 | 645 全绿；剩余工具继续搬 |
 | **M4 删重复** | 删掉 email 传输层、scheduler 循环，改用 Hermes 的 | 行数净减少 |
 | **M5 驱动反转** | `run_case_full.py` 从扮演 Agent 改成扮演人 | 大 case 里 Hermes 是主语 |
 | **M6 supervisor** | 起停 + 限额 | 杀掉 Hermes 能自动拉起；超预算能停 |
@@ -167,6 +167,23 @@ Hermes 零改动，插件住在 `datalaker/.hermes/plugins/claw/`，
 桩本身也踩了一个坑：Hermes 一次运行会发多个请求（主对话 + 标题 + 记忆抽取），
 辅助请求不带 `tools`。早先不加区分，**辅助请求把剧本步骤吃掉了**，
 表现为工具从来没被调用而日志一切正常。现在按有无 `tools` 路由。
+
+### M3 进行中（2026-09-04）
+
+已注册 6 个工具：`list_source_tables` `get_table_metadata` `profile_table`
+`propose_cleaning` `record_finding` `ingest_table`。一次对话里连着调完前五个，
+提案正确地对空值率与数量级异常说「**必须你给口径，我不会自己动**」。
+
+加了一条**结构性断言**：manifest 里列出的每个工具都必须在 `policy.py` 里
+显式声明级别。以后新增工具忘了声明，测试直接红 —— 铁律 5 从纪律变成机制。
+
+修掉一个只有在 Hermes 里才会暴露的缺陷：**存储句柄跨线程**。
+Hermes 在线程池里跑 handler，而 `store()` 缓存的是模块级单例，
+SQLite 报「object was created in thread id X and this is thread id Y」，
+错误被 handler 吞成一句「失败」，表面上像工具本身有问题。
+改成线程本地。`_notify_async` 里其实早写过这条注释
+（「后台线程必须建自己的连接」），但只修了那一处 ——
+**单线程驱动下看不出来的假设，换个宿主就成了 bug**。
 
 ### M2 完成（2026-09-04）
 

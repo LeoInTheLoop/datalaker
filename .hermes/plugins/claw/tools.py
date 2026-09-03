@@ -138,9 +138,114 @@ _SCHEMAS.update({
     },
 })
 
+def _get_table_metadata(args: dict, **_: Any) -> str:
+    src, tbl = str(args.get("source") or ""), str(args.get("table") or "")
+    if not (src and tbl):
+        return "错误：需要 source 与 table。"
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        import data_tools
+        m = data_tools.get_table_metadata(src, tbl)
+    except Exception as e:                                    # noqa: BLE001
+        return f"读取 {src}.{tbl} 结构失败：{type(e).__name__}: {e}"
+    pk = "、".join(m.get("primary_key") or []) or "（无主键）"
+    cols = "\n".join(f"  · {c['name']} {c['type']}"
+                      + ("" if c.get("nullable", True) else " NOT NULL")
+                      for c in m["columns"][:40])
+    return f"{tbl} 主键：{pk}\n列（{len(m['columns'])} 个）：\n{cols}"
+
+
+def _propose_cleaning(args: dict, **_: Any) -> str:
+    """由 DQ 结论生成清洗提案。**只提案不执行**（L1）。"""
+    src, tbl = str(args.get("source") or ""), str(args.get("table") or "")
+    if not (src and tbl):
+        return "错误：需要 source 与 table。"
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        import clean, data_tools
+        dq = data_tools.run_dq_check(src, tbl)
+        plan = clean.propose(tbl, dq.get("findings") or [])
+    except Exception as e:                                    # noqa: BLE001
+        return f"生成 {src}.{tbl} 的清洗提案失败：{type(e).__name__}: {e}"
+
+    def _fmt(items, label):
+        if not items:
+            return ""
+        body = "\n".join(f"  · {i['column']} / {i['issue']} —— {i['why']}"
+                          for i in items[:10])
+        return f"\n{label}：\n{body}"
+
+    return (plan["question"]
+            + _fmt(plan["auto"], "可直接做（确定性，不改变任何值）")
+            + _fmt(plan["propose"], "建议这样归一，需要你批准规则")
+            + _fmt(plan["ask"], "**必须你给口径，我不会自己动**"))
+
+
+def _record_finding(args: dict, **_: Any) -> str:
+    """把一条发现记进整改台账（L1）。复发是累加不是新增条目。"""
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        import ledger
+        r = ledger.record(
+            str(args.get("source_table") or ""),
+            str(args.get("issue_type") or ""),
+            field=args.get("field"),
+            category=str(args.get("category") or "data"),
+            observed_pattern=str(args.get("observed") or ""),
+            rows_cleaned=int(args.get("rows") or 0))
+    except Exception as e:                                    # noqa: BLE001
+        return f"记台账失败：{type(e).__name__}: {e}"
+    kind = "首次登记" if r["new"] else f"复发累加到第 {r['recurrences']} 次"
+    return f"{r['rl_id']}：{kind}。复发次数本身就是推动源头整改最有力的证据。"
+
+
+_SCHEMAS.update({
+    "get_table_metadata": {
+        "name": "get_table_metadata",
+        "description": "看一张源表的列、类型、是否可空与主键。只读元数据。",
+        "parameters": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "源系统 id"},
+            "table": {"type": "string", "description": "表名"}},
+            "required": ["source", "table"]},
+    },
+    "propose_cleaning": {
+        "name": "propose_cleaning",
+        "description": (
+            "对一张表给出清洗提案，分三档：可直接做的、建议归一但要人批准规则的、"
+            "**必须问人给口径的**。只提案不执行 —— 补空值、改数量级、改日期"
+            "这类永远不会自动做。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "源系统 id"},
+            "table": {"type": "string", "description": "表名"}},
+            "required": ["source", "table"]},
+    },
+    "record_finding": {
+        "name": "record_finding",
+        "description": (
+            "把一条数据或权限问题记进整改台账，用于反向推动源系统修复。"
+            "同一缺陷再次出现是复发累加，不是新增条目。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "source_table": {"type": "string", "description": "如 CRM.customers"},
+            "issue_type": {"type": "string", "description": "如 格式不一致 / 过度授权"},
+            "field": {"type": "string", "description": "字段名，可空"},
+            "category": {"type": "string", "enum": ["data", "permission"]},
+            "observed": {"type": "string", "description": "观察到的现象"},
+            "rows": {"type": "integer", "description": "本次影响行数"}},
+            "required": ["source_table", "issue_type"]},
+    },
+})
+
 _HANDLERS = {
     "list_source_tables": _list_source_tables,
+    "get_table_metadata": _get_table_metadata,
     "profile_table": _profile_table,
+    "propose_cleaning": _propose_cleaning,
+    "record_finding": _record_finding,
     "ingest_table": _ingest_table,
 }
 

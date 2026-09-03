@@ -195,6 +195,68 @@ with StubServer(script3, port=STUB_PORT) as s6:
     blob6 = " ".join(c["content"] or "" for c in s6.tool_calls_made())
 chk("**票据一次性**：再来一次重新挂起", "PENDING_APPROVAL" in blob6, blob6[:70])
 
+print("\n=== M3：多步对话串起来 ===\n")
+
+# 一次对话里连着调四个工具 —— 这是真实流程的形状：
+# 先看有什么表 → 看结构 → 画像判质量 → 给清洗提案 → 记台账。
+DB3 = str(ROOT / ".hermes" / "test-home" / "m3.db")
+for suf in ("", "-wal", "-shm"):
+    f = pathlib.Path(DB3 + suf)
+    if f.exists():
+        f.unlink()
+
+script_multi = [
+    CALL("list_source_tables", source="northwind"),
+    CALL("get_table_metadata", source="northwind", table="orders"),
+    CALL("profile_table", source="northwind", table="orders"),
+    CALL("propose_cleaning", source="northwind", table="orders"),
+    CALL("record_finding", source_table="northwind.orders",
+         issue_type="high_null_rate", field="ship_region",
+         observed="空值率超过门槛", rows=500),
+    {"text": "看完了。"},
+]
+with StubServer(script_multi, port=STUB_PORT) as s7:
+    saved = dict(os.environ)
+    os.environ.update({"DATASTEWARD_DB": DB3, "NOTIFY_CHANNEL": "outbox",
+                       "NOTIFY_OUTBOX": DB3 + ".outbox.jsonl"})
+    try:
+        out7, _ = run_hermes("看看 northwind 的 orders 质量怎么样", s7, timeout=300)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    b7 = " ".join(c["content"] or "" for c in s7.tool_calls_made())
+
+chk("四步都跑到了（工具结果按序回传）",
+    s7._i >= 5, f"消耗了 {s7._i} 步剧本")
+chk("结构读到了主键", "主键" in b7)
+chk("画像给的是结论不是数据行", "采样" in b7 and "发现" in b7)
+chk("清洗提案分了三档", "洗成这样对吗" in b7 or "必须你给口径" in b7, b7[-160:])
+chk("**提案里点明了哪些不会自动做**", "不会自己动" in b7 or "必须你给口径" in b7)
+chk("台账登记成功（返回 RL 编号）", "RL-" in b7)
+
+print("\n=== M3：搬进来的工具都显式声明了级别（铁律 5）===\n")
+
+sys.path.insert(0, str(ROOT / "plugins"))
+from datasteward_gate.policy import POLICY, Level             # noqa: E402
+import yaml as _yaml                                          # noqa: E402
+
+_man = _yaml.safe_load((ROOT / ".hermes" / "plugins" / "claw"
+                        / "plugin.yaml").read_text(encoding="utf-8"))
+_declared = _man.get("provides_tools") or []
+chk("manifest 列出了工具", len(_declared) >= 6, f"{len(_declared)} 个")
+
+_undeclared = [t for t in _declared if t not in POLICY]
+chk("**每个工具都在 policy.py 里显式声明**（未声明默认 L2，不是放行）",
+    not _undeclared, str(_undeclared))
+
+_lv = {t: POLICY[t][0] for t in _declared if t in POLICY}
+chk("只读发现是 L0", _lv.get("list_source_tables") == Level.L0
+    and _lv.get("get_table_metadata") == Level.L0)
+chk("画像与提案是 L1（产出结论，不改东西）",
+    _lv.get("profile_table") == Level.L1
+    and _lv.get("propose_cleaning") == Level.L1)
+chk("接入是 L3（需 Owner 审批）", _lv.get("ingest_table") == Level.L3)
+
 print("\n=== 桩本身可信 ===\n")
 
 with StubServer([{"text": "只说话不调工具"}], port=STUB_PORT) as s3:
