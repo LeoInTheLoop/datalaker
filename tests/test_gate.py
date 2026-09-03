@@ -7,6 +7,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "services"))
 
 DB = "/tmp/datalaker_gate_test.db"
 if os.path.exists(DB):
@@ -78,9 +79,11 @@ check("L4 永不自动", is_block(r) and "L4" in r.get("message", ""))
 r = gate("grant_write", {"user": "x", "table": "y"}, RUN)
 check("L4 写权限永不自动", is_block(r))
 
-# 10. before_sql：禁止 join
+# 10. before_sql：JOIN/多表关联不是默认放行，先进入审批
 r = gate("sql_query", {"sql": "SELECT * FROM a JOIN b ON a.id=b.id"}, RUN)
-check("源系统禁止 join", is_block(r), r.get("message", "")[:30] if is_block(r) else "")
+check("JOIN 触发 SQL 动态审批", is_block(r) and "PENDING_APPROVAL" in r.get("message", "")
+      and "JOIN" in r.get("message", ""),
+      r.get("message", "")[:60] if is_block(r) else "")
 
 # 11. before_sql：非 SELECT 被拒
 check("非 SELECT 被拒", is_block(gate("sql_query", {"sql": "UPDATE t SET x=1"}, RUN)))
@@ -97,6 +100,44 @@ _r = gate("sql_query", {"sql": "SELECT * FROM orders LIMIT 10"}, RUN)
 check("已有 LIMIT 不重复注入",
       _r is None or _r.get("args", {}).get("sql", "").upper().count("LIMIT") == 1,
       str(_r)[:44] if _r else "None")
+
+# 13b. 大返回量 SELECT 需要审批；审批后才注入内部批准标记
+import connector
+big_sql = "SELECT * FROM orders LIMIT 10000"
+r = gate("sql_query", {"sql": big_sql}, RUN)
+check("大返回量 SELECT 触发审批", is_block(r) and "PENDING_APPROVAL" in r.get("message", ""),
+      r.get("message", "")[:60] if is_block(r) else "")
+review = connector.review_sql(big_sql, model_generated=True)
+big_args = {"plane": "source", "sql": review.sql}
+big_aid = store().pending(action_hash("sql_query", big_args), RUN)
+admin.decide(big_aid, "approve", "owner@corp.com", message_id="<sql-big@corp>")
+r = gate("sql_query", {"sql": big_sql}, RUN)
+check("SQL 审批通过后注入内部批准标记",
+      isinstance(r, dict) and r.get("action") == "modify"
+      and r["args"].get("_sql_gate_approved") is True,
+      str(r)[:80] if r else "None")
+
+# 13c. 模型自己传内部批准标记无效，gate 会剥掉
+r = gate("sql_query", {"sql": "SELECT id FROM orders LIMIT 10",
+                       "_sql_gate_approved": True}, RUN)
+check("模型伪造 SQL 批准标记会被剥掉",
+      isinstance(r, dict) and r.get("action") == "modify"
+      and "_sql_gate_approved" not in r["args"],
+      str(r)[:80] if r else "None")
+
+# 13d. 外部源和已入湖表分开：lake 上允许 JOIN，但只能查 iceberg catalog
+lake_sql = ('SELECT * FROM iceberg.bronze."northwind__orders" o '
+            'JOIN iceberg.bronze."northwind__customers" c ON o.customer_id=c.customer_id')
+r = gate("sql_query", {"plane": "lake", "sql": lake_sql}, RUN)
+check("已入湖表 JOIN 不触发源库审批",
+      isinstance(r, dict) and r.get("action") == "modify"
+      and r["args"].get("plane") == "lake"
+      and "LIMIT" in r["args"].get("sql", "").upper(),
+      str(r)[:80] if r else "None")
+r = gate("sql_query", {"plane": "lake", "sql": "SELECT * FROM postgres.public.orders"}, RUN)
+check("lake 模式不能偷查外部源 catalog",
+      is_block(r) and "SQL_REJECTED" in r.get("message", ""),
+      r.get("message", "")[:80] if is_block(r) else "")
 
 # 14. 权限隔离：Agent 侧连接不能写决定
 try:

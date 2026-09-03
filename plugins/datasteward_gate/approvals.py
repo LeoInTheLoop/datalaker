@@ -105,6 +105,81 @@ CREATE TABLE IF NOT EXISTS events (
     kind    TEXT NOT NULL,
     payload TEXT
 );
+-- Remediation Ledger（readme 7）：治理动作的审计轨 + 给源系统的整改清单。
+--
+-- **只在 lake 里清洗，等于给源头的缺陷付永久利息。**
+-- 因此这张表的价值不在建议的数量，而在被采纳的比例，以及
+-- 「清洗规则数量在下降」这个反直觉的成功指标。
+CREATE TABLE IF NOT EXISTS remediation_ledger (
+    rl_id            TEXT PRIMARY KEY,
+    source_table     TEXT NOT NULL,
+    field            TEXT,
+    issue_type       TEXT NOT NULL,
+    category         TEXT NOT NULL DEFAULT 'data',   -- data / permission
+    observed_pattern TEXT,
+    action_taken     TEXT,
+    confirmed_by     TEXT,
+    message_id       TEXT,
+    suggestion       TEXT,
+    owner_role       TEXT,
+    status           TEXT NOT NULL DEFAULT 'open',   -- open/proposed/accepted/fixed/rejected
+    reject_reason    TEXT,
+    recurrences      INTEGER NOT NULL DEFAULT 1,
+    rows_cleaned     BIGINT NOT NULL DEFAULT 0,
+    rule_revisions   INTEGER NOT NULL DEFAULT 0,
+    first_seen       REAL NOT NULL,
+    last_seen        REAL NOT NULL,
+    due_at           REAL
+);
+CREATE INDEX IF NOT EXISTS ix_rl_status ON remediation_ledger(status);
+
+-- 清洗规则。**每条都要标注它在补哪个洞**（readme 7）——
+-- 没有 ledger_ref 的规则无法退役，因为没人知道它为什么存在。
+CREATE TABLE IF NOT EXISTS cleaning_rules (
+    name         TEXT PRIMARY KEY,
+    ledger_ref   TEXT NOT NULL,
+    fixes        TEXT NOT NULL,
+    retire_when  TEXT,
+    active       INTEGER NOT NULL DEFAULT 1,
+    revisions    INTEGER NOT NULL DEFAULT 0,
+    created_at   REAL NOT NULL,
+    retired_at   REAL
+);
+-- 任务注册表（readme 2「Harness 能力」/ 4.1）。
+--
+-- **Agent 不是一次调用，它会等人。** 一条线可能是：
+--   发现数据 → 找 Owner → 发邮件 → 等 8 小时 → 回复 → 请求审批 → 等 1 天 → 恢复 → 执行
+-- 而且同时并行着好几条，各自挂在不同的人身上。
+--
+-- 没有这张表，「挂起 → 恢复」就只能靠同一个进程一直活着 —— 进程一死全丢。
+-- 有了它，每条线的状态在库里，谁先被批准谁先被拉起，彼此不互相阻塞。
+CREATE TABLE IF NOT EXISTS runs (
+    run_id      TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    params      TEXT NOT NULL,
+    status      TEXT NOT NULL,           -- running / waiting_human / done / abandoned / failed
+    waiting_on  TEXT,                    -- 阻塞它的 approval_id
+    checkpoint  TEXT,
+    note        TEXT,
+    owner_role  TEXT,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    resumed     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
+-- 增量同步状态（readme 6.1）。R3 只在 Postgres 里手工建过，
+-- 于是 SQLite 后端整条同步路径直接崩在「表不存在」上——DDL 必须跟代码走。
+CREATE TABLE IF NOT EXISTS sync_state (
+    asset            TEXT PRIMARY KEY,
+    strategy         TEXT NOT NULL,
+    watermark        TEXT,
+    last_synced_at   REAL,
+    data_as_of       REAL,
+    freshness_sla_h  INTEGER NOT NULL DEFAULT 24,
+    schema_hash      TEXT,
+    row_count        INTEGER,
+    last_error       TEXT
+);
 CREATE INDEX IF NOT EXISTS ix_appr_hash ON approvals(action_hash, run_id);
 CREATE INDEX IF NOT EXISTS ix_dec_appr  ON decisions(approval_id);
 """
