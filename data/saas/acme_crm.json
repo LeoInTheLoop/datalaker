@@ -1,0 +1,35 @@
+{
+  "_comment": "演练用 fixture。真 org 请设 SAAS_PROVIDER=salesforce + SF_INSTANCE_URL/SF_ACCESS_TOKEN。dump 结果会标 provider=mock，不会被误当成真实取数。",
+  "users": [
+    {"id": "u01", "name": "陈总", "email": "boss@acme.com", "active": true, "profile": "System Administrator", "last_login": "2026-09-01T09:12:00Z"},
+    {"id": "u02", "name": "王姐", "email": "wang@acme.com", "active": true, "profile": "Sales Manager", "last_login": "2026-09-02T08:40:00Z"},
+    {"id": "u03", "name": "李工", "email": "li@acme.com", "active": true, "profile": "Standard User", "last_login": "2026-08-28T14:02:00Z"},
+    {"id": "u04", "name": "赵会计", "email": "zhao@acme.com", "active": true, "profile": "Finance", "last_login": "2026-09-01T17:30:00Z"},
+    {"id": "u05", "name": "周离职", "email": "zhou@acme.com", "active": true, "profile": "System Administrator", "last_login": "2026-03-11T10:00:00Z"},
+    {"id": "u06", "name": "外包小刘", "email": "liu@vendor.com", "active": true, "profile": "Standard User", "last_login": "2026-08-30T11:20:00Z"},
+    {"id": "u07", "name": "孙实习", "email": "sun@acme.com", "active": false, "profile": "Standard User", "last_login": "2026-06-02T09:00:00Z"}
+  ],
+  "permission_sets": [
+    {"id": "ps1", "name": "Data_Export_All", "label": "全量导出"},
+    {"id": "ps2", "name": "Finance_Readonly", "label": "财务只读"},
+    {"id": "ps3", "name": "Admin_Break_Glass", "label": "应急管理员"}
+  ],
+  "assignments": [
+    {"user_id": "u01", "user_name": "陈总", "permission_set": "Admin_Break_Glass", "via": "permission_set"},
+    {"user_id": "u02", "user_name": "王姐", "permission_set": "Data_Export_All", "via": "permission_set"},
+    {"user_id": "u05", "user_name": "周离职", "permission_set": "Admin_Break_Glass", "via": "permission_set"},
+    {"user_id": "u06", "user_name": "外包小刘", "permission_set": "Data_Export_All", "via": "permission_set"},
+    {"user_id": "u03", "user_name": "李工", "permission_set": "Finance_Readonly", "via": "permission_set"}
+  ],
+  "object_access": [
+    {"profile_or_set": "System Administrator", "object": "Account", "read": true, "create": true, "edit": true, "delete": true, "view_all": true, "modify_all": true},
+    {"profile_or_set": "Sales Manager", "object": "Opportunity", "read": true, "create": true, "edit": true, "delete": false, "view_all": true, "modify_all": false},
+    {"profile_or_set": "Standard User", "object": "Account", "read": true, "create": true, "edit": true, "delete": false, "view_all": false, "modify_all": false},
+    {"profile_or_set": "Finance", "object": "Invoice__c", "read": true, "create": false, "edit": false, "delete": false, "view_all": true, "modify_all": false},
+    {"profile_or_set": "Data_Export_All", "object": "Contact", "read": true, "create": false, "edit": false, "delete": false, "view_all": true, "modify_all": false}
+  ],
+  "sharing": [
+    {"object": "Account", "org_wide_default": "Public Read/Write", "rules": []},
+    {"object": "Invoice__c", "org_wide_default": "Public Read Only", "rules": [{"name": "Finance_Share_All", "to": "All Internal Users", "access": "Read"}]}
+  ]
+}

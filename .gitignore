@@ -22,6 +22,10 @@ venv/
 # ---- 数据集：不入库 ----
 # 小数据集（Northwind/Olist）放这里方便；Home Credit 这类大的用 DATASETS_DIR 指向项目外
 data/*
+# SaaS 控制面的演练 fixture 是**代码的一部分**，不是数据集：
+# tests/test_saas.py 依赖它，不入库的话新克隆下来测试直接挂。
+!data/saas/
+!data/saas/*.json
 !data/README.md
 
 # ---- R0 概念验证，已被 plugins/ 取代，可随时删 ----

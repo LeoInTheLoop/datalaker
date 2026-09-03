@@ -27,8 +27,18 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     # --- L2 需 Steward 确认 ---
     "define_semantics":     (Level.L2, "steward"),
     "apply_cleaning_rule":  (Level.L2, "steward"),
+    # --- L2 需 Steward 确认 ---
+    # 导出的列名是**标签不是 API 名**（8.2）：业务方改个显示名列名就变，
+    # 映射只能由人确认一次再沉淀，机器猜不了。
+    "confirm_column_mapping": (Level.L2, "steward"),
     # --- L3 需 Owner 审批 ---
     "connect_source":       (Level.L3, "sponsor"),   # 起步阶段还没有 owner
+    # SaaS 数据面：定时报表 → 邮件附件 → 暂存 → bronze（8.2）
+    "ingest_export":        (Level.L3, "owner"),
+    # SaaS 控制面：只读权限元数据。**接入必须有人担保只读**——
+    # Salesforce 的 api scope 全有全无，OAuth 证明不了（8.2）
+    "connect_saas_control_plane": (Level.L3, "owner"),
+    "dump_saas_permissions":      (Level.L3, "owner"),
     "ingest_table":         (Level.L3, "owner"),
     "publish_gold":         (Level.L3, "owner"),
     "grant_read":           (Level.L3, "owner"),
