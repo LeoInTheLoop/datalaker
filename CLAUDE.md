@@ -92,10 +92,13 @@ spike/                        R0 概念验证，可随时删除
 - **gate 依赖 `sqlglot`**（AST 准入），新增依赖须同步三处：
   项目 `.venv`、容器镜像（`docker/Dockerfile`）、Hermes 的 `.venv-h`
   （uv 建的无 pip，用 `VIRTUAL_ENV=<path> uv pip install`）
-- 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`（**592 条断言必须全绿**）
+- 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`（**616 条断言必须全绿**）
 - 看状态：`python3 ops/claw-status.py`（退出码 2 = 有告警）
   - 不设 `HERMES` 时会跳过真实集成那一段
   - Hermes 需要 python 3.11–3.13，本机 3.14 不兼容：用 `uv venv --python 3.13 .venv-h`
+  - 本机 Hermes 在 `/Users/lingyukong/Documents/GitHub/hermes-agent`（`--depth 1` clone，
+    未做任何改动 —— 本项目以 plugin 形态挂上去，从不 fork 它）。
+    不设 `HERMES` 时第 5 组 11 条会静默跳过，**回归看着还是绿的**
 - 起数据平面：`cd infra && docker compose --profile core up -d`
 - 临时的取舍用 `ponytail:` 注释标记，欠账用 `TODO(R<N>):` 标记
 - 提交前确认没有把凭证写进 `infra/trino/catalog/*.properties`

@@ -215,15 +215,13 @@ def inject(case, dsn, schema, dry_run=False):
         # 派生变体在特定数据上可能是空操作 —— 值本来就是大写时 `upper(col)`
         # 等于没改。这种「注了但没变」会被判成漏检，把规则的分扣在
         # 注入器头上。测不准的东西不该拿来评分，所以宁可如实记成未注入。
-        before_ck = (run(f'SELECT md5(coalesce(string_agg("{c}"::text, \'\' '
-                         f'ORDER BY "{pk}"::text), \'\')) '
-                         f'FROM "{schema}"."{t}"', fetch=True) if c else None)
+        before_ck = (run(_fingerprint_sql(schema, t, c), fetch=True)
+                      if c else None)
         affected = 0
         for s in stmts:
             run(s)
-        after_ck = (run(f'SELECT md5(coalesce(string_agg("{c}"::text, \'\' '
-                        f'ORDER BY "{pk}"::text), \'\')) '
-                        f'FROM "{schema}"."{t}"', fetch=True) if c else None)
+        after_ck = (run(_fingerprint_sql(schema, t, c), fetch=True)
+                      if c else None)
         if (not dry_run and before_ck and after_ck
                 and before_ck[0][0] == after_ck[0][0]):
             manifest["skipped"].append({
@@ -246,6 +244,25 @@ def inject(case, dsn, schema, dry_run=False):
         conn.commit()
         conn.close()
     return manifest
+
+
+def _fingerprint_sql(schema, table, column):
+    """一列内容的指纹。
+
+    **按值排序，不按主键。** 早先按 `pk` 排，而没有主键的表回退到 `ctid` ——
+    UPDATE 之后行会挪位置、ctid 跟着变，于是排序变了、拼出来的串变了、
+    指纹变了：**值一个没动却被判成「改了」**。olist 里 9 条往数值列注的
+    大小写/拼写漂移就是这么混进召回分母的（`upper('19.9')` 本来就是 `'19.9'`）。
+
+    按值排序后指纹只反映「这一列的值构成」，对行移动免疫。
+    NULL 会被 `string_agg` 跳过，所以单独把 NULL 数量拼进去 ——
+    否则 null_burst 这类注入看起来也像没变。
+    """
+    c, t = column, table
+    return (f'SELECT md5(coalesce(string_agg("{c}"::text, \'\x1f\' '
+            f'ORDER BY "{c}"::text), \'\')) '
+            f'|| \':\' || count(*) FILTER (WHERE "{c}" IS NULL) '
+            f'FROM "{schema}"."{t}"')
 
 
 def _dtype_of(conn, schema, table, column, dry_run):
