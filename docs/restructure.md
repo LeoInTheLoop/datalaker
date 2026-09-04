@@ -131,7 +131,7 @@ datalaker/
 | **M1 打通一条** ✅ | `list_source_tables` 注册进 Hermes，真模型问一句「northwind 有哪些表」→ 它调工具 → Connector 读真库 → 答出 14 张表与真实行数 | 已实测 |
 | **M2 挂上门禁** ✅ | `ingest_table`（L3）挂起 → 批准 → 恢复 → 真写 bronze，全程在 Hermes 里 | 已实测；顺带修掉「审批绑会话」与「plugins 包撞车」 |
 | **M3 工具搬家** ✅ | **13 个工具**全部注册进 Hermes（发现 / 画像 / 清洗 / 发布 / 授权 / SaaS 导出）+ 停止点引导进系统提示 | 每个都在 `policy.py` 显式声明；写侧工具一律 ≥L2，有断言兜底；handler 里零审批判断 |
-| **M4 删重复** 🟡 | scheduler 循环 → Hermes cron（3 个 `no_agent` 作业）；入站按 Hermes 的规则做发件人验真 | 独立 scheduler 默认不再守护；email 传输层待走它的 adapter |
+| **M4 删重复** ✅ | scheduler 循环 → Hermes cron（3 个 `no_agent` 作业）；入站按 Hermes 的规则做发件人验真；Agent 自己的花销进账本 | 发件不搬（铁律 2 逼着留第二份，见 6.4）；收件并进 M5 |
 | **M5 驱动反转** | `run_case_full.py` 从扮演 Agent 改成扮演人 | 大 case 里 Hermes 是主语 |
 | **M6 supervisor** | 起停 + 限额 | 杀掉 Hermes 能自动拉起；超预算能停 |
 | **M7 目录搬迁** | 纯机械移动 + 改 import | 树与第 5 节一致 |
@@ -201,6 +201,31 @@ gate 里读它。**且不发审批** —— 自我提权不是「问一下人就
 
 三个都是同一个形状：**闸门读的量根本没人写，而失败方式是安静的。**
 这和 M3 收尾那次（闸门挂在网络后面）是同一类。
+
+### 6.4 M4 的邮件那一项：收件搬，发件不搬
+
+原计划写的是「删掉 email 传输层，改用 Hermes 的 adapter」。看完两边之后
+**拆成两半，只搬一半**。
+
+**发件不搬。** 铁律 2 要求审批 callback 是独立进程、独立数据库账号 ——
+它身上没有 Hermes，回执邮件只能自己发。也就是说无论如何都得留一份
+SMTP/Gmail 传输在 `services/notify/` 里。既然第二份删不掉，
+把门禁那一侧改成走 Hermes 的 `EmailAdapter._send_email` 就不是「删重复」，
+而是**从一份变成两份不一样的**：同一封审批邮件，在 Hermes 里发和在
+callback 里发会走两套代码、两套失败模式。
+另外那个方法挂在 `EmailAdapter` 实例上，要先造一个 `PlatformConfig`；
+换来的只是省掉十五行 `smtplib`。**不值。**
+
+**收件搬，但归 M5。** 这一侧的差距是真的：我们的 `fetch_unread` 只支持
+Gmail API，Hermes 的 adapter 有 IMAP、附件解析、自动发件人识别，
+以及那套发件人验真（6.1 里我照着它的判据补了一份过渡实现）。
+而 M5 本来就要把驱动反过来 —— 从「脚本扮演 Agent」改成「人发邮件、
+Hermes 反应」，入站自然就落到它的 adapter 上。**同一件事做两次没有意义**，
+所以收件这一项直接并进 M5，届时连带删掉 `services/inbound.py` 里
+那段过渡的验真。
+
+> 记在这里是为了下次不再重新评估一遍：结论是「发件永远留在我们这边」，
+> 不是「暂时还没搬」。
 
 ## 7. 重排中绝不能丢的三件
 

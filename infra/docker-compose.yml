@@ -177,7 +177,11 @@ services:
       - ../pipelines:/app/pipelines
       - scheduler_state:/app/state
     command: python /app/ops/scheduler.py
-    restart: unless-stopped
+    # **不能是 unless-stopped。** 没设 CLAW_STANDALONE_SCHEDULER 时脚本
+    # 打印一句就 exit 0，unless-stopped 会把它无限拉起 —— 实测就是
+    # `Restarting (0) Less than a second ago` 一直转。
+    # on-failure：正常退出（已交给 Hermes cron）就安静停着。
+    restart: on-failure
 
   steward-agent:
     build:

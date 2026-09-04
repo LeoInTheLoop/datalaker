@@ -67,26 +67,46 @@ chk("明文 8080 不从宿主机可达", post("SELECT 1", url="http://localhost:
 # 修法是 `allow-insecure-over-http=false`，这条断言防它被改回去。
 import subprocess as _sp
 
+# **先证明连得上，再证明进不去。** 只做后半段的话，
+# 「容器压根到不了 trino」和「trino 挡住了」返回的都是超时/异常 ——
+# 断言会在 Trino 完全敞开的情况下照样绿。这正是本文件要防的那类假绿。
 _probe = """
-import urllib.request, json, sys
+import socket, urllib.request
+try:
+    socket.create_connection(('trino', 8080), timeout=15).close()
+except Exception as e:
+    print('UNREACHABLE', type(e).__name__); raise SystemExit
 req = urllib.request.Request('http://trino:8080/v1/statement', data=b'SELECT 1',
     headers={'X-Trino-User': 'admin'}, method='POST')
 try:
-    with urllib.request.urlopen(req, timeout=15) as r:
+    with urllib.request.urlopen(req, timeout=20) as r:
         print('OPEN', r.status)
 except Exception as e:
-    print('BLOCKED', getattr(e, 'code', type(e).__name__))
+    print('REACHABLE_BLOCKED', getattr(e, 'code', type(e).__name__))
 """
+# **不要挂在某个常驻容器上。** 早先这条探测走 `docker exec
+# datalaker-scheduler-1`，于是 scheduler 一停（M4 之后它默认就不再守护了），
+# 整条断言静默 SKIP —— 回归看着还是全绿。这个项目已经在同一个坑里
+# 摔过三次（加认证后整组 SKIP、plugins 包撞车、闸门挂在网络后面）。
+# 改成起一个一次性容器接到同一张 compose 网络上：**没有别的服务能拖累它**。
+_NET = os.environ.get("COMPOSE_NETWORK", "datalaker_default")
 try:
-    _r = _sp.run(["docker", "exec", "datalaker-scheduler-1", "python3", "-c", _probe],
-                 capture_output=True, text=True, timeout=90)
+    _r = _sp.run(["docker", "run", "--rm", "--network", _NET,
+                  "python:3.11-alpine", "python3", "-c", _probe],
+                 capture_output=True, text=True, timeout=180)
     _out = (_r.stdout or "").strip().splitlines()[-1] if _r.stdout.strip() else "?"
+    if _out in ("", "?"):
+        _out = f"SKIP {(_r.stderr or '').strip()[:60]}"
 except Exception as _e:                                       # noqa: BLE001
     _out = f"SKIP {type(_e).__name__}"
 if _out.startswith("SKIP") or not _out or _out == "?":
     print(f"  SKIP  网络内部匿名探测（{_out}）")
 else:
-    chk("⚠️ 网络内部也不能匿名冒充身份", _out.startswith("BLOCKED"), _out)
+    # 三态，别合并：连不上 ≠ 被挡住。前者说明探测本身没生效，是**失败**。
+    chk("探测容器确实连得到 trino:8080（否则下一条是假绿）",
+        not _out.startswith("UNREACHABLE"), _out)
+    chk("⚠️ 网络内部也不能匿名冒充身份",
+        _out.startswith("REACHABLE_BLOCKED"), _out)
 
 # 授权（readme 11.4）
 chk("claw 可读源系统", run_to_end("SELECT count(*) FROM postgres.public.orders",
