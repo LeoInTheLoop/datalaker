@@ -420,6 +420,24 @@ class PgStore:
                       "GROUP BY a.tool_name ORDER BY 2 DESC", (ts,))
             return c.fetchall()
 
+    def record_usage(self, model, prompt_tokens=0, output_tokens=0,
+                     cost_usd=0.0, run_id="", purpose=""):
+        with self.db.cursor() as c:
+            c.execute(
+                "INSERT INTO usage_ledger (ts, run_id, model, prompt_tokens,"
+                " output_tokens, cost_usd, purpose)"
+                " VALUES (extract(epoch from now()),%s,%s,%s,%s,%s,%s)",
+                (run_id, model, int(prompt_tokens), int(output_tokens),
+                 float(cost_usd), purpose))
+
+    def today_usage(self, since):
+        with self.db.cursor() as c:
+            c.execute("SELECT count(*), coalesce(sum(prompt_tokens+output_tokens),0),"
+                      " coalesce(sum(cost_usd),0) FROM usage_ledger WHERE ts>=%s",
+                      (since,))
+            n, tok, cost = c.fetchone()
+        return {"calls": int(n), "tokens": int(tok), "cost_usd": float(cost)}
+
     def ledger_summary(self, ts):
         with self.db.cursor() as c:
             c.execute("SELECT count(*), coalesce(sum(rows_out),0), "
@@ -717,6 +735,22 @@ class Store:
             "SELECT a.tool_name, count(*) FROM approvals a JOIN decisions d "
             "ON d.approval_id=a.id WHERE d.decision='approve' AND a.created_at>=? "
             "GROUP BY a.tool_name ORDER BY 2 DESC", (ts,)).fetchall()
+
+    def record_usage(self, model, prompt_tokens=0, output_tokens=0,
+                     cost_usd=0.0, run_id="", purpose=""):
+        self.db.execute(
+            "INSERT INTO usage_ledger (ts, run_id, model, prompt_tokens,"
+            " output_tokens, cost_usd, purpose) VALUES (?,?,?,?,?,?,?)",
+            (time.time(), run_id, model, int(prompt_tokens), int(output_tokens),
+             float(cost_usd), purpose))
+        self.db.commit()
+
+    def today_usage(self, since):
+        n, tok, cost = self.db.execute(
+            "SELECT count(*), coalesce(sum(prompt_tokens+output_tokens),0),"
+            " coalesce(sum(cost_usd),0) FROM usage_ledger WHERE ts>=?",
+            (since,)).fetchone()
+        return {"calls": int(n), "tokens": int(tok), "cost_usd": float(cost)}
 
     def ledger_summary(self, ts):
         q = self.db.execute(

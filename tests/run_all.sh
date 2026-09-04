@@ -146,6 +146,14 @@ echo "########## 5.5 Hermes 工具环路（工具真跑在 Hermes 里 + 门禁�
 $PY tests/test_hermes_tool_loop.py || rc=1
 
 echo ""
+echo "########## 0.6 两个后端的表集合一致（纯静态） ##########"
+python3 tests/test_schema_parity.py || rc=1
+
+echo ""
+echo "########## 5.7 预算兜底的数据来源（Agent 自己的花销） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_usage_budget.py ) || rc=1
+
+echo ""
 echo "########## 5.6 定时任务归 Hermes 的 cron（交接面） ##########"
 python3 tests/test_cron_migration.py || rc=1
 

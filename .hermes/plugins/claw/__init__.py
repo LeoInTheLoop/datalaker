@@ -65,6 +65,12 @@ def register(ctx):
     ctx.register_hook("post_tool_call", audit)    # 观察者：event log + 账本
     ctx.register_hook("pre_approval_request", notify)  # observer-only，不能否决
 
+    # Agent 自己的 token 花销记进 usage_ledger。
+    # 在这之前往那张表写数的只有「扮演人」的那个模型 ——
+    # 预算兜底（5.6）读到的永远是 0，看着像没超，其实是没数。
+    from .usage import on_post_llm_call
+    ctx.register_hook("post_llm_call", on_post_llm_call)
+
     # 工具在这里注册。manifest 的 `provides_tools` + `tools.py` 那条路
     # 只对 kind: platform 生效（网关启动时预加载），standalone 插件
     # 要自己在 register() 里调 —— 这一点文档没写，是跟着日志找出来的。

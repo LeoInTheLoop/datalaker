@@ -427,42 +427,43 @@ def _persist(rec):
         pass
 
 
+def _usage_store(readonly=True):
+    """走 Store，不再自己连 DSN。
+
+    原来这里直接 `psycopg.connect(DSN)`，于是**没有 DSN 时整段静默失效**——
+    本地 SQLite 上跑，账本永远是空的，预算兜底（5.6）等于没有。
+    Store 已经把两个后端都实现了，用它就不必维护第二份。
+    """
+    import sys as _s
+    _s.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "plugins"))
+    from datasteward_gate.approvals import open_store
+    return open_store(readonly=readonly, init_schema=not readonly)
+
+
 def record_usage(model, prompt_tokens=0, output_tokens=0, cost_usd=0.0,
                  run_id="", purpose=""):
     """记录一次 LLM 调用。
 
-    成本不可见就无法设上限。这张表是 `ops/claw-status.sh` 和
+    成本不可见就无法设上限。这张表是 `ops/claw-status.py` 和
     第 5.6 节预算兜底的数据来源。
     """
-    dsn = _E.get("STEWARD_AGENT_DSN") or _E.get("DATASTEWARD_DSN", "")
-    if not dsn:
-        return
     try:
-        import psycopg
-        with psycopg.connect(dsn, autocommit=True, connect_timeout=3) as c:
-            c.execute(
-                "INSERT INTO usage_ledger (run_id, model, prompt_tokens,"
-                " output_tokens, cost_usd, purpose) VALUES (%s,%s,%s,%s,%s,%s)",
-                (run_id, model, prompt_tokens, output_tokens, cost_usd, purpose))
+        with _usage_store(readonly=False) as st:
+            st.record_usage(model, prompt_tokens, output_tokens, cost_usd,
+                            run_id, purpose)
     except Exception:
         pass
 
 
 def today_usage():
     """今日用量。预算兜底与状态面板共用。"""
-    dsn = _E.get("STEWARD_AGENT_DSN") or _E.get("DATASTEWARD_DSN", "")
-    if not dsn:
-        return {"calls": 0, "tokens": 0, "cost_usd": 0.0}
+    import datetime as _dt
+    midnight = _dt.datetime.now().replace(
+        hour=0, minute=0, second=0, microsecond=0).timestamp()
     try:
-        import psycopg
-        with psycopg.connect(dsn, connect_timeout=3) as c:
-            with c.cursor() as cur:
-                cur.execute(
-                    "SELECT count(*), coalesce(sum(prompt_tokens+output_tokens),0),"
-                    " coalesce(sum(cost_usd),0) FROM usage_ledger"
-                    " WHERE ts >= date_trunc('day', now())")
-                n, tok, cost = cur.fetchone()
-                return {"calls": n, "tokens": int(tok), "cost_usd": float(cost)}
+        with _usage_store() as st:
+            return st.today_usage(midnight)
     except Exception:
         return {"calls": 0, "tokens": 0, "cost_usd": 0.0}
 

@@ -51,9 +51,85 @@ GRANT USAGE ON SCHEMA public TO approver_role;
 GRANT SELECT ON approvals TO approver_role;
 GRANT INSERT, SELECT ON decisions TO approver_role;
 
+-- ---------------------------------------------------------------------------
+-- 下面五张表原来只存在于 SQLite 的 DDL 里，Postgres 侧一张都没建。
+--
+-- 后果分两种，都很隐蔽：
+--   · `GRANT ... ON asset_semantics` 会直接报错，整个 init 脚本半途而废
+--   · 侥幸建过一次的（R3 手工建的 sync_state）能跑，没建过的静默返回空 ——
+--     `usage_ledger` 就是这样：预算兜底（5.6）读到的永远是 0，看着像「没超」
+--
+-- **两个后端的表集合必须一致。** 加一张表要同步改两处：
+-- `plugins/datasteward_gate/approvals.py` 的 DDL 与这里。有断言盯着。
+-- ---------------------------------------------------------------------------
+
+-- 角色化：绑角色不绑人（readme 10.4）。
+-- 审批人解析、入站白名单（current_holders）都靠它。
+CREATE TABLE IF NOT EXISTS role_assignment (
+    id          BIGSERIAL PRIMARY KEY,
+    role        TEXT NOT NULL,
+    person      TEXT NOT NULL,
+    valid_from  DOUBLE PRECISION NOT NULL,
+    valid_to    DOUBLE PRECISION,
+    granted_by  TEXT NOT NULL,
+    reason      TEXT
+);
+GRANT SELECT, INSERT, UPDATE ON role_assignment TO agent_role;
+GRANT USAGE, SELECT ON SEQUENCE role_assignment_id_seq TO agent_role;
+GRANT SELECT ON role_assignment TO approver_role;
+
+-- 业务知识沉淀：问过的不再问（readme 5.7）
+CREATE TABLE IF NOT EXISTS asset_semantics (
+    id           BIGSERIAL PRIMARY KEY,
+    asset        TEXT NOT NULL,
+    key          TEXT NOT NULL,
+    value        TEXT NOT NULL,
+    confirmed_by TEXT NOT NULL,
+    confirmed_at DOUBLE PRECISION NOT NULL,
+    source_item  TEXT,
+    UNIQUE(asset, key)
+);
+GRANT USAGE, SELECT ON SEQUENCE asset_semantics_id_seq TO agent_role;
+
+-- 运维账本（readme 20.1）：落库而非进程内存，监控独立于被监控对象
+CREATE TABLE IF NOT EXISTS query_ledger (
+    id          BIGSERIAL PRIMARY KEY,
+    ts          DOUBLE PRECISION NOT NULL,
+    source_id   TEXT NOT NULL,
+    purpose     TEXT,
+    sql_text    TEXT NOT NULL,
+    rows_out    BIGINT NOT NULL DEFAULT 0,
+    duration_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    est_rows    DOUBLE PRECISION,
+    status      TEXT NOT NULL
+);
+GRANT SELECT, INSERT ON query_ledger TO agent_role;
+GRANT USAGE, SELECT ON SEQUENCE query_ledger_id_seq TO agent_role;
+
+CREATE TABLE IF NOT EXISTS usage_ledger (
+    id            BIGSERIAL PRIMARY KEY,
+    ts            DOUBLE PRECISION NOT NULL,
+    run_id        TEXT,
+    model         TEXT NOT NULL,
+    prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    output_tokens BIGINT NOT NULL DEFAULT 0,
+    cost_usd      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    purpose       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    seq     BIGSERIAL PRIMARY KEY,
+    run_id  TEXT NOT NULL,
+    ts      DOUBLE PRECISION NOT NULL,
+    kind    TEXT NOT NULL,
+    payload TEXT
+);
+GRANT SELECT, INSERT ON events TO agent_role;
+GRANT USAGE, SELECT ON SEQUENCE events_seq_seq TO agent_role;
+
 -- 业务知识沉淀：Agent 可更新（口径会修订）。
 -- 与 decisions 的只读约束是两回事——那张表关乎审批权威，这张不。
-GRANT UPDATE ON asset_semantics TO agent_role;
+GRANT SELECT, INSERT, UPDATE ON asset_semantics TO agent_role;
 
 -- 增量同步状态（readme 6.1）
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -127,3 +203,10 @@ CREATE TABLE IF NOT EXISTS cleaning_rules (
     retired_at   DOUBLE PRECISION
 );
 GRANT SELECT, INSERT, UPDATE ON remediation_ledger, cleaning_rules TO agent_role;
+
+-- 用量账本：Agent 记自己的花销。
+-- **没有这一条，预算兜底（readme 5.6）读到的永远是 0** —— 以前账本里
+-- 只有「扮演人的那个模型」的花销，Agent 自己一分钱都没记进去。
+-- 仍然与铁律 2 无关：decisions 对 agent_role 依旧只有 SELECT。
+GRANT SELECT, INSERT ON usage_ledger TO agent_role;
+GRANT USAGE, SELECT ON SEQUENCE usage_ledger_id_seq TO agent_role;

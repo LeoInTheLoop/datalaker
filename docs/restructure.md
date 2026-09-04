@@ -176,6 +176,32 @@ gate 里读它。**且不发审批** —— 自我提权不是「问一下人就
 用的是 `no_agent=True`：催办和周报是确定性脚本，不需要模型推理。
 走 no_agent 就不会每小时点一次模型。
 
+### 6.3 M4 顺出来的三个「闸门读的量没人写」
+
+搬 cron 的时候顺手看了一遍 `services/tracing.py` 与 Hermes 的
+`plugins/observability/` 该不该合并，结论是**不合并**（它只支持 Langfuse，
+而且没有 `WAITING_FOR_HUMAN` 这种跨进程、跨天的 span 概念）。
+但顺着它的 `post_llm_call` 钩子往下看，翻出三处同型问题：
+
+1. **`usage_ledger` 里只有「扮演人」的花销。** 往这张表写数的只有
+   `services/persona.py`；Claw 自己烧掉多少一分钱都没记。
+   预算兜底（5.6）读到的永远是 0 —— 看着像没超，其实是没数。
+   改法：注册 Hermes 的 `post_llm_call`，token 数由发请求的那一方给，
+   成本用它的 `agent.usage_pricing` 折算。**自己数只能靠估。**
+
+2. **`record_usage` 自己连 DSN，没 DSN 就 return。** 本地 SQLite 上跑，
+   账本永远是空的。改成走 `Store` —— 两个后端它早就都实现了。
+
+3. **Postgres 的 init 少建五张表**（`role_assignment`、`asset_semantics`、
+   `query_ledger`、`usage_ledger`、`events`）。`GRANT ... ON asset_semantics`
+   指向一张不存在的表，`psql -f` 会在那里断掉；R3 handoff 里
+   「`sync_state` 是手工建的」就是这个坑的前一次发作。
+   加了 `tests/test_schema_parity.py`：两个后端的表集合必须一致，
+   每条 GRANT 的表必须建过，每张可插入的自增表必须授了序列权限。
+
+三个都是同一个形状：**闸门读的量根本没人写，而失败方式是安静的。**
+这和 M3 收尾那次（闸门挂在网络后面）是同一类。
+
 ## 7. 重排中绝不能丢的三件
 
 1. **门禁仍在 `pre_tool_call`**，不因为「工具搬进 Hermes 了」就改成工具内部自检。
