@@ -85,6 +85,39 @@ POLICY: dict[str, tuple[Level, str | None]] = {
 # ---------------------------------------------------------------------------
 UNDECLARED = (Level.L4, None)
 
+# ---------------------------------------------------------------------------
+# 参数级禁令：工具名不足以描述一个动作的时候
+#
+# `grant_read` 是 L3（Owner 审批）——把 gold 表读权限开给某个人，正常业务。
+# 但 `grant_read(principal="claw")` 是**给 Agent 自己开权限**：工具名一样，
+# 动作完全不是一回事。只按工具名分级的话，L4 那组 `grant_self` /
+# `modify_own_role` 就有一个绕过口——换个工具名做同一件事。
+#
+# 仍然是**表驱动**：加一条禁令 = 加一行，不改 hook 代码（同 POLICY）。
+# 也**不发审批**——自我提权不是「问一下人就行」的事，问了反而给了它
+# 一个被误批的机会。
+# ---------------------------------------------------------------------------
+# Agent 自己的身份。Trino / Postgres 里 Claw 用的就是这些名字。
+SELF_PRINCIPALS = {"claw", "agent", "steward", "datasteward", "data_steward"}
+
+# tool_name -> (参数名, 禁止的取值集合, 理由)
+ARG_DENY: dict[str, tuple[str, set[str], str]] = {
+    "grant_read": ("principal", SELF_PRINCIPALS,
+                   "Agent 不得给自己开权限（readme 11.6）——"
+                   "换个工具名做 grant_self 的事，同样不行"),
+}
+
+
+def arg_denied(tool_name: str, args: dict) -> str | None:
+    """返回拒绝理由；没有禁令就返回 None。"""
+    rule = ARG_DENY.get(tool_name)
+    if not rule:
+        return None
+    key, forbidden, why = rule
+    v = str((args or {}).get(key) or "").strip().lower()
+    return why if v in forbidden else None
+
+
 # 明确点名的高危内置工具，仅为让拒绝消息更具体
 HERMES_DANGEROUS = {
     "terminal", "execute_code", "code_execution", "run_shell", "bash",

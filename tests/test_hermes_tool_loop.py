@@ -282,6 +282,26 @@ chk("画像与提案是 L1（产出结论，不改东西）",
     _lv.get("profile_table") == Level.L1
     and _lv.get("propose_cleaning") == Level.L1)
 chk("接入是 L3（需 Owner 审批）", _lv.get("ingest_table") == Level.L3)
+chk("清洗是 L2（口径由 Steward 定）",
+    _lv.get("apply_cleaning_rule") == Level.L2)
+chk("发布与授权是 L3（对外的动作要 Owner）",
+    _lv.get("publish_gold") == Level.L3 and _lv.get("grant_read") == Level.L3
+    and _lv.get("ingest_export") == Level.L3)
+
+# 每加一个写侧工具，L0/L1 里就不该混进能改东西的东西。
+# 这条比逐个断言级别更耐用：新工具漏标级别时它会红。
+_writers = {"apply_cleaning_rule", "publish_gold", "grant_read",
+            "ingest_export", "ingest_table"}
+chk("**所有会改东西的工具都在 L2 以上**（漏标级别时这条会红）",
+    all(_lv.get(t, Level.L0) >= Level.L2 for t in _writers & set(_declared)),
+    str({t: int(_lv.get(t, -1)) for t in sorted(_writers & set(_declared))}))
+
+# handler 里不该有审批判断 —— 那是门禁的事（铁律 1）。
+_tools_src = (ROOT / ".hermes" / "plugins" / "claw"
+              / "tools.py").read_text(encoding="utf-8")
+_leaks = [w for w in ("find_valid", "is_denied", "st.request(", "has_approval")
+          if w in _tools_src]
+chk("**工具 handler 里没有自己判审批**（限制只在门禁里）", not _leaks, str(_leaks))
 
 print("\n=== 引导进了系统提示（引导走 prompt，强制走门禁）===\n")
 

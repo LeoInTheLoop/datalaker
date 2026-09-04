@@ -404,11 +404,11 @@ Hermes 自带 137 个内置工具，`terminal` / `code_execution` 能执行任�
 
 #### 支柱二：Tool 可用工具 🟡
 
-**边界已经很硬，但里面几乎是空的。** `policy.py` 声明了 22 个工具，
-真正有函数体的只有 `sql_query`（走 Connector）。
-`profile_table` / `ingest_table` / `run_dq_check` 目前都只是策略条目。
+**边界一直很硬，里面从空到满。** R2 开始时 `policy.py` 声明了 22 个工具，
+真正有函数体的只有 `sql_query`。现在下表这些都已落地，
+并且**注册在 Hermes 里**（`.hermes/plugins/claw/`）而不是我的脚本里：
 
-R2 要补的：
+R2 要补、现已补齐的：
 
 | 工具 | 级别 | 说明 |
 |---|---|---|
@@ -416,8 +416,10 @@ R2 要补的：
 | `profile_table` | L1 | **源上采样、lake 里全量**（5.3） |
 | `run_dq_check` | L1 | 按门槛判定 |
 | `ingest_table` | L3 | 落 bronze |
-| `apply_cleaning_rule` | L2 | 需人确认方案 |
-| `publish_gold` | L3 | 对外发布 |
+| `apply_cleaning_rule` | L2 | 需人确认方案；原值留在 `<列>_raw` |
+| `publish_gold` | L3 | 对外发布。**没分类不发布**、`_raw` 不出去 |
+| `grant_read` | L3 | 只决定「谁能进来」，看到什么由分类决定 |
+| `ingest_export` | L3 | SaaS 导出件落 bronze（8.2 数据面） |
 
 同时要做减法：**Hermes 侧配置工具白名单**，在框架层就不注入——
 这是主防线，gate 只是兜底（见上）。

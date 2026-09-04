@@ -89,6 +89,61 @@ chk("默认 dry_run（策略会让人干不了活）", s["dry_run"] is True)
 chk("dry_run 不落盘", s["written"] is None)
 chk("提示需要重载", "重载" in s["note"] or "生效" in s["note"])
 
+print("\n=== 授权：只说「谁」，不说「看到什么」 ===\n")
+
+try:
+    PS.grant("li@acme.com", "gold.customer_360", role="root")
+    chk("未知角色被拒", False)
+except ValueError:
+    chk("未知角色被拒", True)
+
+PS.grant("li@acme.com", "gold.customer_360", role="analyst", by="wang@acme.com")
+PS.grant("zhao@acme.com", "gold.customer_360", role="owner", by="wang@acme.com")
+g = PS.grants("gold.customer_360")
+chk("授权可读回", g == {"li@acme.com": "analyst", "zhao@acme.com": "owner"}, str(g))
+
+r3 = PS.generate(["gold.customer_360"], base=BASE)
+by_user = {t["user"]: t for t in r3["tables"] if "_reason" in t}
+li = by_user.get(r"li@acme\.com")
+zhao = by_user.get(r"zhao@acme\.com")
+chk("被授权的人拿到表规则", li is not None and zhao is not None,
+    ",".join(sorted(by_user)))
+# **这才是「策略绑 tag」的意思**：两个人拿的是同一张分类表推出来的结果，
+# 谁都没有单独配过一份遮蔽清单。
+chk("analyst 角色的人被遮蔽 PII 列",
+    li and {x["name"] for x in li.get("columns", [])} == {"phone", "email"})
+chk("owner 角色的人看原值（同一张 MATRIX 推出来的）",
+    zhao is not None and "columns" not in zhao)
+
+# catalog 一层漏了的话，表规则写得再对也查不了
+cat_users = {c["user"] for c in r3["catalogs"]}
+chk("授权同时补上 catalog 层（否则表规则不生效）",
+    r"li@acme\.com" in cat_users, ",".join(sorted(cat_users)))
+chk("Trino 的 user 是正则，邮箱里的点被转义（宁窄不宽）",
+    all("@" not in u or "\\." in u for u in cat_users if "@" in u))
+
+print("\n=== 重复 sync 不能把规则越堆越多 ===\n")
+
+PS.write(r3, RULES)
+back = PS.load(RULES)
+chk("load 能认出哪些是生成的（靠旁路登记册还原 _reason）",
+    len([t for t in back["tables"] if "_reason" in t]) ==
+    len([t for t in r3["tables"] if "_reason" in t]),
+    str(len([t for t in back["tables"] if "_reason" in t])))
+again = PS.generate(["gold.customer_360"], base=back)
+chk("再生成一次规则数不变（不追加重复项）",
+    len(again["tables"]) == len(r3["tables"]),
+    f'{len(r3["tables"])} → {len(again["tables"])}')
+
+# 增量同步不能顺手撤掉别人的授权
+PS.grant("sun@acme.com", "gold.hr_salary", role="analyst", by="wang@acme.com")
+full = PS.generate(["gold.customer_360", "gold.hr_salary"], base=BASE)
+PS.write(full, RULES)
+part = PS.generate(["gold.hr_salary"], base=PS.load(RULES))
+kept = [t for t in part["tables"] if t.get("table") == "customer_360"]
+chk("只同步一张表时，另一张的授权还在（授权只该被显式动作改变)",
+    len(kept) >= 1, f"{len(kept)} 条")
+
 if os.environ.get("POLICY_SYNC_E2E") == "1":
     print("\n=== 活体：两账号查同表 ===\n")
 

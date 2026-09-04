@@ -81,6 +81,11 @@ else
 fi
 
 echo ""
+echo "########## 1.365 发布到 gold（没分类不发布 / _raw 不出去） ##########"
+# 前两组不连 Trino，建表那组自己会 SKIP
+( unset DATASTEWARD_DSN; $PY tests/test_publish.py ) || rc=1
+
+echo ""
 echo "########## 1.34 时间引擎：12 天升级链路（秒级） ##########"
 ( unset DATASTEWARD_DSN; $PY tests/test_clock.py ) || rc=1
 

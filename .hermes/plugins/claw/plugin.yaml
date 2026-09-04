@@ -18,6 +18,10 @@ provides_tools:
   - check_lake_quality
   - check_freshness
   - ingest_table
+  - apply_cleaning_rule
+  - publish_gold
+  - grant_read
+  - ingest_export
 hooks:
   - pre_tool_call
   - post_tool_call

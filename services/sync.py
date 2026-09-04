@@ -231,6 +231,19 @@ def _pg_type_to_trino(t: str) -> str:
     return "varchar"
 
 
+def lake_columns(schema: str, table: str) -> list:
+    """lake 里某张表的列名（按序）。bronze/silver/gold 都走这一个。
+
+    清洗和发布都要先知道有哪些列；各写一份 information_schema 查询，
+    早晚在 `_raw` 列该不该带上这种问题上分叉。
+    """
+    rows = _trino(
+        "SELECT column_name FROM iceberg.information_schema.columns"
+        f" WHERE table_schema='{schema}' AND table_name='{table}'"
+        " ORDER BY ordinal_position")
+    return [r.strip().strip('"') for r in rows if r.strip()]
+
+
 def sync_table(source_id: str, table: str, watermark_col: str | None = None,
                sla_h: int = 24, allow_schema_change: bool = False,
                schema: str = "public", bronze_name: str | None = None) -> dict:

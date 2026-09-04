@@ -16,7 +16,7 @@ import threading
 import os
 
 from .approvals import Store, open_store
-from .policy import HERMES_DANGEROUS, Level, is_declared, lookup
+from .policy import HERMES_DANGEROUS, Level, arg_denied, is_declared, lookup
 
 DB_PATH = os.environ.get("DATASTEWARD_DB", os.path.expanduser("~/.datalaker/approvals.db"))
 # 每个线程一个句柄：Hermes 在线程池里跑工具，SQLite 连接不许跨线程用
@@ -126,6 +126,13 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     if level >= Level.L4:
         return {"action": "block",
                 "message": f"[L4] {tool_name} 永不自动执行，需线下双人批准后由人工操作。"}
+
+    # 参数级禁令：工具名合法但这次的参数把它变成了另一件事
+    # （`grant_read(principal="claw")` = 自我提权）。按 L4 处理：拒绝，不发审批。
+    why = arg_denied(tool_name, args)
+    if why:
+        return {"action": "block",
+                "message": f"[L4] {tool_name} 这次调用被拒绝：{why}。"}
 
     # sql_query 是 L1 工具，但风险不只由工具名决定：同一个工具里，
     # SELECT 10 行和 JOIN 大表不是同一类动作。因此 SQL 走内容级动态准入。

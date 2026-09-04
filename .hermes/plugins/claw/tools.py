@@ -352,7 +352,189 @@ _SCHEMAS.update({
     },
 })
 
+# --------------------------------------------------------------- M3 收尾四件
+# 这四个都在门禁的 L2/L3 上。**handler 里一行审批判断都没有** ——
+# 被拦时 Hermes 根本走不到这里。写了就是把限制散进业务代码（铁律 1）。
+
+def _apply_cleaning_rule(args: dict, **_: Any) -> str:
+    """按已批准的规则把 bronze 洗成 silver（L2，Steward 确认）。"""
+    from . import _ensure_path
+    _ensure_path()
+    src = str(args.get("source") or "").strip()
+    tbl = str(args.get("table") or "").strip()
+    if not (src and tbl):
+        return "错误：需要 source 与 table。"
+    bronze = str(args.get("bronze_table") or f"{src}__{tbl}").strip()
+    approved = args.get("approved_rules") or []
+    if isinstance(approved, str):
+        approved = [x.strip() for x in approved.split(",") if x.strip()]
+    try:
+        import clean, data_tools, sync
+        dq = data_tools.run_dq_check(src, tbl)
+        plan = clean.propose(bronze, dq.get("findings") or [])
+        plan["approved_rules"] = approved
+        cols = sync.lake_columns("bronze", bronze)
+        if not cols:
+            return (f"iceberg.bronze.{bronze} 不存在 —— 先把表接进来"
+                    f"（ingest_table）再洗。")
+        r = clean.apply(bronze, plan, cols, pk=args.get("pk") or None,
+                        silver_table=args.get("silver_table") or None)
+    except Exception as e:                                    # noqa: BLE001
+        return f"清洗 {bronze} 失败：{type(e).__name__}: {str(e)[:200]}"
+
+    # **未被批准的提案要说出来**，否则「洗完了」会被读成「都处理干净了」。
+    skipped = [a["rule"] for a in plan.get("propose", [])
+               if a["rule"] not in set(approved)]
+    ask = [f'{a["column"]}/{a["issue"]}' for a in plan.get("ask", [])]
+    out = [f'{r["silver_table"]}：{r["rows"]:,} 行'
+           f'（bronze {r["bronze_rows"]:,}，去重 {r["deduped"]}）。'
+           f'生效 {len(r["applied"])} 条规则，原值保留在 <列>_raw。']
+    if skipped:
+        out.append(f"未执行（没批准这条规则）：{'、'.join(skipped)}")
+    if ask:
+        out.append(f"**仍需你给口径，我没动**：{'、'.join(ask)}")
+    return "\n".join(out)
+
+
+def _publish_gold(args: dict, **_: Any) -> str:
+    """silver → gold（L3，Owner 审批）。"""
+    from . import _ensure_path
+    _ensure_path()
+    st = str(args.get("silver_table") or "").strip()
+    if not st:
+        return "错误：需要 silver_table。"
+    cols = args.get("columns") or None
+    if isinstance(cols, str):
+        cols = [x.strip() for x in cols.split(",") if x.strip()]
+    try:
+        import publish
+        r = publish.publish_gold(st, gold_table=args.get("gold_table") or None,
+                                 columns=cols)
+    except Exception as e:                                    # noqa: BLE001
+        return f"发布 {st} 失败：{type(e).__name__}: {str(e)[:240]}"
+    lines = [f'{r["gold_table"]}：{r["rows"]:,} 行，分类 {r["classification"]}，'
+             f'来源 {r["upstream"]}。']
+    if r["dropped_raw"]:
+        lines.append(f'清洗前的原值列没有发布：{"、".join(r["dropped_raw"])}')
+    lines.append(f'遮蔽列：{"、".join(r["masked_columns"]) or "（无）"}。'
+                 f'{r["note"]}')
+    return "\n".join(lines)
+
+
+def _grant_read(args: dict, **_: Any) -> str:
+    """把一张 gold 表的读权限开给某个人（L3，Owner 审批）。"""
+    from . import _ensure_path
+    _ensure_path()
+    who = str(args.get("principal") or "").strip()
+    asset = str(args.get("asset") or "").strip()
+    if not (who and asset):
+        return "错误：需要 principal 与 asset（形如 gold.customer_360）。"
+    try:
+        import policy_sync
+        policy_sync.grant(who, asset, role=str(args.get("role") or "analyst"),
+                          by=str(args.get("granted_by") or "owner"))
+        r = policy_sync.sync([asset], dry_run=False)
+    except Exception as e:                                    # noqa: BLE001
+        return f"授权失败：{type(e).__name__}: {str(e)[:200]}"
+    d = r["diff"]
+    return (f'{asset} 已开给 {who}：策略新增 {len(d["added"])} 条、'
+            f'变更 {len(d["changed"])} 条，写入 {r["written"]}。'
+            f'能看到哪些列由分类决定，不由这次授权决定。{r["note"]}')
+
+
+def _ingest_export(args: dict, **_: Any) -> str:
+    """把 SaaS 导出的附件落进 bronze（L3，Owner 审批）。"""
+    from . import _ensure_path
+    _ensure_path()
+    src = str(args.get("saas_source") or "").strip()
+    tbl = str(args.get("table") or "").strip()
+    if not (src and tbl):
+        return "错误：需要 saas_source 与 table。"
+    try:
+        import export_ingest
+        r = export_ingest.ingest_export(src, tbl, path=args.get("path") or None,
+                                        pk=args.get("pk") or None)
+    except Exception as e:                                    # noqa: BLE001
+        return f"接入导出件 {src}.{tbl} 失败：{type(e).__name__}: {str(e)[:200]}"
+    out = [f'{r.get("bronze_table", tbl)}：{r.get("bronze_rows", 0):,} 行。']
+    d = r.get("deletions") or {}
+    if d.get("deleted_count"):
+        out.append(f'这次快照里少了 {d["deleted_count"]} 个主键 —— '
+                   f"全量快照能看见删除，增量在 updated_at 水位线上看不见。")
+    if not r.get("column_mapping_confirmed"):
+        out.append("列名映射还没人确认过 —— 导出的列名是显示标签，"
+                   "业务方改个显示名列名就变，需要 confirm_column_mapping。")
+    return "\n".join(out)
+
+
+_SCHEMAS.update({
+    "apply_cleaning_rule": {
+        "name": "apply_cleaning_rule",
+        "description": (
+            "按清洗提案把 bronze 洗成 silver。**要 Steward 批准。**"
+            "只执行确定性的那批，加上你在 approved_rules 里点名批准的规则；"
+            "需要人给口径的那些原样带过去，不会自己填。原值一律留在 <列>_raw。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "源系统 id"},
+            "table": {"type": "string", "description": "源表名"},
+            "bronze_table": {"type": "string",
+                             "description": "bronze 表名，默认 <source>__<table>"},
+            "approved_rules": {"type": "array", "items": {"type": "string"},
+                               "description": "已获批准的规则名（propose_cleaning 里给出的）"},
+            "pk": {"type": "string", "description": "主键列，用于按主键去重"},
+            "silver_table": {"type": "string", "description": "目标 silver 表名，默认同名"}},
+            "required": ["source", "table"]},
+    },
+    "publish_gold": {
+        "name": "publish_gold",
+        "description": (
+            "把一张 silver 表发布到 gold 供外部查询。**要 Owner 审批。**"
+            "前提是这张 gold 资产已经有分类 —— 没有分类就推不出遮蔽规则。"
+            "清洗前的原值列（<列>_raw）不会被发布。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "silver_table": {"type": "string", "description": "silver 表名"},
+            "gold_table": {"type": "string", "description": "目标 gold 表名，默认同名"},
+            "columns": {"type": "array", "items": {"type": "string"},
+                        "description": "要发布的列，默认全部（不含 _raw）"}},
+            "required": ["silver_table"]},
+    },
+    "grant_read": {
+        "name": "grant_read",
+        "description": (
+            "把一张已发布资产的读权限开给某个人。**要 Owner 审批。**"
+            "只决定「谁能进来」；看得到哪些列由该表的分类决定。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "principal": {"type": "string", "description": "被授权的人（用户名或邮箱）"},
+            "asset": {"type": "string", "description": "形如 gold.customer_360"},
+            "role": {"type": "string", "enum": ["analyst", "owner"],
+                     "description": "以什么角色读，默认 analyst"},
+            "granted_by": {"type": "string", "description": "批准人"}},
+            "required": ["principal", "asset"]},
+    },
+    "ingest_export": {
+        "name": "ingest_export",
+        "description": (
+            "把 SaaS 定时报表导出的附件落进 bronze。**要 Owner 审批。**"
+            "全量快照 —— 所以能看见「这次没了的记录」，这是增量同步做不到的。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "saas_source": {"type": "string", "description": "SaaS 源 id，如 salesforce"},
+            "table": {"type": "string", "description": "对象名，如 Account"},
+            "path": {"type": "string", "description": "附件路径，默认取最近一次暂存"},
+            "pk": {"type": "string", "description": "不可变主键列，用于识别删除"}},
+            "required": ["saas_source", "table"]},
+    },
+})
+
+
 _HANDLERS = {
+    "apply_cleaning_rule": _apply_cleaning_rule,
+    "publish_gold": _publish_gold,
+    "grant_read": _grant_read,
+    "ingest_export": _ingest_export,
     "scan_permissions": _scan_permissions,
     "check_lake_quality": _check_lake_quality,
     "check_freshness": _check_freshness,

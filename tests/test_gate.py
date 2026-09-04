@@ -199,6 +199,29 @@ try:
 finally:
     _bg._budget_cache.update(ts=0.0, over=None)
 
+# 20. 参数级禁令：工具名合法，参数把它变成了另一件事
+#     `grant_read` 本身是 L3（Owner 审批的正常业务），但 principal 指向
+#     Agent 自己时就是自我提权 —— 只按工具名分级的话，第 18 组那五条
+#     全都有一个换名字的绕过口。
+for who in ("claw", "CLAW", " agent ", "data_steward"):
+    r = gate("grant_read", {"principal": who, "asset": "gold.customer_360"}, RUN)
+    check(f"给自己开权限被拒: principal={who!r}",
+          is_block(r) and "L4" in r.get("message", ""))
+
+# **且不发审批** —— 自我提权不是「问一下人就行」的事，
+# 发出去反而给了它一个被误批的机会。
+_before = admin.db.execute("SELECT count(*) FROM approvals").fetchone()[0]
+gate("grant_read", {"principal": "claw", "asset": "gold.x"}, RUN)
+_after = admin.db.execute("SELECT count(*) FROM approvals").fetchone()[0]
+check("自我提权不产生审批请求（不给误批的机会）", _before == _after,
+      f"{_before} → {_after}")
+
+# 对照：开给真人走正常 L3 审批，说明拦的是参数不是工具
+r = gate("grant_read", {"principal": "li@acme.com", "asset": "gold.customer_360"}, RUN)
+check("开给真人 → 正常发审批（拦的是参数不是工具）",
+      is_block(r) and "PENDING_APPROVAL" in r.get("message", ""),
+      (r.get("message", "")[:30] if isinstance(r, dict) else str(r)))
+
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 if bad:
     print("失败项:", ", ".join(bad))
