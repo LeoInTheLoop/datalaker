@@ -14,6 +14,9 @@ provides_tools:
   - profile_table
   - propose_cleaning
   - record_finding
+  - scan_permissions
+  - check_lake_quality
+  - check_freshness
   - ingest_table
 hooks:
   - pre_tool_call

@@ -234,6 +234,32 @@ chk("清洗提案分了三档", "洗成这样对吗" in b7 or "必须你给口�
 chk("**提案里点明了哪些不会自动做**", "不会自己动" in b7 or "必须你给口径" in b7)
 chk("台账登记成功（返回 RL 编号）", "RL-" in b7)
 
+print("\n=== M3：治理链路（只观测 / 全量检查 / 新鲜度）===\n")
+
+script_gov = [
+    CALL("scan_permissions", source="northwind", kind="database"),
+    CALL("check_lake_quality", bronze_table="northwind__shippers", pk="shipper_id"),
+    CALL("check_freshness", asset="northwind.shippers"),
+    {"text": "看完了。"},
+]
+with StubServer(script_gov, port=STUB_PORT) as s8:
+    saved = dict(os.environ)
+    os.environ.update({"DATASTEWARD_DB": DB3, "NOTIFY_CHANNEL": "outbox",
+                       "NOTIFY_OUTBOX": DB3 + ".outbox.jsonl"})
+    try:
+        run_hermes("查一下 northwind 的权限和数据质量", s8, timeout=300)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    b8 = " ".join(c["content"] or "" for c in s8.tool_calls_made())
+
+chk("权限扫描跑通", "权限现状" in b8 or "没有发现明显的权限问题" in b8, b8[:80])
+chk("**扫描明确声明未做任何变更**（铁律 4）",
+    "未做任何变更" in b8 or "没有发现明显" in b8)
+chk("lake 侧全量检查跑通",
+    "全量检查" in b8, b8[-200:-80] if len(b8) > 200 else b8)
+chk("新鲜度可查", "新鲜度" in b8 or "距上次同步" in b8 or "还没同步过" in b8)
+
 print("\n=== M3：搬进来的工具都显式声明了级别（铁律 5）===\n")
 
 sys.path.insert(0, str(ROOT / "plugins"))

@@ -240,7 +240,122 @@ _SCHEMAS.update({
     },
 })
 
+def _scan_permissions(args: dict, **_: Any) -> str:
+    """扫源系统的权限现状。**只观测、只建议，绝不改**（铁律 4）。"""
+    src = str(args.get("source") or "").strip()
+    if not src:
+        return "错误：需要 source。"
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        import perm_discovery
+        kind = str(args.get("kind") or "database")
+        r = (perm_discovery.scan_saas(src) if kind == "saas"
+             else perm_discovery.scan_database(src))
+    except Exception as e:                                    # noqa: BLE001
+        return f"扫描 {src} 权限失败：{type(e).__name__}: {str(e)[:160]}"
+    fs = r.get("findings") or []
+    if not fs:
+        return f"{src}：没有发现明显的权限问题。{r.get('note', '')}"
+    lines = [f"{src} 权限现状 {len(fs)} 项发现（只观测，未做任何变更）："]
+    for f in fs[:12]:
+        lines.append(f"  · [{f['severity']}] {f['subject']} —— {f['detail']}")
+        if f.get("suggestion"):
+            lines.append(f"      建议：{f['suggestion']}")
+    lines.append(r.get("note", ""))
+    return "\n".join(x for x in lines if x)
+
+
+def _check_lake_quality(args: dict, **_: Any) -> str:
+    """在 lake 上做全量检查。**这就是那个被挪进来的 join**（铁律 3）。"""
+    from . import _ensure_path
+    _ensure_path()
+    tbl = str(args.get("bronze_table") or "").strip()
+    pk = str(args.get("pk") or "").strip()
+    if not tbl:
+        return "错误：需要 bronze_table。"
+    spec = {"pk": [{"table": tbl, "column": pk}] if pk else [], "fk": []}
+    child_col = str(args.get("fk_column") or "")
+    parent = str(args.get("fk_parent_table") or "")
+    parent_col = str(args.get("fk_parent_column") or "")
+    if child_col and parent and parent_col:
+        spec["fk"] = [{"child": tbl, "child_col": child_col,
+                       "parent": parent, "parent_col": parent_col}]
+    if not (spec["pk"] or spec["fk"]):
+        return "错误：至少要给 pk，或者一组外键（fk_column/fk_parent_table/fk_parent_column）。"
+    try:
+        import lakehouse
+        r = lakehouse.lake_dq_check(spec)
+    except Exception as e:                                    # noqa: BLE001
+        return f"lake 侧检查失败：{type(e).__name__}: {str(e)[:160]}"
+    if r["errors"]:
+        return "检查出错：" + "；".join(r["errors"][:3])
+    if not r["findings"]:
+        return f"{tbl}：全量检查通过（主键唯一 / 外键完整）。"
+    return "\n".join([f"{tbl} 全量检查 {len(r['findings'])} 项："]
+                      + [f"  · [{f['severity']}] {f['issue']} —— {f['detail']}"
+                         for f in r["findings"]])
+
+
+def _check_freshness(args: dict, **_: Any) -> str:
+    """这张表的数据有多旧、超没超 SLA。"""
+    from . import _ensure_path
+    _ensure_path()
+    asset = str(args.get("asset") or "").strip()
+    if not asset:
+        return "错误：需要 asset（形如 northwind.orders）。"
+    try:
+        import sync
+        r = sync.freshness(asset)
+    except Exception as e:                                    # noqa: BLE001
+        return f"查新鲜度失败：{type(e).__name__}: {e}"
+    if not r.get("known"):
+        return f"{asset} 还没同步过 —— 没有新鲜度可言。"
+    stale = "**已超 SLA**" if r.get("is_stale") else "在 SLA 内"
+    return (f"{asset}：策略 {r.get('strategy')}，"
+            f"距上次同步 {r.get('age_hours', 0):.1f} 小时，{stale}。")
+
+
+_SCHEMAS.update({
+    "scan_permissions": {
+        "name": "scan_permissions",
+        "description": (
+            "扫描一个源系统的权限现状，找出过度授权、外部账号、停滞的管理员账号等。"
+            "**只观测只建议，绝不修改任何权限** —— 改错的爆炸半径比数据大。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "源系统 id"},
+            "kind": {"type": "string", "enum": ["database", "saas"],
+                     "description": "数据库还是 SaaS，默认 database"}},
+            "required": ["source"]},
+    },
+    "check_lake_quality": {
+        "name": "check_lake_quality",
+        "description": (
+            "对已落 bronze 的表做**全量**检查：主键唯一性、外键完整性。"
+            "源库上只能采样、且不允许跨表关联，这类结论只有在数据湖里才算得准。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "bronze_table": {"type": "string", "description": "bronze 表名，如 northwind__orders"},
+            "pk": {"type": "string", "description": "主键列名"},
+            "fk_column": {"type": "string", "description": "外键列，可空"},
+            "fk_parent_table": {"type": "string", "description": "父表 bronze 名，可空"},
+            "fk_parent_column": {"type": "string", "description": "父表主键列，可空"}},
+            "required": ["bronze_table"]},
+    },
+    "check_freshness": {
+        "name": "check_freshness",
+        "description": "查一张已接入的表数据有多旧、有没有超过新鲜度 SLA。",
+        "parameters": {"type": "object", "properties": {
+            "asset": {"type": "string", "description": "形如 northwind.orders"}},
+            "required": ["asset"]},
+    },
+})
+
 _HANDLERS = {
+    "scan_permissions": _scan_permissions,
+    "check_lake_quality": _check_lake_quality,
+    "check_freshness": _check_freshness,
     "list_source_tables": _list_source_tables,
     "get_table_metadata": _get_table_metadata,
     "profile_table": _profile_table,

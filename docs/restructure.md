@@ -170,8 +170,10 @@ Hermes 零改动，插件住在 `datalaker/.hermes/plugins/claw/`，
 
 ### M3 进行中（2026-09-04）
 
-已注册 6 个工具：`list_source_tables` `get_table_metadata` `profile_table`
-`propose_cleaning` `record_finding` `ingest_table`。一次对话里连着调完前五个，
+已注册 **9 个工具**：发现三件（`list_source_tables` / `get_table_metadata` /
+`check_freshness`）、判定三件（`profile_table` / `check_lake_quality` /
+`propose_cleaning`）、治理两件（`scan_permissions` / `record_finding`）、
+接入一件（`ingest_table`）。一次对话里连着调完前五个，
 提案正确地对空值率与数量级异常说「**必须你给口径，我不会自己动**」。
 
 加了一条**结构性断言**：manifest 里列出的每个工具都必须在 `policy.py` 里

@@ -29,6 +29,11 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     "propose_cleaning":     (Level.L1, None),
     # 写的是我们自己的整改台账，不碰源系统也不碰 lake
     "record_finding":       (Level.L1, None),
+    # 权限扫描只读 information_schema / pg_roles，且明确不改任何权限（铁律 4）
+    "scan_permissions":     (Level.L1, None),
+    # 在自己的地盘上全量扫，扫爆了也不影响别人（readme 5.3）
+    "check_lake_quality":   (Level.L1, None),
+    "check_freshness":      (Level.L0, None),
     # --- L2 需 Steward 确认 ---
     "define_semantics":     (Level.L2, "steward"),
     "apply_cleaning_rule":  (Level.L2, "steward"),
