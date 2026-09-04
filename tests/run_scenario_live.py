@@ -65,7 +65,10 @@ def mail_in(persona_key, incoming, reply_to_qid=None):
            "headers": {"Message-ID": f"<{uuid.uuid4().hex}@sim>",
                        "From": f"{p['name']} <{p['email']}>",
                        "In-Reply-To": f"<{reply_to_qid}@claw>" if reply_to_qid else ""},
-           "snippet": r["body"]}
+           "snippet": r["body"],
+           # 模拟的人也是从自己的域真发出来的，验真该过
+           "auth_results": [f"mx.sim; spf=pass smtp.mailfrom={p['email']};"
+                            f" dmarc=pass header.from={p['email'].rpartition('@')[2]}"]}
     out = inbound.process(msg, st, lookup_by_message_id=lambda m: reply_to_qid)
     traj.inbound(p["email"], out.get("intent", {}).get("intent", "?"),
                  layer=out.get("attribution", {}).get("layer"),

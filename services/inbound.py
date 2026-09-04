@@ -333,6 +333,104 @@ def sender_allowed(from_addr: str, store) -> bool:
     return addr in env_allow
 
 
+# ---------------------------------------------------------------- 发件人验真
+# **`From:` 是发件人自己写的。** IMAP/Gmail 投递过程不对它做任何认证，
+# 所以只按 From 做白名单等于没有白名单 —— 冒充一个 owner 的地址，
+# 前面那道 `sender_allowed` 直接放行。
+# （Hermes 在自己的 email adapter 里引了 GHSA-rxqh-5572-8m77 说明这件事。）
+#
+# 唯一可信的信号是**我们自己的收件服务器**跑完 SPF/DKIM/DMARC 之后盖上的
+# `Authentication-Results`。它由服务器 prepend，所以**第一条**才是它写的；
+# 攻击者塞进自己邮件里的那条永远排在后面。因此这里必须拿到**有序的**
+# 头部列表，不能用 dict —— dict 会把重复的头折叠成最后一个，
+# 恰好就是攻击者那条。
+#
+# TODO(M5)：inbound 改走 Hermes 的 email adapter 之后删掉这一段。
+# 它那边已有一份更完整的实现（authserv-id 锁定、自动发件人识别、附件解析）。
+# 现在用不上是因为那个模块 import 了 gateway/agent，只能在 Hermes 进程里加载。
+REQUIRE_AUTH_ENV = "INBOUND_REQUIRE_AUTH"
+
+
+def _domain_of(addr: str) -> str:
+    a = email.utils.parseaddr(addr or "")[1].lower()
+    return a.rpartition("@")[2]
+
+
+def _aligned(a: str, b: str) -> bool:
+    """域对齐：相等，或一方是另一方的子域。"""
+    a, b = (a or "").strip(".").lower(), (b or "").strip(".").lower()
+    if not (a and b):
+        return False
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
+def _kv(chunk: str) -> dict:
+    out = {}
+    for tok in chunk.split():
+        if "=" in tok:
+            k, _, v = tok.partition("=")
+            out[k.strip().lower()] = v.strip().strip('"').rstrip(";")
+    return out
+
+
+def sender_authenticated(from_addr: str, auth_results, authserv_id: str = ""):
+    """返回 (是否通过, 理由)。**没有头 = 不通过**（fail closed）。
+
+    通过的条件（任一）：DMARC pass；SPF pass 且与 From 域对齐；
+    DKIM pass 且 `header.d` 与 From 域对齐。
+    """
+    dom = _domain_of(from_addr)
+    if not dom:
+        return False, "From 里没有域名"
+    rows = [" ".join(str(r).split()) for r in (auth_results or []) if str(r).strip()]
+    if not rows:
+        return False, "没有 Authentication-Results 头"
+
+    trusted = None
+    for row in rows:
+        serv = row.split(";", 1)[0].strip().lower()
+        if authserv_id:
+            if serv == authserv_id.lower():
+                trusted = row
+                break
+        else:
+            trusted = row
+            break
+    if trusted is None:
+        return False, f"没有来自 {authserv_id} 的 Authentication-Results"
+
+    for part in trusted.split(";")[1:]:
+        part = part.strip()
+        low = part.lower()
+        kv = _kv(part)
+        if low.startswith("dmarc=pass"):
+            d = kv.get("header.from", "")
+            if not d or _aligned(d, dom):
+                return True, "dmarc=pass"
+        elif low.startswith("spf=pass"):
+            d = _domain_of(kv.get("smtp.mailfrom", "")) or kv.get("smtp.helo", "")
+            if _aligned(d, dom):
+                return True, f"spf=pass（{d}）"
+        elif low.startswith("dkim=pass"):
+            if _aligned(kv.get("header.d", ""), dom):
+                return True, f'dkim=pass（{kv.get("header.d")}）'
+    return False, f"{dom} 没有通过 SPF/DKIM/DMARC 中的任何一项"
+
+
+def auth_results_of(msg: dict) -> list:
+    """从一封入站消息里取出有序的 Authentication-Results。
+
+    `msg["auth_results"]` 是取信通道给的**有序列表**；退回 headers dict
+    只是为了兼容旧调用方，它已经把重复头折叠过了，安全性弱一档。
+    """
+    ar = msg.get("auth_results")
+    if ar:
+        return list(ar)
+    h = msg.get("headers") or {}
+    v = h.get("Authentication-Results") or h.get("authentication-results")
+    return [v] if v else []
+
+
 def fetch_unread(limit=20) -> list:
     """通过 Gmail API 拉未读。IMAP 实现同理，接口不变。"""
     from google.oauth2.credentials import Credentials
@@ -349,9 +447,14 @@ def fetch_unread(limit=20) -> list:
     for m in res.get("messages", []):
         full = svc.users().messages().get(userId="me", id=m["id"],
                                           format="metadata").execute()
-        hdrs = {h["name"]: h["value"] for h in full["payload"].get("headers", [])}
+        raw = full["payload"].get("headers", [])
+        hdrs = {h["name"]: h["value"] for h in raw}
         hdrs["X-Gm-Thrid"] = full.get("threadId", "")
-        out.append({"id": m["id"], "headers": hdrs,
+        # dict 会把重复头折叠成最后一个 —— 而验真要的恰恰是**第一个**
+        # （服务器 prepend 的那条）。所以另存一份有序的。
+        ar = [h["value"] for h in raw
+              if h["name"].lower() == "authentication-results"]
+        out.append({"id": m["id"], "headers": hdrs, "auth_results": ar,
                     "snippet": full.get("snippet", "")})
     return out
 
@@ -371,6 +474,17 @@ def process(msg: dict, store, lookup_by_message_id=None) -> dict:
         mark_processed(store, mid, "rejected:sender")
         return {"action": "reject", "why": "sender_not_allowed",
                 "from": h.get("From", "")}
+
+    # 白名单认的是 `From:`，而 `From:` 是发件人自己写的。
+    # 两道必须都过：**在白名单里** 且 **这封信真的来自那个域**。
+    if os.environ.get(REQUIRE_AUTH_ENV, "1") != "0":
+        okd, why = sender_authenticated(
+            h.get("From", ""), auth_results_of(msg),
+            os.environ.get("INBOUND_AUTHSERV_ID", ""))
+        if not okd:
+            mark_processed(store, mid, "rejected:unauthenticated")
+            return {"action": "reject", "why": "sender_not_authenticated",
+                    "detail": why, "from": h.get("From", "")}
 
     attrib = resolve_item(h, lookup_by_message_id)
     intent = classify_intent(msg.get("snippet", ""), h)
