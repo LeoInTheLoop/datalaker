@@ -98,7 +98,10 @@ spike/                        R0 概念验证，可随时删除
 - **gate 依赖 `sqlglot`**（AST 准入），新增依赖须同步三处：
   项目 `.venv`、容器镜像（`docker/Dockerfile`）、Hermes 的 `.venv-h`
   （uv 建的无 pip，用 `VIRTUAL_ENV=<path> uv pip install`）
-- 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`（**653 条断言必须全绿**）
+- 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`
+  - 不接外置盘（Docker 起不来）时，**不依赖 docker 的 395 条必须全绿**
+  - 接上 docker 后总数更多，**数字待下次实测校准** —— 不要写一个没跑过的数，
+    那正是「整组静默 SKIP 而回归看着还是绿的」的来源
 - 看状态：`python3 ops/claw-status.py`（退出码 2 = 有告警）
   - 不设 `HERMES` 时会跳过真实集成那一段
   - Hermes 需要 python 3.11–3.13，本机 3.14 不兼容：用 `uv venv --python 3.13 .venv-h`
