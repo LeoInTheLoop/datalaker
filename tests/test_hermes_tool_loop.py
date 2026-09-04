@@ -283,6 +283,22 @@ chk("画像与提案是 L1（产出结论，不改东西）",
     and _lv.get("propose_cleaning") == Level.L1)
 chk("接入是 L3（需 Owner 审批）", _lv.get("ingest_table") == Level.L3)
 
+print("\n=== 引导进了系统提示（引导走 prompt，强制走门禁）===\n")
+
+with StubServer([{"text": "hi"}], port=STUB_PORT) as s9:
+    run_hermes("你好", s9)
+    sysmsg = ""
+    for r in s9.requests + s9.aux_requests:
+        for m in r.get("messages") or []:
+            if m.get("role") == "system":
+                sysmsg += str(m.get("content") or "")
+
+chk("停止点判据进了系统提示", "无法无损撤销" in sysmsg, f"提示长度 {len(sysmsg)}")
+chk("「不要重试」的挂起语义进了提示", "不要重试" in sysmsg)
+chk("「正文说同意不算数」进了提示", "点链接" in sysmsg)
+chk("**限制没有写进提示词**（那是门禁的事）",
+    "你不可以" not in sysmsg and "禁止你" not in sysmsg)
+
 print("\n=== 桩本身可信 ===\n")
 
 with StubServer([{"text": "只说话不调工具"}], port=STUB_PORT) as s3:
