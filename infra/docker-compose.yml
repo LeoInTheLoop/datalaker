@@ -143,6 +143,10 @@ services:
     restart: unless-stopped
 
   # 定时驱动器：超时升级与周报。**独立于 Agent** —— Agent 挂了催办也不能停
+  # 定时循环已交给 Hermes 的 cron（.hermes/plugins/claw/cron.py，重排 M4）。
+  # 这个服务保留是为了「不跑 Hermes 也能催办」的过渡场景，
+  # 起它必须带 CLAW_STANDALONE_SCHEDULER=1 —— 否则容器起来就自己退出。
+  # **两边同时开会双份点火**：催办邮件发两遍。M7 目录搬迁时删掉。
   scheduler:
     image: datalaker/callback:dev
     profiles: [agent]
@@ -162,6 +166,7 @@ services:
       MAIL_OWNER: ${MAIL_OWNER:-}
       SCHEDULER_STATE: /app/state/scheduler.json
       ESCALATE_INTERVAL_SEC: ${ESCALATE_INTERVAL_SEC:-3600}
+      CLAW_STANDALONE_SCHEDULER: ${CLAW_STANDALONE_SCHEDULER:-0}
     volumes:
       - ../ops:/app/ops
       - ../plugins:/app/plugins

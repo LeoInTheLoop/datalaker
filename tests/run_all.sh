@@ -146,6 +146,10 @@ echo "########## 5.5 Hermes 工具环路（工具真跑在 Hermes 里 + 门禁�
 $PY tests/test_hermes_tool_loop.py || rc=1
 
 echo ""
+echo "########## 5.6 定时任务归 Hermes 的 cron（交接面） ##########"
+python3 tests/test_cron_migration.py || rc=1
+
+echo ""
 echo "########## 6. 通知失败 ≠ 门禁打开 ##########"
 ( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_mail_iso.db python3 tests/test_mail_isolation.py ) || rc=1
 

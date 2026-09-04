@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""定时驱动器（readme 5.4 / 5.5 / 20.5）。
+"""定时驱动器（readme 5.4 / 5.5 / 20.5）。**已被 Hermes 的 cron 取代。**
 
-**独立于 Agent 运行**：Agent 挂了，催办和周报也不能停。
-这正是场景 3 缺的那个计时器——脚本本身不会自己跑。
+    默认入口是 `.hermes/plugins/claw/cron.py` 登记的三个 no_agent 作业。
+    这里保留 `--once`（手动兜一次、CI 里跑一遍）；守护模式要显式
+    `CLAW_STANDALONE_SCHEDULER=1` 才起，**免得和 Hermes 的 cron 双份点火**。
+
+原来这段注释写的是「**独立于 Agent 运行**：Agent 挂了，催办和周报也不能停」。
+搬进 Hermes 之后这条不再成立，**是自觉的取舍**：补回来的方式是 M6 的
+体外监控层把 Hermes 拉起来，而不是在体内再养一个独立循环。
 
     每 1 分钟    恢复「等的人已经回了」的任务
     每 1 小时    超时逐级升级 → 优雅放弃
@@ -81,6 +86,13 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--once" not in sys.argv and os.environ.get(
+            "CLAW_STANDALONE_SCHEDULER") != "1":
+        print("定时任务已交给 Hermes 的 cron（.hermes/plugins/claw/cron.py）。\n"
+              "  手动跑一次：python3 ops/scheduler.py --once\n"
+              "  仍要独立守护：CLAW_STANDALONE_SCHEDULER=1 python3 ops/scheduler.py\n"
+              "  两边同时开会双份点火 —— 催办邮件会发两遍。")
+        sys.exit(0)
     if "--once" in sys.argv:
         run("resume.py")
         run("escalate.py")

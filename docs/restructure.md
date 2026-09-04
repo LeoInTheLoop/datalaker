@@ -131,7 +131,7 @@ datalaker/
 | **M1 打通一条** ✅ | `list_source_tables` 注册进 Hermes，真模型问一句「northwind 有哪些表」→ 它调工具 → Connector 读真库 → 答出 14 张表与真实行数 | 已实测 |
 | **M2 挂上门禁** ✅ | `ingest_table`（L3）挂起 → 批准 → 恢复 → 真写 bronze，全程在 Hermes 里 | 已实测；顺带修掉「审批绑会话」与「plugins 包撞车」 |
 | **M3 工具搬家** ✅ | **13 个工具**全部注册进 Hermes（发现 / 画像 / 清洗 / 发布 / 授权 / SaaS 导出）+ 停止点引导进系统提示 | 每个都在 `policy.py` 显式声明；写侧工具一律 ≥L2，有断言兜底；handler 里零审批判断 |
-| **M4 删重复** | 删掉 email 传输层、scheduler 循环，改用 Hermes 的 | 行数净减少 |
+| **M4 删重复** 🟡 | scheduler 循环 → Hermes cron（3 个 `no_agent` 作业）；入站按 Hermes 的规则做发件人验真 | 独立 scheduler 默认不再守护；email 传输层待走它的 adapter |
 | **M5 驱动反转** | `run_case_full.py` 从扮演 Agent 改成扮演人 | 大 case 里 Hermes 是主语 |
 | **M6 supervisor** | 起停 + 限额 | 杀掉 Hermes 能自动拉起；超预算能停 |
 | **M7 目录搬迁** | 纯机械移动 + 改 import | 树与第 5 节一致 |
@@ -158,6 +158,23 @@ gate 里读它。**且不发审批** —— 自我提权不是「问一下人就
 把纯参数判断提到连库**之前**，并加了一条专门断言：失败原因里不许出现 Trino。
 这类「因为别的原因失败，于是断言假绿」在这个项目里已经是第三次
 （前两次：认证加上之后整组静默 SKIP、`plugins` 包撞车）。
+
+### 6.2 M4：搬走一个循环，会丢掉一条性质
+
+`ops/scheduler.py` 的注释原本写着「**独立于 Agent 运行**：Agent 挂了，
+催办和周报也不能停」。搬进 Hermes 的 cron 之后这条不再成立。
+
+**这是自觉的取舍，不是疏漏。** 换来的是：作业锁（同一作业不会并发起两份）、
+一次性 claim fence、重启后按 `next_run` 恢复而不是靠状态文件、失败投递、
+输出留存 —— 这些原来那 89 行全都没有。丢掉的那条性质由 **M6 的体外监控层**
+补回来：它负责把 Hermes 拉起来，而不是在体内再养一个独立循环。
+
+在 M6 落地之前，`ops/scheduler.py --once` 仍可手动兜一次；
+守护模式改成必须显式 `CLAW_STANDALONE_SCHEDULER=1` 才起，
+**否则两边同时点火，催办邮件会发两遍**。
+
+用的是 `no_agent=True`：催办和周报是确定性脚本，不需要模型推理。
+走 no_agent 就不会每小时点一次模型。
 
 ## 7. 重排中绝不能丢的三件
 

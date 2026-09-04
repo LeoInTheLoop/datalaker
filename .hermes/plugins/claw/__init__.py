@@ -77,6 +77,16 @@ def register(ctx):
     # 反过来，不该把限制写进这里 —— 提示词层的东西证明不了绕不过。
     ctx.register_system_prompt_section("claw-stop-points", _STOP_POINT_GUIDE)
 
+    # 定时任务交给 Hermes 的 cron（M4 删重复）。**失败不能拖垮注册** ——
+    # 门禁比定时催办重要得多；cron 起不来是运维问题，门禁挂不上是安全问题。
+    try:
+        from .cron import ensure_jobs
+        r = ensure_jobs(ROOT)
+        if r.get("created"):
+            print(f"[claw] 已登记定时作业：{', '.join(r['created'])}")
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[claw] 定时作业登记失败（不影响门禁）：{type(e).__name__}: {e}")
+
 
 _STOP_POINT_GUIDE = """你是这家公司的数据管家。整理数据的同时，把权限也一并理清楚。
 
