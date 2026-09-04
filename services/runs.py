@@ -119,7 +119,16 @@ def _approver_of(approval_id):
 
 def suspend(run_id: str, waiting_on: str | None, checkpoint: dict | None = None,
             note: str = "") -> dict:
-    """挂起等人。**这不是失败**，是这类任务的正常状态。"""
+    """挂起等人。**这不是失败**，是这类任务的正常状态。
+
+    **幂等**：已经在等同一份审批就直接返回。M5 之后同一次挂起会被两处
+    看到 —— 门禁（它最先知道）和 Pipeline 包装（旧路径）—— 不幂等的话
+    `suspend_begin` 会开出两条 WAITING_FOR_HUMAN span，等待时长凭空翻倍。
+    """
+    cur = get(run_id)
+    if cur and cur["status"] == "waiting_human" and cur["waiting_on"] == waiting_on:
+        return {"run_id": run_id, "status": "waiting_human",
+                "waiting_on": waiting_on, "already": True}
     _set(run_id, status="waiting_human", waiting_on=waiting_on,
          checkpoint=json.dumps(checkpoint or {}, ensure_ascii=False), note=note)
     # 只有真在等人才算 WAITING_FOR_HUMAN；等 WIP 容量是排队，不是等谁拍板

@@ -153,6 +153,12 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     if level >= Level.L2:
         over = _wip_exceeded(st, approver_role or "owner")
         if over:
+            # 被 WIP 挡回**不是失败**，是「别人待办太多，等等再说」。
+            # 也要记 —— 否则这条线在登记表里看起来根本没发生过。
+            try:
+                _track_suspend(task_id, None, tool_name, args, over)
+            except Exception:                                # noqa: BLE001
+                pass
             return {"action": "block", "message": over}
 
     # L2 / L3：需要有效票据
@@ -164,6 +170,11 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
                                       approver_role or "owner")
             if created:
                 _notify_async(aid, tool_name, args, approver_role or "owner")
+            try:
+                _track_suspend(task_id, aid, tool_name, args,
+                               f"等 {approver_role or 'owner'} 批 {tool_name}")
+            except Exception:                                # noqa: BLE001
+                pass                     # 记账失败不该改变门禁的判断
             return {"action": "block",
                     "message": f"[PENDING_APPROVAL] 已就 {tool_name} 向 {approver_role} 发起审批"
                                f"（id={aid[:8]}）。审批通过后本任务会被重新唤醒，"
@@ -346,6 +357,34 @@ def _wip_exceeded(st, approver_role):
     except Exception:
         return None                       # 计数失败不阻断正常审批
     return None
+
+
+def _track_suspend(task_id, approval_id, tool_name, args, note):
+    """把「这条线在等谁」记进任务登记表。
+
+    **观察者：不改变放行与否。** 和旁边的 `_notify_async` 同级 ——
+    一个告诉人，一个告诉登记表。铁律 1 禁的是把**限制**散出去，
+    不是禁止记录发生了什么。
+
+    为什么必须在这里记：门禁一拦，工具 handler 根本不跑。
+    以前记账写在 `pipelines/ingest_table.py` 的 `as_run` 包装里，
+    那个包装是**驱动脚本伸出去的胳膊**；换成 Hermes 调工具之后
+    没有任何人记这条线，于是「16 条线等人 15」这类数字全部落空 ——
+    不是 Agent 没干，是没人记账（docs/restructure.md 6.5）。
+
+    `task_id` 就是 run_id：Hermes 的一次会话 = 一条线。
+    """
+    if not task_id:
+        return
+    import sys as _s
+    _s.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "services"))
+    import runs
+    if not runs.get(task_id):
+        runs.create(tool_name, dict(args or {}), run_id=task_id,
+                    note=(note or "")[:200])
+    runs.suspend(task_id, approval_id,
+                 {"stage": "gate", "tool": tool_name}, (note or "")[:400])
 
 
 def _notify_async(approval_id, tool_name, args, approver_role):

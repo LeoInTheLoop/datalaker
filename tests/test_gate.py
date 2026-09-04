@@ -222,6 +222,78 @@ check("开给真人 → 正常发审批（拦的是参数不是工具）",
       is_block(r) and "PENDING_APPROVAL" in r.get("message", ""),
       (r.get("message", "")[:30] if isinstance(r, dict) else str(r)))
 
+# 21. 门禁一拦，任务登记表就得记下这条线（M5 的地基）
+#
+#     以前记账写在 `pipelines/ingest_table.py` 的 as_run 包装里，
+#     那个包装是**驱动脚本伸出去的胳膊**。换成 Hermes 调工具之后
+#     门禁一拦、工具 handler 根本不跑，没有任何人记这条线 ——
+#     「16 条线等人 15」这类数字会全部落空，而且看起来像 Agent 没干活。
+import runs                                                    # noqa: E402
+
+# 前面几组已经给 owner 攒了一堆在办事项，不抬高上限的话这里会先撞 WIP，
+# 于是测到的是另一条路 —— 而且 waiting_on 为空，看起来像「审批没记上」。
+os.environ["PER_PERSON_WIP_LIMIT"] = "99"
+os.environ["GLOBAL_WIP_LIMIT"] = "99"
+
+RID = "hermes-task-77"
+_a = {"table": "shippers", "source": "northwind"}
+r = gate("ingest_table", _a, RID)
+check("L3 仍然被拦（记账不改变判断）",
+      is_block(r) and "PENDING_APPROVAL" in r.get("message", ""))
+
+_run = runs.get(RID)
+check("门禁自动建了这条线（Hermes 直接调工具，没人先建）", bool(_run),
+      str(_run and _run["status"]))
+check("线的状态是等人，不是失败",
+      _run and _run["status"] == "waiting_human", str(_run and _run["status"]))
+check("记下了在等哪份审批", bool(_run and _run["waiting_on"]),
+      str(_run and (_run["waiting_on"] or "")[:8]))
+check("params 就是这次调用的参数", _run and _run["params"] == _a,
+      str(_run and _run["params"]))
+
+# 幂等：同一次挂起会被门禁和旧的 Pipeline 包装各记一次。
+# 不幂等的话 suspend_begin 会开出两条 WAITING_FOR_HUMAN span，
+# 「等了多久」凭空翻倍。
+_again = runs.suspend(RID, _run["waiting_on"], {"stage": "gate"}, "再记一次")
+check("重复挂起是幂等的（否则等待时长翻倍）", _again.get("already") is True,
+      str(_again))
+
+# 已存在的线不该被门禁重建成另一个 kind
+runs.create("ingest_table", {"table": "orders", "source": "northwind"},
+            run_id="pre-made", note="脚本先建的线")
+gate("ingest_table", {"table": "orders", "source": "northwind"}, "pre-made")
+_pm = runs.get("pre-made")
+check("已存在的线只被挂起，不被覆盖",
+      _pm["note"] != "脚本先建的线" and _pm["params"]["table"] == "orders",
+      f'{_pm["status"]} / {_pm["params"]}')
+
+# 记账炸了也不许改变门禁的判断 —— 观察者就是观察者
+import plugins.datasteward_gate as _tg                         # noqa: E402
+_orig_track = _tg._track_suspend
+_tg._track_suspend = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+try:
+    r = _tg.gate("ingest_table", {"table": "x", "source": "northwind"}, "rid-boom")
+    check("记账失败不改变门禁的判断", is_block(r) and "PENDING_APPROVAL" in r.get("message", ""))
+finally:
+    _tg._track_suspend = _orig_track
+
+# 22. 被 WIP 挡回也要记：它在登记表里不能看起来「根本没发生过」
+os.environ["PER_PERSON_WIP_LIMIT"] = "1"
+os.environ.pop("GLOBAL_WIP_LIMIT", None)
+try:
+    gate("ingest_table", {"table": "wip_a", "source": "northwind"}, "wip-1")
+    r = gate("ingest_table", {"table": "wip_b", "source": "northwind"}, "wip-2")
+    if is_block(r) and "WIP" in r.get("message", ""):
+        _w = runs.get("wip-2")
+        check("被 WIP 挡回的线也记下来了", bool(_w), str(_w and _w["status"]))
+        check("**但 waiting_on 为空** —— 排队不是等谁拍板",
+              _w and not _w["waiting_on"], str(_w and _w["waiting_on"]))
+    else:
+        check("被 WIP 挡回的线也记下来了", False,
+              f"没触发 WIP：{(r or {}).get('message', '')[:40]}")
+finally:
+    os.environ.pop("PER_PERSON_WIP_LIMIT", None)
+
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 if bad:
     print("失败项:", ", ".join(bad))
