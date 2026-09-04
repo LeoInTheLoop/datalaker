@@ -141,6 +141,11 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
 
     # deny list：拒绝过的动作不再重复发起审批
     if st.is_denied(h):
+        # 被拒不是失败，是**已知阻塞项**：不会就同一动作再打扰任何人。
+        try:
+            _track_close(task_id, tool_name, "abandoned", "审批被拒绝")
+        except Exception:                                    # noqa: BLE001
+            pass
         return {"action": "block",
                 "message": f"[DENIED] {tool_name} 已被拒绝，不会重复发起审批。"
                            f"请改变方案（将产生新的动作指纹）或触发升级。"}
@@ -359,6 +364,31 @@ def _wip_exceeded(st, approver_role):
     return None
 
 
+def _runs():
+    import sys as _s
+    _s.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "services"))
+    import runs
+    return runs
+
+
+def _track_close(task_id, tool_name, status, note=""):
+    """这条线走完了 —— 或者被拒了。
+
+    **只在这次调用的工具就是这条线的 kind 时才收尾。** 一条线上会调好几个
+    工具（先 profile 再 ingest），随便哪个成功都收尾的话，线会在真正的动作
+    发生之前就变成 done —— 那是最难发现的一种假绿：状态栏好看，lake 里空的。
+    """
+    if not task_id:
+        return
+    runs = _runs()
+    r = runs.get(task_id)
+    if (not r or r["kind"] != tool_name
+            or r["status"] not in ("running", "waiting_human")):
+        return
+    runs.finish(task_id, status, (note or "")[:400])
+
+
 def _track_suspend(task_id, approval_id, tool_name, args, note):
     """把「这条线在等谁」记进任务登记表。
 
@@ -432,9 +462,18 @@ def _notify_async(approval_id, tool_name, args, approver_role):
 # post_tool_call —— 观察者：event log + 负载记账
 # --------------------------------------------------------------------------
 def audit(tool_name: str, args: dict, result=None, status: str = "", **kwargs):
+    task_id = kwargs.get("task_id", "")
     st = store()
-    st.append_event(kwargs.get("task_id", ""), f"TOOL_{status or 'DONE'}",
+    st.append_event(task_id, f"TOOL_{status or 'DONE'}",
                     json.dumps({"tool": tool_name}, ensure_ascii=False))
+    # 工具真跑完了 = 这条线的动作落地了。**门禁一侧记开头，这里记结尾** ——
+    # 否则被批准之后线会一直挂在 waiting_human 上，看起来像没人推动。
+    if (status or "DONE").upper() in ("", "DONE", "OK", "SUCCESS"):
+        try:
+            _track_close(task_id, tool_name, "done",
+                         str(result or "")[:200])
+        except Exception:                                    # noqa: BLE001
+            pass
 
 
 # --------------------------------------------------------------------------

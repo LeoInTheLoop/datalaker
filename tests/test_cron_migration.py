@@ -37,8 +37,42 @@ chk("三件事都有作业：恢复 / 升级 / 周报", set(C.JOBS) == {
 
 # 恢复要「等的人回了就往下走」，一小时太慢；升级阶梯按天算，一分钟太密。
 chk("恢复是分钟级、升级是小时级（节奏对得上各自的语义）",
-    "minute" in C.JOBS["claw-resume"][0] and "hour" in C.JOBS["claw-escalate"][0],
-    f'{C.JOBS["claw-resume"][0]} / {C.JOBS["claw-escalate"][0]}')
+    "minute" in C.JOBS["claw-resume"]["schedule"]
+    and "hour" in C.JOBS["claw-escalate"]["schedule"],
+    f'{C.JOBS["claw-resume"]["schedule"]} / {C.JOBS["claw-escalate"]["schedule"]}')
+
+print("\n=== 该不该点模型 ===\n")
+
+# 催办和周报是确定性脚本 —— 走 no_agent 就不会每小时点一次模型。
+for n in ("claw-escalate", "claw-weekly-report"):
+    chk(f"{n} 不点模型（确定性脚本）", C.JOBS[n].get("no_agent") is True)
+
+# 恢复必须让 Agent 自己再调一次工具（M5 驱动反转），所以要点模型。
+# 但「每分钟点一次模型」显然不行 —— 靠 monitor_script 把它压回一次 SQL。
+_res = C.JOBS["claw-resume"]
+chk("恢复要点模型（Agent 自己再调工具，不是脚本代劳）",
+    not _res.get("no_agent") and bool(_res.get("prompt")))
+chk("**但靠 monitor 压住**：输出没变就整个跳过，不点模型",
+    bool(_res.get("monitor_script")), str(_res.get("monitor_script")))
+chk("恢复作业没有 script（monitor 的输出就是它的输入）",
+    not _res.get("script"))
+
+# monitor 源的输出必须按字节稳定 —— 带一个时间戳就等于每分钟点一次模型。
+_mon = (ROOT / "ops" / "resumable.py").read_text(encoding="utf-8")
+chk("monitor 源不打时间戳（否则哈希每次都变，等于没有 monitor）",
+    "time.time" not in _mon and "strftime" not in _mon
+    and "datetime" not in _mon)
+chk("monitor 源排过序（谁先批的顺序会抖，白白唤醒模型）",
+    "sorted(" in _mon)
+
+import subprocess as _sp2
+_r2 = _sp2.run([sys.executable, str(ROOT / "ops" / "resumable.py")],
+               capture_output=True, text=True, timeout=60)
+_r3 = _sp2.run([sys.executable, str(ROOT / "ops" / "resumable.py")],
+               capture_output=True, text=True, timeout=60)
+chk("连跑两次输出逐字节相同（这就是 monitor 生效的前提）",
+    _r2.returncode == 0 and _r2.stdout == _r3.stdout,
+    f"rc={_r2.returncode} len={len(_r2.stdout)}")
 
 print("\n=== 壳脚本必须是真文件 ===\n")
 
@@ -47,15 +81,16 @@ print("\n=== 壳脚本必须是真文件 ===\n")
 # 而 Hermes 那边只是记一条错误，我们这边看不出来。
 HOME = ROOT / ".hermes" / "home"
 missing = C.scripts_present(str(HOME))
-chk("三个壳脚本都在 HERMES_HOME/scripts/ 下", not missing, str(missing))
-for _, s in C.JOBS.values():
+chk("每个作业用到的脚本都在 HERMES_HOME/scripts/ 下", not missing, str(missing))
+_ALL = [x for job in C.JOBS.values() for x in C.scripts_of(job)]
+for s in _ALL:
     f = HOME / "scripts" / s
     chk(f"{s} 不是软链（软链会被 resolve 穿透后拒掉）",
         f.exists() and not f.is_symlink())
 
 print("\n=== 壳里不放逻辑 ===\n")
 
-for _, s in C.JOBS.values():
+for s in _ALL:
     src = (HOME / "scripts" / s).read_text(encoding="utf-8")
     # 壳一旦开始判断，就有了第二处需要维护的逻辑，
     # 而它在 HERMES_HOME 里、不在 ops/ 里，改的人根本想不到去看。

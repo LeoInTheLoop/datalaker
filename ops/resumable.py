@@ -20,11 +20,18 @@ sys.path[:0] = [str(ROOT), str(ROOT / "services"), str(ROOT / "plugins")]
 def main() -> int:
     import runs
     lines = []
-    for r in runs.resumable():
+    try:
+        rows = runs.resumable(), runs.retryable()
+    except Exception:                                        # noqa: BLE001
+        # 库还没建表（全新环境）、或者临时读不到 —— **安静退出，退出码 0**。
+        # monitor 崩掉每分钟就是一次错误 tick；而「什么都没有」和
+        # 「查不了」对下游是同一个意思：这一分钟没有可推进的线。
+        return 0
+    for r in rows[0]:
         p = r.get("params") or {}
         what = p.get("table") or p.get("asset") or p.get("source") or ""
         lines.append(f'{r["run_id"]}\t{r["kind"]}\t{what}')
-    for r in runs.retryable():
+    for r in rows[1]:
         p = r.get("params") or {}
         what = p.get("table") or p.get("asset") or p.get("source") or ""
         lines.append(f'{r["run_id"]}\t{r["kind"]}\t{what}\tWIP')

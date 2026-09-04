@@ -8,6 +8,12 @@ compose 的 `scheduler` 服务里。Hermes 的 `cron/` 已经把同一件事做�
 `no_agent=True` 是这里的关键 —— 催办和周报不需要模型推理，
 它们是确定性脚本。走 no_agent 就不会每小时点一次模型。
 
+**恢复是例外**：它必须让 Agent 自己再调一次工具（M5 驱动反转），
+所以要点模型。但「每分钟点一次模型」显然不行。用 `monitor_script`：
+每 tick 先跑一个便宜脚本（`ops/resumable.py`，一次 SQL），按字节哈希输出，
+**没变就整个跳过这次 agent 运行**。于是「一分钟一次」的实际成本是一次查询，
+只有真有审批落地时才唤醒模型。
+
 ## 丢掉了什么，怎么补回来
 
 旧 scheduler 的注释写着「**独立于 Agent 运行**：Agent 挂了，催办和周报
@@ -18,12 +24,47 @@ Hermes 拉起来，而不是在体内再养一个独立循环。在 M6 落地之
 """
 import os
 
-# name -> (schedule, script)。**表驱动**：加一条定时任务 = 加一行。
+# name -> 作业定义。**表驱动**：加一条定时任务 = 加一行。
+#
+# 两种形态，区别只有一个问题：**这件事需不需要模型想一下。**
+#
+#   no_agent  催办、周报 —— 确定性脚本，走 no_agent 就不会每小时点一次模型
+#   monitor   恢复      —— 需要 Agent 自己再调一次工具，所以必须点模型；
+#                          但绝不能每分钟点一次。`monitor_script` 每 tick
+#                          先跑那个便宜脚本、按字节哈希输出，**没变就整个
+#                          跳过这次 agent 运行**（记一次 no_change）。
+#                          于是「一分钟一次」的实际成本是一次 SQL 查询。
 JOBS = {
-    "claw-resume": ("every 1 minute", "claw_resume.py"),
-    "claw-escalate": ("every 1 hour", "claw_escalate.py"),
-    "claw-weekly-report": ("every monday at 09:00", "claw_weekly_report.py"),
+    "claw-resume": {
+        "schedule": "every 1 minute",
+        "monitor_script": "claw_resumable.py",
+        "prompt": (
+            "有任务线的审批已经有决定了 —— 上面 MONITOR CHANGE DETECTED 里"
+            "列出的就是。\n"
+            "逐条把它们往下推：对每一行的 run_id，重新执行它当初被拦下的那个动作"
+            "（第二列是工具名，第三列是对象）。**票据是一次性的**，"
+            "所以直接调用即可，不要再问一遍人。\n"
+            "标了 WIP 的那些是被别人的待办挤回来的，不是等谁拍板 —— "
+            "同样直接重试。\n"
+            "如果某一条又被拦下，那说明它还需要新的审批，跳过它继续下一条。"
+        ),
+    },
+    "claw-escalate": {
+        "schedule": "every 1 hour",
+        "script": "claw_escalate.py",
+        "no_agent": True,
+    },
+    "claw-weekly-report": {
+        "schedule": "every monday at 09:00",
+        "script": "claw_weekly_report.py",
+        "no_agent": True,
+    },
 }
+
+
+def scripts_of(job: dict) -> list:
+    """一个作业用到的所有脚本（作业本体 + monitor 源）。"""
+    return [job[k] for k in ("script", "monitor_script") if job.get(k)]
 
 
 def ensure_jobs(root: str) -> dict:
@@ -47,14 +88,16 @@ def ensure_jobs(root: str) -> dict:
         out["skipped"] = f"list_jobs: {e}"
         return out
 
-    for name, (schedule, script) in JOBS.items():
+    for name, job in JOBS.items():
         if name in have:
             out["existing"].append(name)
             continue
         try:
-            create_job(prompt=None, schedule=schedule, name=name,
-                       script=script, no_agent=True, deliver="local",
-                       workdir=root)
+            create_job(prompt=job.get("prompt"), schedule=job["schedule"],
+                       name=name, script=job.get("script"),
+                       monitor_script=job.get("monitor_script"),
+                       no_agent=bool(job.get("no_agent")),
+                       deliver="local", workdir=root)
             out["created"].append(name)
         except Exception as e:                                # noqa: BLE001
             out.setdefault("errors", []).append(f"{name}: {e}")
@@ -68,5 +111,5 @@ def scripts_present(home: str) -> list:
     **软链会被穿透后拒掉** —— 所以只能放真文件。
     """
     d = os.path.join(home, "scripts")
-    return [s for _, s in JOBS.values()
+    return [s for job in JOBS.values() for s in scripts_of(job)
             if not os.path.isfile(os.path.join(d, s))]
