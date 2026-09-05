@@ -83,12 +83,33 @@ for bad_name in ("a b", "a;drop", "1x", ""):
     except clean.CleanError:
         chk(f"非法标识符 {bad_name!r} 被拒", True)
 
+T = "olist_raw__eval_olist_dq_v1__orders"
+
+
+def _bronze_has(table: str) -> bool:
+    """那张表在不在 bronze 里。**探活走干活同一条路。**
+
+    这一段要真数据，而它用的表是**别的东西留下的**（eval 跑过才有）。
+    lake 是共享的、会被清空的（`tests/reset_live.py` 就会清），
+    依赖别人留下的状态 = 别人一清这里就红，而原因跟被测代码无关。
+    """
+    try:
+        import sync
+        return table in set(sync._trino(
+            "SELECT table_name FROM iceberg.information_schema.tables"
+            " WHERE table_schema='bronze'"))
+    except Exception:                                         # noqa: BLE001
+        return False
+
+
 if not trino_up():
     print("\n  SKIP  Trino 未启动，跳过 silver 实测\n")
+elif not _bronze_has(T):
+    print(f"\n  SKIP  silver 实测：bronze 里没有 {T}"
+          f"\n        （它由 eval 跑产生；湖被清过就得先跑一次 eval）\n")
 else:
     print("\n=== 实测：bronze 原样，silver 才是清洗结果 ===\n")
 
-    T = "olist_raw__eval_olist_dq_v1__orders"
     cols = ["order_id", "customer_id", "order_status", "order_purchase_timestamp",
             "order_approved_at", "order_delivered_carrier_date",
             "order_delivered_customer_date", "order_estimated_delivery_date"]

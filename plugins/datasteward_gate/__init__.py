@@ -741,12 +741,139 @@ def audit(tool_name: str, args: dict, result=None, status: str = "", **kwargs):
                     json.dumps({"tool": tool_name}, ensure_ascii=False))
     # 工具真跑完了 = 这条线的动作落地了。**门禁一侧记开头，这里记结尾** ——
     # 否则被批准之后线会一直挂在 waiting_human 上，看起来像没人推动。
+    #
+    # **但「跑完了」不等于「做成了」。** 我们的工具用**返回值**报错
+    # （给模型一句人话，而不是抛异常炸掉整轮），Hermes 那边看到的
+    # status 一律是成功 —— 于是失败的动作也被收成 done。
+    # 实测撞过：`connect_source` 因为拿不到 dsn 返回了一句错误，
+    # 线却变成 done，而 `source_grants` 里什么都没有：状态栏好看，
+    # 库里是空的 —— 本项目第 1 号坑的又一次变形。
+    failed = _looks_failed(result)
     if (status or "DONE").upper() in ("", "DONE", "OK", "SUCCESS"):
         try:
-            _track_close(task_id, tool_name, "done",
+            _track_close(task_id, tool_name, "failed" if failed else "done",
                          str(result or "")[:200], args)
         except Exception:                                    # noqa: BLE001
             pass
+        if not failed:
+            try:
+                _record_provenance(st, tool_name, args, result)
+            except Exception:                                # noqa: BLE001
+                pass                     # 记账失败不改变已经发生的事
+
+
+# 哪些工具改变了一张资产的来历。**加一个改数据的工具 = 加一行。**
+#
+# 写在 post_tool_call 这一处，而不是散进每个 handler：血缘要么全记、
+# 要么不记，散着写必然漏 —— 漏掉的那条恰好是审计要问的那条。
+# 值是 (事件名, 从 args 里怎么取资产名)。
+_PROVENANCE_EVENTS = {
+    "connect_source":      ("source_registered", lambda a: a.get("source_id")),
+    "ingest_table":        ("ingested", lambda a: _asset_of(a)),
+    "ingest_export":       ("ingested_from_file",
+                            lambda a: f'{a.get("saas_source")}.{a.get("table")}'),
+    "apply_cleaning_rule": ("cleaned", lambda a: _asset_of(a)),
+    "publish_gold":        ("published", lambda a: a.get("silver_table")),
+    "grant_read":          ("granted", lambda a: a.get("asset")),
+    "define_semantics":    ("semantics_defined", lambda a: a.get("asset")),
+    "full_refresh":        ("refreshed", lambda a: _asset_of(a)),
+    # 下面三个还没实现（见 tests/test_toolset_whitelist 的 NOT_YET_IMPLEMENTED），
+    # 但**记什么账属于设计**：等补实现时不必再想一遍，也不会漏掉血缘。
+    "confirm_column_mapping": ("column_mapping_confirmed",
+                               lambda a: a.get("asset")),
+    "connect_saas_control_plane": ("control_plane_connected",
+                                   lambda a: a.get("source_id")),
+    "dump_saas_permissions": ("permissions_dumped", lambda a: a.get("source_id")),
+}
+
+
+def _asset_of(a: dict) -> str:
+    src = a.get("source") or a.get("source_id") or ""
+    tbl = a.get("table") or ""
+    return f"{src}.{tbl}" if src and tbl else (tbl or src)
+
+
+def _record_provenance(st, tool_name, args, result):
+    """把这次动作记进资产台账。**观察者：写不进去也不影响动作本身。**
+
+    只记成功的动作 —— 失败的已经由 `_track_close` 记成 failed 的线，
+    台账是「这张表经历过什么」，没成的事不该出现在里面。
+    """
+    spec = _PROVENANCE_EVENTS.get(tool_name)
+    if not spec:
+        return
+    event, pick = spec
+    asset = str(pick(args or {}) or "").strip()
+    if not asset or asset.startswith("."):
+        return
+    detail = {k: v for k, v in (args or {}).items()
+              if k.lower() not in _SECRET_ARGS}
+    # 连接串只留身份，口令一律不进台账 —— 台账是要给审计看的。
+    if args.get("dsn"):
+        detail["connection_identity"] = _identity_of(args["dsn"])
+    detail["result"] = str(result or "")[:300]
+    st.record_provenance(asset, event, actor=_actor_of(st, tool_name, args),
+                         approval_id=_last_approval(st, tool_name), detail=detail)
+
+
+# 绝不进台账的参数名。台账是给审计看的，口令不该出现在那里。
+_SECRET_ARGS = {"dsn", "password", "passwd", "secret", "token", "api_key"}
+
+
+def _identity_of(dsn: str) -> str:
+    try:
+        rest = str(dsn).split("://", 1)[1]
+        cred, host = rest.split("@", 1)
+        return f"{cred.split(':', 1)[0]}@{host}"
+    except Exception:                                        # noqa: BLE001
+        return "（连接串解析不出）"
+
+
+def _actor_of(st, tool_name, args) -> str:
+    """谁促成了这次动作。优先记**批准人**（审计问的是这个），
+    其次是给出信息的人。"""
+    try:
+        row = st.db.execute(
+            "SELECT d.approver FROM approvals a JOIN decisions d"
+            " ON d.approval_id=a.id WHERE a.tool_name=?"
+            " ORDER BY d.decided_at DESC LIMIT 1", (tool_name,)).fetchone() \
+            if hasattr(st.db, "execute") else None
+        if row and row[0]:
+            return row[0]
+    except Exception:                                        # noqa: BLE001
+        pass
+    return str((args or {}).get("confirmed_by")
+               or (args or {}).get("given_by") or "")
+
+
+def _last_approval(st, tool_name) -> str:
+    try:
+        row = st.db.execute(
+            "SELECT a.id FROM approvals a JOIN decisions d"
+            " ON d.approval_id=a.id WHERE a.tool_name=?"
+            " ORDER BY d.decided_at DESC LIMIT 1", (tool_name,)).fetchone() \
+            if hasattr(st.db, "execute") else None
+        return row[0] if row else ""
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
+# 工具报错时返回值的开头。**约定**：handler 用返回值报错必须这样开头，
+# 否则这条线会被当成做成了。加新工具时照着写。
+_FAILURE_PREFIXES = ("错误：", "错误:", "失败", "**规则名对不上")
+_FAILURE_MARKS = ("失败：", "失败:", "连不上", "未注册", "不可用")
+
+
+def _looks_failed(result) -> bool:
+    """工具是不是用返回值报了错。
+
+    认字符串确实脆，但比「全部当成功」结实得多 —— 后者的失败方式是
+    静默的（线变 done、库里空的），前者最多是把一句含「失败」的正常
+    输出误判成失败，那会立刻被人看见。**宁可吵，不可静。**
+    """
+    t = str(result or "").lstrip()
+    return (t.startswith(_FAILURE_PREFIXES)
+            or any(m in t[:80] for m in _FAILURE_MARKS))
 
 
 # --------------------------------------------------------------------------

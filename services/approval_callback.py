@@ -55,10 +55,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _json(self, code, obj):
+        raw = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/health":
             return self._send(200, "ok")
+        # 资产台账的只读接口 —— 审计、BI、别的系统从这里拉血缘。
+        # **只读、无副作用**，所以不需要令牌；但它也只吐台账里的东西，
+        # 口令从来不进台账（见 `_record_provenance` 的 `_SECRET_ARGS`）。
+        if u.path == "/provenance":
+            qs = parse_qs(u.query)
+            asset = (qs.get("asset") or [None])[0]
+            try:
+                limit = min(int((qs.get("limit") or ["500"])[0]), 5000)
+            except ValueError:
+                limit = 500
+            try:
+                with open_store(readonly=False, init_schema=True) as store:
+                    rows = store.provenance(asset, limit=limit)
+            except Exception as e:                            # noqa: BLE001
+                return self._json(500, {"error": f"{type(e).__name__}: {e}"})
+            return self._json(200, {"asset": asset, "count": len(rows),
+                                    "records": rows})
+
         if u.path not in ("/approve", "/deny", "/choose"):
             return self._send(404, page("找不到页面", "链接无效。", "404",
                                         "#eee", "#666"))

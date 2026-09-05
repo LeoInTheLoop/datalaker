@@ -38,8 +38,12 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     # **打开了却不声明 = 打开了个寂寞**：模型一调就撞「未声明 = L4 拒绝」，
     # 而那条拒绝消息还在教它去改 policy.py。实测就撞在 memory 上。
     # 它们都只碰 Agent 自己的东西（记忆、待办、追问渲染），不碰源数据。
+    # 一个 toolset 里可能有好几个工具名（todo → todo / todo_list …），
+    # **按 toolset 名声明是不够的**。实测撞过：config 里 enable 了 todo，
+    # policy 里也写了 todo，模型调的却是 todo_list，照样被拒。
     "memory":               (Level.L0, None),
     "todo":                 (Level.L0, None),
+    "todo_list":            (Level.L0, None),
     "clarify":              (Level.L0, None),
     # --- L0 发现 ---
     "get_table_metadata":   (Level.L0, None),
@@ -47,6 +51,8 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     "get_lineage":          (Level.L0, None),
     # 结构 + 外键 + 怎么 join。只读元数据，不碰数据内容
     "describe_asset":       (Level.L0, None),
+    # 溯源：只读治理库自己的记录，不碰源系统也不碰数据内容
+    "trace_asset":          (Level.L0, None),
     "list_source_tables":   (Level.L0, None),
     # --- L1 常规作业 ---
     "profile_table":        (Level.L1, None),

@@ -113,7 +113,8 @@ import claw.tools as _T3                                     # noqa: E402
 
 # Hermes 自带的那些不需要我们实现 —— 它们的实现在 Hermes 里。
 _HERMES_OWN = {"tool_search", "tool_describe", "tool_call", "skill_view",
-               "skills_list", "memory", "todo", "clarify", "sql_query"}
+               "skills_list", "memory", "todo", "todo_list", "clarify",
+               "sql_query"}
 _declared = {t for t, (lv, _) in _POL.items() if int(lv) < 4}
 _ghost = sorted(_declared - set(_T3._HANDLERS) - _HERMES_OWN - NOT_YET_IMPLEMENTED)
 check("**没有「声明了级别却不存在」的工具**（未实现的必须显式列出）",

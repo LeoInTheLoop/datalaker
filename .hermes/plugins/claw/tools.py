@@ -616,6 +616,112 @@ _SCHEMAS.update({
 })
 
 
+# --------------------------------------------------------------- 溯源
+# **「这张表哪来的」必须查得到，不能靠记忆。**
+#
+# 实测：开一个全新会话问「每张表从哪来、谁批的、按谁的口径洗的」，
+# 它答「审批人姓名未随记录留存，无法点名」「口径是谁定的没有任何记录」
+# —— 而 approvals 里有 approver、asset_semantics 里写着「王姐，财务负责人」。
+# 东西都在库里，**只是没有一个工具去读**。它还把连接账号猜成了
+# postgres 超级用户（实际是 fin_reader）—— 查不到就会猜，这比不答更糟。
+
+def _trace_asset(args: dict, **_: Any) -> str:
+    """一张表的完整来历（L0，只读治理库）。
+
+    **读的是 `asset_provenance` 这一张台账**，不是跨五张表现拼。
+    早先那版拼法要 `args_json LIKE '%表名%'` 去猜哪份审批对应哪张表 ——
+    又慢又脆，而且外部系统（审计、BI）根本无从下手。
+    """
+    from . import _ensure_path
+    _ensure_path()
+    name = str(args.get("asset") or args.get("table") or "").strip()
+    if not name:
+        return "错误：需要 asset（如 acme.fin_invoice 或 acme__fin_invoice）。"
+    key = name.replace("__", ".", 1) if "__" in name and "." not in name else name
+
+    try:
+        from datasteward_gate.approvals import open_store
+        # **init_schema=True**：DDL 是幂等的，而存量库可能建于新表之前。
+        # 加一张表之后老库里没有它 —— 读工具因此报「no such table」，
+        # 看起来像「查不到这张表的来历」，实际是库没升级。两者差很远。
+        with open_store(readonly=False, init_schema=True) as st:
+            rows = st.provenance(key)
+            sem = st.db.execute(
+                "SELECT asset, key, value, confirmed_by, confirmed_at"
+                " FROM asset_semantics WHERE asset LIKE ? ORDER BY asset",
+                (f"{key}%",)).fetchall() if hasattr(st.db, "execute") else []
+    except Exception as e:                                   # noqa: BLE001
+        return f"读不到治理库：{type(e).__name__}: {str(e)[:120]}"
+
+    if not rows and not sem:
+        return (f"# {key}\n\n**无档** —— 台账里没有这张表的任何记录。\n"
+                f"湖里若有数据而台账为空，那是缺口本身：没人授权过、"
+                f"也没人批准过。**如实报给审计，别猜「大概是示例数据」。**")
+
+    L = [f"# {key} 的来历", "", "| 时间 | 发生了什么 | 谁 | 依据 |",
+         "|---|---|---|---|"]
+    VERB = {"source_registered": "源接入", "ingested": "入湖",
+            "ingested_from_file": "从文件入湖", "cleaned": "清洗",
+            "published": "发布 gold", "granted": "开读权限",
+            "semantics_defined": "定口径", "refreshed": "全量刷新"}
+    for r in rows:
+        d = r["detail"] or {}
+        extra = (d.get("connection_identity") or d.get("path")
+                 or ("规则 " + "、".join(d["approved_rules"])
+                     if d.get("approved_rules") else "")
+                 or (d.get("result") or "")[:40])
+        L.append(f"| {_ts(r['ts'])} | {VERB.get(r['event'], r['event'])}"
+                 f"{'：' + str(extra) if extra else ''} | {r['actor'] or '—'} "
+                 f"| `{(r['approval_id'] or '')[:8] or '—'}` |")
+
+    if sem:
+        L += ["", "## 口径（谁定的）"]
+        for a, k, v, by, at in sem:
+            col = a[len(key) + 1:] if a.startswith(key + ".") else a
+            L.append(f"- `{col}` [{k}]：{v}\n  —— **{by}** 确认（{_ts(at)}）")
+    else:
+        L += ["", "## 口径", "- **无档**：没有人定过这张表的口径"]
+
+    L += ["", "> 每一条都来自资产台账（append-only），"
+          "**查不到就写「无档」** —— 不猜、不补编。"]
+    return "\n".join(L)
+
+
+def _ts(v) -> str:
+    import time
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(v)))
+    except Exception:                                        # noqa: BLE001
+        return str(v or "时间未知")
+
+
+def _dsn_identity(dsn: str) -> str:
+    """从连接串里取**身份**，扔掉口令。审计要知道用谁连的，不需要密码。"""
+    try:
+        rest = str(dsn).split("://", 1)[1]
+        cred, host = rest.split("@", 1)
+        return f"{cred.split(':', 1)[0]}@{host}"
+    except Exception:                                        # noqa: BLE001
+        return "（连接串解析不出）"
+
+
+_SCHEMAS.update({
+    "trace_asset": {
+        "name": "trace_asset",
+        "description": (
+            "一张表的完整来历：源从哪来、谁给的连接、用什么账号、谁批准的接入、"
+            "洗过什么、按谁定的口径、文件来源。**要跟人交代数据出处时用它** —— "
+            "别凭记忆答，记忆跨不过会话。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "asset": {"type": "string",
+                      "description": "资产名，如 acme.fin_invoice；"
+                                     "bronze 表名 acme__fin_invoice 也认"}},
+            "required": ["asset"]},
+    },
+})
+
+
 # --------------------------------------------------------------- 口径沉淀
 # **问过的不再问**（readme 5.7）。人回了口径，就得落进 `asset_semantics`，
 # 否则下一轮、下一个会话、换一个部署，同一个问题还要再问一遍 ——
@@ -1140,6 +1246,7 @@ _SCHEMAS.update({
 
 
 _HANDLERS = {
+    "trace_asset": _trace_asset,
     "define_semantics": _define_semantics,
     "sql_query": _sql_query,
     "describe_asset": _describe_asset,

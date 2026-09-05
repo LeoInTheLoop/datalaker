@@ -142,6 +142,10 @@ else
 fi
 
 echo ""
+echo "########## 4.4 资产台账：一张表的来历，一处记全 ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_provenance.py ) || rc=1
+
+echo ""
 echo "########## 4.5 连表：源禁 join / lake 可 join（铁律 3） ##########"
 # lake 连不上时它自己 SKIP 掉执行那几条，其余（准入规则）不依赖 docker
 $PY tests/test_join.py || rc=1

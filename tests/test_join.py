@@ -57,6 +57,28 @@ def _lake_ok():
 
 LAKE_OK = _lake_ok()
 
+
+def _have_bronze(*tables) -> bool:
+    """需要的表在不在 bronze 里。**探活走干活同一条路。**
+
+    这一组的 join 断言要真数据。而 bronze 是**共享的、会被清空的** ——
+    演练前的 `reset_live.py` 就会把它删干净。依赖「上一次跑留下的表」
+    的测试，会在别人清了湖之后莫名其妙地红，而原因跟被测代码毫无关系。
+    """
+    if not LAKE_OK:
+        return False
+    try:
+        import sync
+        have = set(sync._trino(
+            "SELECT table_name FROM iceberg.information_schema.tables"
+            " WHERE table_schema='bronze'"))
+        return all(t in have for t in tables)
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+JOIN_DATA = _have_bronze("northwind__orders", "northwind__customers")
+
 print("\n=== 工具存在，且级别是声明过的（铁律 5）===\n")
 
 chk("sql_query 有 schema 和 handler（此前只有一行级别声明）",
@@ -108,7 +130,7 @@ for bad_sql, why in (
     rb = gate("sql_query", {"sql": bad_sql, "plane": "lake"}, "j-bad")
     chk(f"lake 模式拒绝{why}", is_block(rb), rb.get("message", "")[:60])
 
-if LAKE_OK:
+if JOIN_DATA:
     out = T._sql_query(a)
     chk("**join 真的跑出了数据**（验收是查得到，不是语法过了）",
         "查到 5 行" in out and "," in out, out[:80])
@@ -118,8 +140,9 @@ if LAKE_OK:
             "Vins" in out or "Toms" in out or "Hanari" in out for _ in [0]),
         out[:100])
 else:
-    print("  SKIP  join 真的跑出数据（lake 连不上 —— 探活与干活同一条路）")
-    print("  SKIP  结果里两张表的列都在")
+    why = "lake 连不上" if not LAKE_OK else "bronze 里没有 northwind__orders/customers"
+    print(f"  SKIP  join 真的跑出数据（{why}）")
+    print(f"  SKIP  结果里两张表的列都在（{why}）")
 
 print("\n=== 怎么连：关系是源库声明的，不是猜的 ===\n")
 
@@ -128,7 +151,7 @@ chk("给出了列与主键", "14 列" in d and "主键 order_id" in d, d[:60])
 chk("**给出了外键指向**（猜表名是连错的主要来源）",
     "orders.customer_id → customers.customer_id" in d,
     d[d.find("外键"):d.find("外键") + 60] if "外键" in d else d[:60])
-if LAKE_OK:
+if JOIN_DATA:
     chk("给出了可用的 join 路径，且写成 iceberg 的形式",
         'iceberg.bronze."northwind__orders"' in d and "ON a.customer_id" in d)
     # **只给两边都在 lake 里的**。对端没接进来就提示先接，不是给一条跑不通的。
@@ -140,7 +163,7 @@ if LAKE_OK:
 else:
     for n in ("给出了可用的 join 路径", "对端没接进来的关系不出现",
               "明说了在 lake 里 join"):
-        print(f"  SKIP  {n}（lake 连不上）")
+        print(f"  SKIP  {n}（bronze 里没有那两张表）")
 
 print("\n=== handler 里没有自己判审批（铁律 1）===\n")
 

@@ -204,6 +204,26 @@ CREATE TABLE IF NOT EXISTS source_secrets (
     registered_by TEXT NOT NULL,
     registered_at REAL NOT NULL
 );
+-- 资产台账（readme 13 血缘）：**一张表的来历，一处记全。**
+--
+-- 在这之前「这张表哪来的」要跨 5 张表现拼：source_grants 查谁给的源、
+-- source_secrets 查什么账号、approvals+decisions 查谁批的、sync_state 查
+-- 什么时候入的湖、asset_semantics 查按谁的口径 —— 而找审批只能靠
+-- `args_json LIKE '%表名%'` 模糊匹配，又慢又脆。外部系统（审计、BI）
+-- 更是无从下手。
+--
+-- **append-only**：每个关键动作发生时写一行，不改不删。血缘是历史事实，
+-- 改写它等于伪造审计轨 —— 与 decisions 同一条原则。
+CREATE TABLE IF NOT EXISTS asset_provenance (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset       TEXT NOT NULL,          -- acme.fin_invoice
+    event       TEXT NOT NULL,          -- source_registered/ingested/cleaned/...
+    actor       TEXT,                   -- 谁做的、谁批的
+    approval_id TEXT,                   -- 依据的那份审批
+    detail      TEXT,                   -- JSON：账号身份、行数、规则、口径……
+    ts          REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_prov_asset ON asset_provenance(asset, ts);
 CREATE INDEX IF NOT EXISTS ix_appr_hash ON approvals(action_hash, run_id);
 CREATE INDEX IF NOT EXISTS ix_dec_appr  ON decisions(approval_id);
 """
@@ -405,6 +425,38 @@ class PgStore:
                 " approval_id=excluded.approval_id,"
                 " registered_at=excluded.registered_at",
                 (source_id, dsn, kind, approval_id, by))
+
+    def record_provenance(self, asset, event, actor="", approval_id="",
+                          detail=None):
+        with self.db.cursor() as c:
+            c.execute(
+                "INSERT INTO asset_provenance (asset, event, actor,"
+                " approval_id, detail, ts) VALUES (%s,%s,%s,%s,%s,"
+                " extract(epoch from now()))",
+                (asset, event, actor or "", approval_id or "",
+                 json.dumps(detail or {}, ensure_ascii=False)))
+
+    def provenance(self, asset=None, limit=200):
+        sql = ("SELECT asset, event, actor, approval_id, detail, ts"
+               " FROM asset_provenance")
+        args = []
+        if asset:
+            sql += " WHERE asset = %s OR asset LIKE %s"
+            args += [asset, asset + ".%"]
+        sql += " ORDER BY ts, id LIMIT %s"
+        args.append(limit)
+        with self.db.cursor() as c:
+            c.execute(sql, args)
+            rows = c.fetchall()
+        out = []
+        for a, e, who, aid, d, ts in rows:
+            try:
+                d = json.loads(d or "{}")
+            except Exception:                                # noqa: BLE001
+                d = {}
+            out.append({"asset": a, "event": e, "actor": who,
+                        "approval_id": aid, "detail": d, "ts": float(ts)})
+        return out
 
     def round_closed_at(self):
         with self.db.cursor() as c:
@@ -775,6 +827,36 @@ class Store:
             " approval_id=excluded.approval_id, registered_at=excluded.registered_at",
             (source_id, dsn, kind, approval_id, by, time.time()))
         self.db.commit()
+
+    def record_provenance(self, asset, event, actor="", approval_id="",
+                          detail=None):
+        """往资产台账写一行。**append-only，不改不删。**"""
+        self.db.execute(
+            "INSERT INTO asset_provenance (asset, event, actor, approval_id,"
+            " detail, ts) VALUES (?,?,?,?,?,?)",
+            (asset, event, actor or "", approval_id or "",
+             json.dumps(detail or {}, ensure_ascii=False), time.time()))
+        self.db.commit()
+
+    def provenance(self, asset=None, limit=200):
+        """读台账。不给 asset 就读全部（按时间序）。"""
+        sql = ("SELECT asset, event, actor, approval_id, detail, ts"
+               " FROM asset_provenance")
+        args = []
+        if asset:
+            sql += " WHERE asset = ? OR asset LIKE ?"
+            args += [asset, asset + ".%"]
+        sql += " ORDER BY ts, id LIMIT ?"
+        args.append(limit)
+        out = []
+        for a, e, who, aid, d, ts in self.db.execute(sql, args):
+            try:
+                d = json.loads(d or "{}")
+            except Exception:                                # noqa: BLE001
+                d = {}
+            out.append({"asset": a, "event": e, "actor": who,
+                        "approval_id": aid, "detail": d, "ts": ts})
+        return out
 
     def round_closed_at(self):
         """这一轮宣告结束的时刻。**没结束返回 None。**

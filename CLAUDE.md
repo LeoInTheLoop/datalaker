@@ -78,6 +78,9 @@ services/                     独立进程，不与 Agent 同进程
       ├─ feishu.py            飞书交互卡片
       └─ wecom.py             企微模板卡片
 ops/claw-status.py            运维面板（独立于被监控对象，零依赖）
+ops/provenance.py             资产台账：查 / 导出 / 回填（外部入口）
+tests/reset_live.py           把演练环境还原到「什么都没发生过」并验证
+tests/verify_live.py          跑完之后独立查库看到底发生了什么
 tests/                        断言（安全类要求 100% 通过）
 spike/                        R0 概念验证，可随时删除
 ```
@@ -99,7 +102,7 @@ spike/                        R0 概念验证，可随时删除
   项目 `.venv`、容器镜像（`docker/Dockerfile`）、Hermes 的 `.venv-h`
   （uv 建的无 pip，用 `VIRTUAL_ENV=<path> uv pip install`）
 - 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`
-  - 接上 docker（core + mail 组）时 **981 条必须全绿**，唯一允许的 SKIP 是 Phoenix
+  - 接上 docker（core + mail 组）时 **994 条必须全绿**，唯一允许的 SKIP 是 Phoenix
     （mail 组：`docker compose --profile mail up -d greenmail`，
     不起的话 5.2 与 mailsim 两组会整组 SKIP，数字对不上）
   - 不接外置盘（Docker 起不来）时，**不依赖 docker 的那些必须全绿**——

@@ -612,6 +612,42 @@ check("**回填的规则是人批准的那组**（模型在恢复这一步加不
       and _c2["args"].get("pk") == "id",
       str(_c2.get("args", {}))[:90] if isinstance(_c2, dict) else str(_c2))
 
+print("\n=== 30. 「跑完了」不等于「做成了」 ===\n")
+
+# 我们的工具用**返回值**报错（给模型一句人话，不抛异常炸掉整轮），
+# 而 Hermes 那边看到的 status 一律是成功 —— 于是失败的动作也被收成 done。
+# 实测撞过：connect_source 拿不到 dsn 返回了一句错误，线却变成 done，
+# 而 source_grants 里什么都没有：状态栏好看、库里是空的。
+import plugins.datasteward_gate as _tg9                        # noqa: E402
+
+check("错误开头的返回值被认出来",
+      _tg9._looks_failed("错误：需要 source_id。"))
+check("「XX 失败：」也认得出", _tg9._looks_failed("注册 acme 失败：TimeoutError"))
+check("「连不上」认得出", _tg9._looks_failed("源 acme 注册了，但连不上：..."))
+check("正常的成功输出不会被误判",
+      not _tg9._looks_failed("acme.fin_invoice 已落 iceberg.bronze：600 行"))
+
+os.environ["PER_PERSON_WIP_LIMIT"] = "99"
+os.environ["GLOBAL_WIP_LIMIT"] = "99"
+try:
+    _fa = {"source": "acme", "table": "t_fail"}
+    gate("ingest_table", _fa, "fail-1")
+    _frow = admin.db.execute("SELECT id FROM approvals WHERE tool_name='ingest_table'"
+                             " ORDER BY created_at DESC LIMIT 1").fetchone()
+    admin.decide(_frow[0], "approve", "owner@acme.com")
+    gate("ingest_table", _fa, "fail-2")
+    # 工具用返回值报了错 —— 这条线不该变成 done。
+    _tg9.audit("ingest_table", _fa, result="错误：需要 source 与 table。",
+               status="DONE", task_id="fail-2")
+    _line = [r for r in runs.by_status("failed")
+             if (r["params"] or {}).get("table") == "t_fail"]
+    check("**工具返回错误时线记 failed，不是 done**", bool(_line),
+          str({s: [(x["params"] or {}).get("table") for x in runs.by_status(s)]
+               for s in ("done", "failed")})[:110])
+finally:
+    os.environ.pop("PER_PERSON_WIP_LIMIT", None)
+    os.environ.pop("GLOBAL_WIP_LIMIT", None)
+
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 if bad:
     print("失败项:", ", ".join(bad))

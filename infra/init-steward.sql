@@ -170,6 +170,24 @@ CREATE TABLE IF NOT EXISTS source_secrets (
 -- 故意**不写** GRANT ... TO agent_role —— 那正是这张表的全部意义。
 GRANT SELECT, INSERT, UPDATE ON source_secrets TO approver_role;
 
+-- 资产台账（readme 13 血缘）：**一张表的来历，一处记全。**
+-- append-only —— 血缘是历史事实，改写它等于伪造审计轨。
+-- Agent 可写（它是动作的执行者），但**改不了已经写下的**：
+-- 只给 INSERT 和 SELECT，没有 UPDATE / DELETE。
+CREATE TABLE IF NOT EXISTS asset_provenance (
+    id          BIGSERIAL PRIMARY KEY,
+    asset       TEXT NOT NULL,
+    event       TEXT NOT NULL,
+    actor       TEXT,
+    approval_id TEXT,
+    detail      TEXT,
+    ts          DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_prov_asset ON asset_provenance(asset, ts);
+GRANT SELECT, INSERT ON asset_provenance TO agent_role;
+GRANT USAGE, SELECT ON SEQUENCE asset_provenance_id_seq TO agent_role;
+GRANT SELECT ON asset_provenance TO approver_role;
+
 -- 业务知识沉淀：Agent 可更新（口径会修订）。
 -- 与 decisions 的只读约束是两回事——那张表关乎审批权威，这张不。
 GRANT SELECT, INSERT, UPDATE ON asset_semantics TO agent_role;
