@@ -146,6 +146,11 @@ echo "########## 4.4 资产台账：一张表的来历，一处记全 ##########
 ( unset DATASTEWARD_DSN; $PY tests/test_provenance.py ) || rc=1
 
 echo ""
+echo "########## 4.45 silver 生成之后：下游拿来就能用吗 ##########"
+# 只查 lake 与治理库，不经过 Agent 的说法。silver 为空时自己 SKIP
+( unset DATASTEWARD_DSN; DATASTEWARD_DB=${LIVE_DB:-/tmp/live.db}   $PY tests/test_silver_usable.py ) || rc=1
+
+echo ""
 echo "########## 4.5 连表：源禁 join / lake 可 join（铁律 3） ##########"
 # lake 连不上时它自己 SKIP 掉执行那几条，其余（准入规则）不依赖 docker
 $PY tests/test_join.py || rc=1

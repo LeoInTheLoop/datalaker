@@ -102,7 +102,7 @@ spike/                        R0 概念验证，可随时删除
   项目 `.venv`、容器镜像（`docker/Dockerfile`）、Hermes 的 `.venv-h`
   （uv 建的无 pip，用 `VIRTUAL_ENV=<path> uv pip install`）
 - 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`
-  - 接上 docker（core + mail 组）时 **994 条必须全绿**，唯一允许的 SKIP 是 Phoenix
+  - 接上 docker（core + mail 组）时 **1004 条必须全绿**，唯一允许的 SKIP 是 Phoenix
     （mail 组：`docker compose --profile mail up -d greenmail`，
     不起的话 5.2 与 mailsim 两组会整组 SKIP，数字对不上）
   - 不接外置盘（Docker 起不来）时，**不依赖 docker 的那些必须全绿**——
