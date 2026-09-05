@@ -126,11 +126,47 @@ def propose(bronze_table: str, findings: list) -> dict:
 
 
 # ---------------------------------------------------------------- 执行
+def normalized_case(asset: str, column: str):
+    """人给这一列定过标准形吗。返回 'upper' / 'lower' / None（没定或看不懂）。
+
+    `enum_drift` 的注释从 R2 起就写着「标准形取哪个**要人定**」，
+    而实现一直写死 `lower()` —— 人定了全大写也照样洗成小写。
+    口径确实沉淀在 `asset_semantics` 里，只是**没有人去读**：
+    「闸门读的量没人写」的镜像 —— 量写了，闸门不读。
+
+    **看不懂就返回 None**，由调用方停下来问，不许猜一个默认值：
+    猜错的方向是「按你没说过的规矩改了你的数据」。
+    """
+    try:
+        import sys as _s
+        import os as _o
+        _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.dirname(
+            _o.path.abspath(__file__))), "plugins"))
+        from datasteward_gate.approvals import open_store
+        with open_store(readonly=True, init_schema=False) as st:
+            row = st.known(f"{asset}.{column}", "normalize_rule")
+    except Exception:                                        # noqa: BLE001
+        return None
+    if not row:
+        return None
+    v = str(row.get("value") or "")
+    up = any(k in v for k in ("全大写", "大写", "upper", "UPPER"))
+    lo = any(k in v for k in ("全小写", "小写", "lower"))
+    if up and not lo:
+        return "upper"
+    if lo and not up:
+        return "lower"
+    return None                    # 两个都提到、或都没提到 —— 别猜
+
+
 def apply(bronze_table: str, plan: dict, columns: list, pk: str | None = None,
-          silver_table: str | None = None) -> dict:
+          silver_table: str | None = None, asset: str | None = None) -> dict:
     """按提案建 silver 表。**原值一律保留在 `<col>_raw`。**
 
     `plan["auto"]` 之外的任何东西都不会被动 —— 需要问人的那些原样带过去。
+
+    `asset` 给了的话，`enum_drift` 这类「标准形要人定」的规则会去
+    `asset_semantics` 查人定的口径（见 `normalized_case`）。
     """
     import sync
 
@@ -142,6 +178,21 @@ def apply(bronze_table: str, plan: dict, columns: list, pk: str | None = None,
     items = list(plan.get("auto", [])) + [
         a for a in plan.get("propose", []) if a["rule"] in approved]
     fixed = {a["column"]: a for a in items if a.get("expr")}
+
+    # 人定过标准形的列：按人定的来，不用规则写死的那个。
+    for c, a in fixed.items():
+        # 规则名是 `<规则>__<列>`（如 enum_drift__status），前缀匹配。
+        # 按全名比对过一次，结果是这段整个不生效 —— 而它「不生效」的样子
+        # 恰好和「没定过口径」一模一样：照旧洗成小写，没有任何提示。
+        rule = str(a.get("rule") or "")
+        if not asset or not rule.startswith(("enum_drift", "spelling_drift")):
+            continue
+        case = normalized_case(asset, c)
+        if case == "upper":
+            a["expr"] = f'upper(trim("{c}"))'
+            a["by_semantics"] = "全大写（人定的口径）"
+        elif case == "lower":
+            a["by_semantics"] = "全小写（人定的口径）"
 
     sel, applied = [], []
     for c in columns:

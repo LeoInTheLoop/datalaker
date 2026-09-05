@@ -180,6 +180,30 @@ CREATE TABLE IF NOT EXISTS sync_state (
     row_count        INTEGER,
     last_error       TEXT
 );
+-- 授权源清单（readme 8 凭证层）：**谁告诉过我们这个源存在**。
+-- 源是人给的，不是 Agent 自己找的 —— 未经授权的扫描本身就是违规。
+-- 与 decisions 同一条原则：Agent 只读，写在人那一侧（铁律 2 的形状）。
+-- 清单为空 = 未启用（沿用引导源的开发形态）；非空即生效，其余一律拒。
+CREATE TABLE IF NOT EXISTS source_grants (
+    source_id   TEXT PRIMARY KEY,
+    revealed_by TEXT NOT NULL,
+    revealed_at REAL NOT NULL,
+    note        TEXT
+);
+-- 源系统凭证（readme 8 凭证层）：**Agent 读不到这张表。**
+-- 人在邮件里给的连接串经 `connect_source`（L3，批准后）落在这里，
+-- 之后 Agent 只提交 {source_id, sql}，DSN 只有 Connector 自己读 ——
+-- 这是「Agent 不持有 DSN」从注释变成机制的那一步。
+-- 与 decisions 同一条原则：PG 侧靠不给 agent_role SELECT，
+-- SQLite 侧靠代码里没有那条读路径（本地开发无列级权限，如实记在这）。
+CREATE TABLE IF NOT EXISTS source_secrets (
+    source_id     TEXT PRIMARY KEY,
+    dsn           TEXT NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'postgres',
+    approval_id   TEXT NOT NULL,        -- 没有批准就没有数据源
+    registered_by TEXT NOT NULL,
+    registered_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS ix_appr_hash ON approvals(action_hash, run_id);
 CREATE INDEX IF NOT EXISTS ix_dec_appr  ON decisions(approval_id);
 """
@@ -187,9 +211,48 @@ CREATE INDEX IF NOT EXISTS ix_dec_appr  ON decisions(approval_id);
 TTL = 72 * 3600
 
 
+# 凭证类字段：**不参与动作身份**。
+#
+# 「接入 acme 这个源」是一个动作；换了个口令重连仍然是同一个动作。
+# 把 dsn 算进指纹的后果实测踩过：恢复时模型调 `connect_source(source_id=acme)`
+# 不带 dsn（它没必要记住密码，工具会从审批记录里取回），指纹对不上原票据，
+# 于是**又发一份新审批、又开一条新线** —— 人批过的那次白批了。
+#
+# 顺带也更干净：`approvals.action_hash` 里不再藏着口令的哈希。
+_CREDENTIAL_KEYS = {"dsn", "password", "passwd", "secret", "token",
+                    "api_key", "apikey", "credential", "conn_str"}
+
+
 def action_hash(tool_name: str, args: dict) -> str:
-    """动作指纹（readme 9.4 机制二）。参数规范化后参与哈希。"""
-    canon = json.dumps(args, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    """动作指纹（readme 9.4 机制二）。参数规范化后参与哈希。
+
+    **凭证字段被剔除** —— 见 `_CREDENTIAL_KEYS` 上面那段。
+    """
+    keys = None
+    try:
+        from .policy import IDENTITY_KEYS
+        keys = IDENTITY_KEYS.get(tool_name)
+    except Exception:                                        # noqa: BLE001
+        keys = None
+    picked = {k: v for k, v in (args or {}).items() if k in (keys or ())}
+    if keys and picked:
+        # 声明了身份字段、而且这次调用确实给了：只认这些。
+        # **缺的字段按缺处理**，不补默认值 —— 补了就等于替调用方
+        # 决定「它其实是想传 X」。
+        clean = picked
+    elif keys:
+        # **一个身份字段都没给到 → 退回全字段（最严）。**
+        # 不退的话 clean 会是空字典，于是「同一个工具的任何调用」都算
+        # 同一个动作 —— 三条参数完全不同的线被幂等判重吃掉两条，
+        # 实测撞过。指纹宁可吵，不可松：松一次就是两个不同的动作
+        # 共用一张票。
+        clean = {k: v for k, v in (args or {}).items()
+                 if k.lower() not in _CREDENTIAL_KEYS}
+    else:
+        clean = {k: v for k, v in (args or {}).items()
+                 if k.lower() not in _CREDENTIAL_KEYS}
+    canon = json.dumps(clean, sort_keys=True, ensure_ascii=False,
+                       separators=(",", ":"))
     return hashlib.sha256(f"{tool_name}\x00{canon}".encode()).hexdigest()
 
 
@@ -244,6 +307,20 @@ class PgStore:
                       "WHERE a.action_hash=%s AND d.decision='deny' LIMIT 1", (action_hash_,))
             return c.fetchone() is not None
 
+    def granted_sources(self):
+        """人告诉过我们哪些源存在。**空集 = 清单未启用**（见 DDL）。"""
+        with self.db.cursor() as c:
+            c.execute("SELECT source_id FROM source_grants")
+            return {r[0] for r in c.fetchall()}
+
+    def grant_source(self, source_id, revealed_by, note=""):
+        """写在**人**那一侧 —— Agent 的 GRANT 里没有这张表的 INSERT。"""
+        with self.db.cursor() as c:
+            c.execute("INSERT INTO source_grants (source_id, revealed_by,"
+                      " revealed_at, note) VALUES (%s,%s,%s,%s)"
+                      " ON CONFLICT (source_id) DO NOTHING",
+                      (source_id, revealed_by, time.time(), note))
+
     def pending(self, action_hash_, run_id=None):
         """已在等的同一动作。**同样不看 run_id。**
 
@@ -281,23 +358,69 @@ class PgStore:
             return c.rowcount == 1
 
     def decide(self, approval_id, decision, approver, token_jti=None,
-               message_id=None, client_ip=None, user_agent=None):
+               message_id=None, client_ip=None, user_agent=None, chosen=None):
+        """见 SQLite 版的 docstring —— `chosen` 那一列此前从没人写过。"""
         if self.readonly:
             raise PermissionError("Agent 侧连接不允许写入决定")
         import psycopg
         try:
             with self.db.cursor() as c:
                 c.execute(
-                    "INSERT INTO decisions (id, approval_id, decision, approver,"
-                    " decided_at, token_jti, message_id, client_ip, user_agent)"
-                    " VALUES (%s,%s,%s,%s, now(), %s,%s,%s,%s)",
-                    (str(uuid.uuid4()), approval_id, decision, approver,
+                    "INSERT INTO decisions (id, approval_id, decision, chosen,"
+                    " approver, decided_at, token_jti, message_id, client_ip,"
+                    " user_agent) VALUES (%s,%s,%s,%s,%s, now(), %s,%s,%s,%s)",
+                    (str(uuid.uuid4()), approval_id, decision, chosen, approver,
                      token_jti or str(uuid.uuid4()), message_id, client_ip, user_agent))
             return True
         except psycopg.errors.UniqueViolation:
             return False                      # 令牌重放
         except psycopg.errors.InsufficientPrivilege:
             raise PermissionError("该连接无权写入 decisions —— 列级 GRANT 生效")
+
+    def stage_choice(self, chosen):
+        with self.db.cursor() as c:
+            c.execute("SELECT MIN(d.decided_at) FROM decisions d JOIN approvals a"
+                      " ON a.id = d.approval_id WHERE a.kind='question'"
+                      " AND d.decision='answered' AND d.chosen=%s", (chosen,))
+            r = c.fetchone()
+        if not r or r[0] is None:
+            return None
+        return r[0].timestamp() if hasattr(r[0], "timestamp") else float(r[0])
+
+    def stage_proposals(self):
+        with self.db.cursor() as c:
+            c.execute("SELECT count(*) FROM approvals WHERE kind='question'"
+                      " AND args_json LIKE '%%__stage__%%'")
+            return c.fetchone()[0]
+
+    def put_source_secret(self, source_id, dsn, approval_id, by, kind="postgres"):
+        """见 SQLite 版。PG 侧 agent_role 对这张表**连 SELECT 都没有**。"""
+        if self.readonly:
+            raise PermissionError("Agent 侧连接不允许写入源凭证")
+        with self.db.cursor() as c:
+            c.execute(
+                "INSERT INTO source_secrets (source_id, dsn, kind, approval_id,"
+                " registered_by, registered_at) VALUES (%s,%s,%s,%s,%s, now())"
+                " ON CONFLICT (source_id) DO UPDATE SET dsn=excluded.dsn,"
+                " approval_id=excluded.approval_id,"
+                " registered_at=excluded.registered_at",
+                (source_id, dsn, kind, approval_id, by))
+
+    def round_closed_at(self):
+        with self.db.cursor() as c:
+            c.execute("SELECT MAX(ts) FROM events WHERE kind='ROUND_CLOSED'")
+            r = c.fetchone()
+        return float(r[0]) if r and r[0] is not None else None
+
+    def last_stage_decision_at(self):
+        with self.db.cursor() as c:
+            c.execute("SELECT MAX(d.decided_at) FROM decisions d JOIN approvals a"
+                      " ON a.id = d.approval_id WHERE a.kind='question'"
+                      " AND d.decision='answered'")
+            r = c.fetchone()
+        if not r or r[0] is None:
+            return None
+        return r[0].timestamp() if hasattr(r[0], "timestamp") else float(r[0])
 
     # ---------- 与 SQLite Store 对齐的方法（方言不同，故各自实现）----------
     def resolve_role(self, role):
@@ -531,6 +654,19 @@ class Store:
             (action_hash_,),
         ).fetchone() is not None
 
+    def granted_sources(self):
+        """人告诉过我们哪些源存在。**空集 = 清单未启用**（见 DDL）。"""
+        return {r[0] for r in
+                self.db.execute("SELECT source_id FROM source_grants")}
+
+    def grant_source(self, source_id, revealed_by, note=""):
+        """写在**人**那一侧 —— Agent 的 GRANT 里没有这张表的 INSERT。"""
+        self.db.execute(
+            "INSERT OR IGNORE INTO source_grants (source_id, revealed_by,"
+            " revealed_at, note) VALUES (?,?,?,?)",
+            (source_id, revealed_by, time.time(), note))
+        self.db.commit()
+
     def pending(self, action_hash_, run_id=None):
         """已在等的同一动作。**同样不看 run_id。**
 
@@ -578,21 +714,86 @@ class Store:
 
     # ---------- 审批 callback 服务侧：Agent 无此权限 ----------
     def decide(self, approval_id, decision, approver, token_jti=None,
-               message_id=None, client_ip=None, user_agent=None):
+               message_id=None, client_ip=None, user_agent=None, chosen=None):
+        """写决定。`chosen` 是 question 型选中的那个选项 key。
+
+        `decisions.chosen` 这一列 R2 就建好了，但**从来没有人往里写** ——
+        于是「人选了哪个」这件事只存在于邮件正文里，判分读不到。
+        这正是本项目反复摔的那个形状（闸门读的量根本没人写），
+        所以补上写侧，而不是在判分那边猜。
+        """
         if self.readonly:
             raise PermissionError("Agent 侧连接不允许写入决定")
-        assert decision in ("approve", "deny")
+        assert decision in ("approve", "deny", "answered")
         try:
             self.db.execute(
-                "INSERT INTO decisions (id, approval_id, decision, approver, decided_at,"
-                " token_jti, message_id, client_ip, user_agent) VALUES (?,?,?,?,?,?,?,?,?)",
-                (str(uuid.uuid4()), approval_id, decision, approver, time.time(),
-                 token_jti or str(uuid.uuid4()), message_id, client_ip, user_agent),
+                "INSERT INTO decisions (id, approval_id, decision, chosen, approver,"
+                " decided_at, token_jti, message_id, client_ip, user_agent)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (str(uuid.uuid4()), approval_id, decision, chosen, approver,
+                 time.time(), token_jti or str(uuid.uuid4()), message_id,
+                 client_ip, user_agent),
             )
             self.db.commit()
             return True
         except sqlite3.IntegrityError:
             return False                          # token 重放：jti 唯一约束挡住
+
+    def stage_choice(self, chosen):
+        """人有没有拍过这个阶段决定；拍了返回时刻。**没拍返回 None。**
+
+        判分的 `silver_gated` 要的就是这个时刻：批准必须早于第一个
+        silver 动作。「有没有」和「什么时候」在这里是同一次查询 ——
+        分开查会给出「批了但不知道什么时候」这种半个答案。
+        """
+        row = self.db.execute(
+            "SELECT MIN(d.decided_at) FROM decisions d JOIN approvals a"
+            " ON a.id = d.approval_id"
+            " WHERE a.kind='question' AND d.decision='answered' AND d.chosen=?",
+            (chosen,)).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def stage_proposals(self):
+        """发过几次阶段提案。**0 = 这个部署还没在用轮制**（见门禁注释）。"""
+        return self.db.execute(
+            "SELECT count(*) FROM approvals WHERE kind='question'"
+            " AND args_json LIKE '%__stage__%'").fetchone()[0]
+
+    def put_source_secret(self, source_id, dsn, approval_id, by, kind="postgres"):
+        """记下一个源的连接串。**只有 Connector 那一侧会去读它。**
+
+        `approval_id` 是这条注册的依据 —— 没有批准就没有数据源。
+        写在人点过链接之后（工具 handler 里），门禁负责保证走到这一步
+        时票据是真的。
+        """
+        if self.readonly:
+            raise PermissionError("Agent 侧连接不允许写入源凭证")
+        self.db.execute(
+            "INSERT INTO source_secrets (source_id, dsn, kind, approval_id,"
+            " registered_by, registered_at) VALUES (?,?,?,?,?,?)"
+            " ON CONFLICT(source_id) DO UPDATE SET dsn=excluded.dsn,"
+            " approval_id=excluded.approval_id, registered_at=excluded.registered_at",
+            (source_id, dsn, kind, approval_id, by, time.time()))
+        self.db.commit()
+
+    def round_closed_at(self):
+        """这一轮宣告结束的时刻。**没结束返回 None。**
+
+        由阶段报告那一步写（`ops/stage-report.py --send`）。门禁读它来判
+        「终态之后还发起新动作 = 违规」—— 闸门读的量必须真的有人写，
+        所以判据落在一条事件上，不是让门禁自己再算一遍轮的状态。
+        """
+        row = self.db.execute(
+            "SELECT MAX(ts) FROM events WHERE kind='ROUND_CLOSED'").fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def last_stage_decision_at(self):
+        """最近一次阶段拍板的时刻（任何一个选项）。**没拍过返回 None。**"""
+        row = self.db.execute(
+            "SELECT MAX(d.decided_at) FROM decisions d JOIN approvals a"
+            " ON a.id = d.approval_id"
+            " WHERE a.kind='question' AND d.decision='answered'").fetchone()
+        return row[0] if row and row[0] is not None else None
 
     # ---------- 角色解析（readme 10.4）----------
     def resolve_role(self, role):

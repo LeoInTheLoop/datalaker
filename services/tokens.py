@@ -23,9 +23,29 @@ def _unb64(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
+def _valid_decisions() -> set:
+    """approve / deny，加上阶段提案那三个选项。
+
+    **选项表只在 `policy.py` 定义一处。** 在这里再抄一份的话，
+    改名字时人点了链接却验不过 —— 而那个失败长得像「令牌无效」，
+    没人会想到是两份清单漂了。
+    """
+    try:
+        import os
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "plugins"))
+        from datasteward_gate.policy import STAGE_KEYS
+        return {"approve", "deny"} | set(STAGE_KEYS)
+    except Exception:                                        # noqa: BLE001
+        return {"approve", "deny"}       # 拿不到就只签发最基本的两枚
+
+
 def issue(approval_id: str, decision: str, approver: str, ttl: int = TTL,
           stage: str = "click") -> str:
     """签发一枚令牌。批准与拒绝是两枚不同的令牌 —— 意图明确。
+
+    阶段提案的三选一同理：每个选项一枚令牌，点哪枚就是选哪个。
 
     `stage` 支持双重确认（readme 10.5）：
 
@@ -35,7 +55,7 @@ def issue(approval_id: str, decision: str, approver: str, ttl: int = TTL,
     **链接被转发多少次都无所谓：确认信只发到 approver 的注册邮箱。**
     这比要求输验证码轻，比 OAuth 简单，且不依赖任何身份判断。
     """
-    assert decision in ("approve", "deny")
+    assert decision in _valid_decisions(), f"未知的决定：{decision!r}"
     assert stage in ("click", "confirm")
     payload = {
         "aid": approval_id,

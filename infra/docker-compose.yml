@@ -101,6 +101,24 @@ services:
     profiles: [obs]
     ports: ["6006:6006", "4317:4317"]    # 6006=UI/REST  4317=OTLP gRPC
 
+  # ---------------- mail 模拟平面（P2 eval 用，不是生产通道） ----------------
+  # GreenMail：SMTP+IMAP 一体的测试邮件服务器。选它不选 Mailpit 的原因：
+  # Hermes 的 email adapter 只会 IMAP 轮询，Mailpit 没有 IMAP。
+  # auth.disabled = 任意登录成立、收件人即建 —— 10 个 persona 不用建账号；
+  # 也因此它**只绑 127.0.0.1**，绝不能挂公网。实测 JVM 压到 -Xmx128m 能起。
+  greenmail:
+    image: greenmail/standalone:2.1.0
+    profiles: [mail]
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap
+        -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled
+      JAVA_OPTS: -Xmx128m
+    ports:
+      - "127.0.0.1:3025:3025"    # SMTP 明文（模拟环境专用）
+      - "127.0.0.1:3143:3143"    # IMAP 明文（Hermes 侧 EMAIL_IMAP_SECURITY=plain）
+    restart: unless-stopped
+
   # ---------------- agent 平面 ----------------
   # 两个服务，两个数据库账号 —— CLAUDE.md 铁律 2。
   # 同一个容器跑两个角色，「独立进程 + 独立账号」就退化成了自觉。

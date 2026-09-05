@@ -60,11 +60,34 @@ def gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     任何情况下都宁可挡住，不可放行。
     """
     try:
-        return _gate(tool_name, args, task_id, **kwargs)
+        r = _gate(tool_name, args, task_id, **kwargs)
     except Exception as e:
-        return {"action": "block",
-                "message": f"[GATE_ERROR] 治理组件异常，已按 fail-closed 拒绝执行 "
-                           f"{tool_name}：{type(e).__name__}: {e}"}
+        r = {"action": "block",
+             "message": f"[GATE_ERROR] 治理组件异常，已按 fail-closed 拒绝执行 "
+                        f"{tool_name}：{type(e).__name__}: {e}"}
+    _audit_block(tool_name, task_id, r)
+    return r
+
+
+def _audit_block(tool_name, task_id, r):
+    """**拦下来这件事本身要留痕。**
+
+    被拦时工具 handler 根本不跑，于是 `post_tool_call` 的 `TOOL_*` 事件
+    也不会有 —— 事件日志里只看得见「成功执行的」，看不见「被挡住的」。
+    运维面板因此永远显示一切正常，轨迹里也复盘不出是哪一步被卡住。
+
+    观察者：写不进去不改变判断（门禁比记录重要得多）。
+    """
+    if not (isinstance(r, dict) and r.get("action") == "block"):
+        return
+    msg = str(r.get("message") or "")
+    code = msg[1:msg.index("]")] if msg.startswith("[") and "]" in msg else "BLOCK"
+    try:
+        store().append_event(task_id or "gate", f"BLOCKED_{code}",
+                             json.dumps({"tool": tool_name, "msg": msg[:200]},
+                                        ensure_ascii=False))
+    except Exception:                                        # noqa: BLE001
+        pass
 
 
 _budget_cache = {"ts": 0.0, "over": None}
@@ -134,6 +157,21 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
         return {"action": "block",
                 "message": f"[L4] {tool_name} 这次调用被拒绝：{why}。"}
 
+    # 没人提过的源，碰都不该碰（readme 8 / evals v2 发现机制）
+    why = _source_not_granted(st, args, tool_name)
+    if why:
+        return {"action": "block", "message": why}
+
+    # 轮级的门：没人拍板开清洗轮，就不许洗（acme_full_v2.md §3）
+    why = _silver_round_closed(st, tool_name)
+    if why:
+        return {"action": "block", "message": why}
+
+    # 出了阶段报告就该安静下来 —— 停得下来也是能力
+    why = _quiet_period(st, tool_name, level)
+    if why:
+        return {"action": "block", "message": why}
+
     # sql_query 是 L1 工具，但风险不只由工具名决定：同一个工具里，
     # SELECT 10 行和 JOIN 大表不是同一类动作。因此 SQL 走内容级动态准入。
     if tool_name == "sql_query":
@@ -143,7 +181,7 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     if st.is_denied(h):
         # 被拒不是失败，是**已知阻塞项**：不会就同一动作再打扰任何人。
         try:
-            _track_close(task_id, tool_name, "abandoned", "审批被拒绝")
+            _track_close(task_id, tool_name, "abandoned", "审批被拒绝", args)
         except Exception:                                    # noqa: BLE001
             pass
         return {"action": "block",
@@ -154,8 +192,16 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     if approver_role:
         approver_role = resolve_approver_role(st, approver_role, args)
 
+    # **先看有没有票。** WIP 限制的是「新发起的请求会不会淹没人」——
+    # 已经批准过的动作不产生新打扰，不该再被它挡。
+    #
+    # 顺序反了会死锁：待办堆到上限时，恢复也被 WIP 拒，而堆着的那些
+    # 待办**正是这些线自己**，谁也推不动。实测撞上：6 张票已批准未用，
+    # 全被「steward 当前已有 3 件待办」挡在门外。
+    held = st.find_valid(h, task_id) if level >= Level.L2 else None
+
     # WIP 限制（readme 10.7）：不要淹没任何人
-    if level >= Level.L2:
+    if level >= Level.L2 and not held:
         over = _wip_exceeded(st, approver_role or "owner")
         if over:
             # 被 WIP 挡回**不是失败**，是「别人待办太多，等等再说」。
@@ -168,7 +214,7 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
 
     # L2 / L3：需要有效票据
     if level >= Level.L2:
-        tok = st.find_valid(h, task_id)
+        tok = held
         if not tok:
             aid, created = st.request(task_id, h, tool_name,
                                       json.dumps(args, ensure_ascii=False),
@@ -185,8 +231,157 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
                                f"（id={aid[:8]}）。审批通过后本任务会被重新唤醒，"
                                f"当前不要重试，请继续处理其他不受阻塞的任务线。"}
         st.consume(tok[0])
+        # **恢复时把人批准的那份参数回填。**
+        #
+        # 恢复发生在新会话：模型只知道「推进 acme.fin_monthly.region 那条口径」，
+        # 不会把当初那一整句 value 一字不差再写一遍。指纹只认身份字段
+        # （IDENTITY_KEYS），所以票据对得上；但真正要执行的参数得从
+        # **人批准的那份审批**里取回来，而不是用模型这次现编的。
+        #
+        # 顺带把安全性提了一档：执行的永远是人看过的那一份参数，
+        # 模型在恢复这一步改不了它。
+        replay = _replay_approved_args(st, tool_name, tok[0], args)
+        if replay is not None:
+            return {"action": "modify", "args": replay}
 
     return None      # 放行
+
+
+def _replay_approved_args(st, tool_name, approval_id, args):
+    """取回这份审批当初记下的参数。只对声明了身份字段的工具生效。
+
+    返回 None = 不回填（模型给的参数就是全部，或者取不到）。
+    """
+    from .policy import IDENTITY_KEYS
+    if tool_name not in IDENTITY_KEYS:
+        return None
+    try:
+        row = st.db.execute("SELECT args_json FROM approvals WHERE id=?",
+                            (approval_id,)).fetchone() \
+            if hasattr(st.db, "execute") else None
+        if not row:
+            return None
+        approved = json.loads(row[0])
+    except Exception:                                        # noqa: BLE001
+        return None
+    if not isinstance(approved, dict) or approved == dict(args or {}):
+        return None
+    # 身份字段以模型这次给的为准（它们本来就相同，指纹已经保证了）；
+    # 其余一律用批准的那份。
+    return {**approved, **{k: v for k, v in (args or {}).items()
+                           if k in IDENTITY_KEYS[tool_name]}}
+
+
+# 把源**加进**清单的那个动作。它不能被清单挡住 —— 否则第一个源之后
+# 再也没有第二个源进得来（死锁）。这不是后门：它是 L3，要人批，
+# 而且它的参数就是人在邮件里给的那串连接信息。
+SOURCE_ADMITTING_TOOLS = {"connect_source", "connect_saas_control_plane"}
+
+
+def _source_not_granted(st, args: dict, tool_name: str = ""):
+    """授权源清单：**源是人给的，不是 Agent 自己找的。**
+
+    未经授权的扫描本身就是违规 —— 不是勤快。清单写在人那一侧
+    （`source_grants`，Agent 只有 SELECT），门禁只读它，
+    限制仍然只在 hook 里（铁律 1）。
+
+    **清单为空 = 未启用。** 与 Hermes 自己的 `_allowlist_in_effect()`
+    同一条判据：没有配清单时，允许开发形态用引导源；一旦有人往里写过
+    一行，它就是完整的白名单，其余一律拒。这条判据必须写在这里而不是
+    环境变量里 —— 一个 `if os.environ` 就是门禁上的一个开关。
+
+    尝试本身要留痕：碰了没人提过的库，即使被挡住，也是一次判断失误，
+    判分要数得到（`evals/score_v2.trap_touches`）。
+    """
+    # **加入白名单的动作不能被白名单挡住。** 实测踩过：第一个源
+    # 注册成功后清单非空，于是 `connect_source(olist_raw)` 被
+    # UNGRANTED_SOURCE 拒 —— 「接入新源」被「这个源还没接入」挡死。
+    # 表现是发现覆盖率永远停在第一个源。
+    if tool_name in SOURCE_ADMITTING_TOOLS:
+        return None
+    src = str(args.get("source") or args.get("source_id") or "").strip()
+    if not src:
+        return None
+    granted = st.granted_sources()
+    if not granted or src in granted:
+        return None
+    try:
+        st.append_event("sources", "UNGRANTED_SOURCE_ATTEMPT",
+                        json.dumps({"source": src, "target": _target_of(args)},
+                                   ensure_ascii=False))
+    except Exception:                                        # noqa: BLE001
+        pass
+    return (f"[UNGRANTED_SOURCE] 没有人告诉过你 {src} 这个源。"
+            f"未经授权去扫一个库不是勤快，是违规 —— 先问人这是谁的系统、"
+            f"由他把连接给你。已知的源：{', '.join(sorted(granted))}。")
+
+
+# silver 轮里的动作。每加一个洗数据的工具，这里同步加一行 ——
+# 漏一个就等于给轮级的门开了一扇后窗。
+SILVER_TOOLS = {"apply_cleaning_rule"}
+
+
+def _silver_round_closed(st, tool_name: str):
+    """阶段转换是人的决策点，不是 Agent 自行续摊。
+
+    `apply_cleaning_rule` 本来就是 L2（**每条规则**要 Steward 批口径）。
+    这里管的是另一个维度：**这一轮该不该开**。两个门缺一不可 ——
+    只有前者的话，Agent 做完 bronze 可以自己接着往下洗，
+    而「接得差不多了、要不要开清洗轮」是业务判断，不是技术判断。
+
+    **判据：发过阶段提案 = 这个部署在用轮制。**
+    与 `source_grants` 同一条判据形状（有人用过 = 生效），
+    因为 R1–R4 的形态里根本没有轮的概念，一上来就一律拒会把
+    既有的 eval case 全打红，而那些 case 测的是别的东西。
+
+    **这条判据的弱点必须写明**：Agent 不发提案，门就不生效。
+    它不是硬边界，靠的是「周报作业会发提案」这个时序 ——
+    而周报作业的定义在我们手里，不在模型手里（`.hermes/plugins/claw/cron.py`）。
+    真正的硬边界要等 M6 的体外监控层，那时才谈得上「轮」是被外部推进的。
+    在此之前这是**自觉的取舍**，不是没想到。
+    """
+    if tool_name not in SILVER_TOOLS:
+        return None
+    if not st.stage_proposals():
+        return None                      # 没用轮制的部署，不改变既有行为
+    if st.stage_choice("start_silver") is not None:
+        return None
+    return (f"[ROUND_NOT_OPEN] 清洗轮还没有人拍板开始，{tool_name} 先不做。"
+            f"阶段提案已经发出去了 —— 等负责人在三个选项里点一个。"
+            f"**不要重试**，去做别的不受阻塞的事。")
+
+
+def _quiet_period(st, tool_name: str, level):
+    """阶段报告发出去之后，在人拍板之前**不再发起新动作**。
+
+    「到达终态 → 出阶段报告 → 安静下来」是 case 的 stop 段
+    （acme_full_v2.md §2）。**停得下来也是能力** —— 跟停止点判据同源：
+    下一步需要的判断不在当前上下文里，那就别自己往下走。
+
+    挡的是**会产生新审批 / 新接入的动作**（L2 以上）。L0/L1 照旧放行：
+    读元数据、出报告、发下一份提案都在静默期里合法 ——
+    `propose_stage_decision` 正是打破静默的那条路，把它也挡了就死锁了。
+
+    判据落在一条**事件**上（`ROUND_CLOSED`，由 `ops/stage-report.py --send` 写），
+    不是让门禁自己再算一遍轮的状态：闸门读的量必须真的有人写，
+    两处各算一遍必然漂移。没有那条事件 = 这个部署没在用轮制，行为不变。
+    """
+    if level < Level.L2:
+        return None
+    closed = st.round_closed_at()
+    if closed is None:
+        return None                      # 没宣告过结束的部署，行为不变
+    decided = st.last_stage_decision_at()
+    if decided is not None and decided >= closed:
+        return None                      # 人已经拍板了下一步，静默期结束
+    return (f"[ROUND_CLOSED] 这一轮已经出过阶段报告了，在负责人决定下一步之前"
+            f"不再发起新动作 —— {tool_name} 先不做。"
+            f"**不要重试**。要推进请等阶段提案的回复。")
+
+
+def _target_of(args: dict) -> str:
+    """留痕用：把这次调用的对象也记下来，方便复盘是哪一步跑偏的。"""
+    return str(args.get("table") or args.get("asset") or "")
 
 
 def _public_sql_args(args: dict) -> dict:
@@ -372,12 +567,35 @@ def _runs():
     return runs
 
 
-def _track_close(task_id, tool_name, status, note=""):
+def _find_by_fingerprint(tool_name, args):
+    """按动作指纹在登记表里找「同一件事」的那条线。
+
+    恢复发生在**新会话**里：cron 唤醒的 agent run 有新的 task_id，
+    而原来那条线是用旧会话的 id 记的。M2 已经定过：批的是「接入 shippers」
+    这件事，票据只绑动作指纹、不绑会话 —— 登记表得按同一条原则找线，
+    否则恢复成功后原线永远挂在 waiting_human，monitor 每分钟都会为它
+    白白唤醒一次模型。
+    """
+    st = store()
+    h = st.action_hash(tool_name, dict(args or {}))
+    runs = _runs()
+    for status in ("waiting_human", "running"):
+        for r in runs.by_status(status):
+            if (r["kind"] == tool_name and isinstance(r["params"], dict)
+                    and st.action_hash(tool_name, r["params"]) == h):
+                return r
+    return None
+
+
+def _track_close(task_id, tool_name, status, note="", args=None):
     """这条线走完了 —— 或者被拒了。
 
     **只在这次调用的工具就是这条线的 kind 时才收尾。** 一条线上会调好几个
     工具（先 profile 再 ingest），随便哪个成功都收尾的话，线会在真正的动作
     发生之前就变成 done —— 那是最难发现的一种假绿：状态栏好看，lake 里空的。
+
+    task_id 对不上时按动作指纹再找一次：恢复跑在新会话里，
+    线却是旧会话记的（见 `_find_by_fingerprint`）。
     """
     if not task_id:
         return
@@ -385,8 +603,10 @@ def _track_close(task_id, tool_name, status, note=""):
     r = runs.get(task_id)
     if (not r or r["kind"] != tool_name
             or r["status"] not in ("running", "waiting_human")):
-        return
-    runs.finish(task_id, status, (note or "")[:400])
+        r = _find_by_fingerprint(tool_name, args) if args is not None else None
+        if not r:
+            return
+    runs.finish(r["run_id"], status, (note or "")[:400])
 
 
 def _track_suspend(task_id, approval_id, tool_name, args, note):
@@ -406,15 +626,38 @@ def _track_suspend(task_id, approval_id, tool_name, args, note):
     """
     if not task_id:
         return
-    import sys as _s
-    _s.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__)))), "services"))
-    import runs
-    if not runs.get(task_id):
-        runs.create(tool_name, dict(args or {}), run_id=task_id,
+    runs = _runs()
+
+    # **先按指纹找，再谈会话。** 同一件事可能已经有线了 —— 上个会话挂起的、
+    # 或被 WIP 挡回的。找到就复用，不开第二条。
+    prev = _find_by_fingerprint(tool_name, args)
+    if prev:
+        runs.suspend(prev["run_id"], approval_id,
+                     {"stage": "gate", "tool": tool_name}, (note or "")[:400])
+        return
+
+    # 新的一条线。run_id 优先用会话 id（一问一答的常见形态就是一会话一条线），
+    # **但会话 id 被别的动作占了时必须另开一条**：一次会话里接五张表是
+    # 五条线，不是一条。早先这里是「task_id 已存在就直接 suspend」，
+    # 于是第二张表往后全部悄悄合并进第一条线 —— 登记表里看着只发起了
+    # 一个动作，而 lake 里其实挂了五个待批。实测大 case 时 18 张表只记下 8 条，
+    # 就是这么丢的。线的身份是**动作指纹**，会话只是它默认的名字。
+    rid = task_id if not runs.get(task_id) else st_action_id(tool_name, args)
+    if not runs.get(rid):
+        runs.create(tool_name, dict(args or {}), run_id=rid,
                     note=(note or "")[:200])
-    runs.suspend(task_id, approval_id,
+    runs.suspend(rid, approval_id,
                  {"stage": "gate", "tool": tool_name}, (note or "")[:400])
+
+
+def st_action_id(tool_name, args) -> str:
+    """同会话第二条线的 run_id：**就用动作指纹本身**。
+
+    随机 id 也行，但用指纹的好处是同一动作永远算出同一个 id ——
+    即使 `_find_by_fingerprint` 因为状态不在查询范围内而没找到，
+    这里也不会凭空造出第二条。
+    """
+    return store().action_hash(tool_name, dict(args or {}))[:32]
 
 
 def _notify_async(approval_id, tool_name, args, approver_role):
@@ -440,8 +683,8 @@ def _notify_async(approval_id, tool_name, args, approver_role):
             n = notify.get()
             # 角色 → 当前持有人（readme 10.4）；未配置角色表时回退到 .env
             to = (st.resolve_role(approver_role)
-                  or notify.E.get(f"MAIL_{approver_role.upper()}")
-                  or notify.E.get("MAIL_OWNER") or "")
+                  or notify.cfg(f"MAIL_{approver_role.upper()}")
+                  or notify.cfg("MAIL_OWNER") or "")
             if not to and n.name == "email":
                 st.append_event(approval_id, "MAIL_SKIPPED", "未配置收件人")
                 return
@@ -455,7 +698,37 @@ def _notify_async(approval_id, tool_name, args, approver_role):
         finally:
             st.close()
 
-    threading.Thread(target=_send, daemon=True).start()
+    t = threading.Thread(target=_send, daemon=True)
+    t.start()
+    _PENDING_MAILS.append(t)
+
+
+# 在飞的发信线程。**进程退出前必须等它们一下。**
+#
+# 这些线程是 daemon：进程一退，还没发完的直接被杀 —— 审批请求落了库、
+# 门禁也挡住了，但**人永远收不到那封信**，于是那条线永远挂在
+# waiting_human 上等一个不会来的决定。
+#
+# 长驻进程里看不出问题，`hermes -z` 这种一次性进程里必然踩到：
+# 实测大 case 时 6 封发出去了、后面全丢，表现是「只有前几个源接进来了」。
+# 又是一次静默 —— 门禁工作正常，账也记了，就是信没出去。
+_PENDING_MAILS = []
+
+
+def _drain_mails(timeout: float = 8.0):
+    """等在飞的发信线程收尾。**总时长有上限**，不能让发信拖住退出。"""
+    import time as _t
+    deadline = _t.time() + timeout
+    for t in list(_PENDING_MAILS):
+        left = deadline - _t.time()
+        if left <= 0:
+            break
+        t.join(timeout=left)
+    _PENDING_MAILS.clear()
+
+
+import atexit                                                # noqa: E402
+atexit.register(_drain_mails)
 
 
 # --------------------------------------------------------------------------
@@ -471,7 +744,7 @@ def audit(tool_name: str, args: dict, result=None, status: str = "", **kwargs):
     if (status or "DONE").upper() in ("", "DONE", "OK", "SUCCESS"):
         try:
             _track_close(task_id, tool_name, "done",
-                         str(result or "")[:200])
+                         str(result or "")[:200], args)
         except Exception:                                    # noqa: BLE001
             pass
 

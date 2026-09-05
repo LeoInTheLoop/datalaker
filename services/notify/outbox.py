@@ -35,8 +35,17 @@ class OutboxNotifier(Notifier):
         return {"channel": self.name, "to": to, "kind": kind}
 
     def send_approval(self, to, approval_id, tool, target, reason, approver):
+        # **链接也要记。** 真发信时正文里就有这两枚一次性链接，
+        # outbox 少记的话，「扮演人点链接」这一步在 outbox 通道上根本
+        # 无从下手 —— 而那正是 eval 与演练唯一用的通道。
+        from . import approval_links
+        try:
+            ok_url, no_url = approval_links(approval_id, approver)
+        except Exception:                                     # noqa: BLE001
+            ok_url = no_url = ""
         return self._write("approval", to, approval_id=approval_id, tool=tool,
-                           target=target, reason=reason, approver=approver)
+                           target=target, reason=reason, approver=approver,
+                           approve_url=ok_url, deny_url=no_url)
 
     def send_receipt(self, to, approval_id, decision, tool, target, approver):
         return self._write("receipt", to, approval_id=approval_id,

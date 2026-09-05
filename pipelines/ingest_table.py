@@ -187,7 +187,14 @@ def as_run(run_id: str, params: dict, checkpoint: dict | None = None) -> dict:
     from datasteward_gate import store
     from datasteward_gate.approvals import action_hash
 
-    src, tbl = params["source_id"], params["table"]
+    # **两套命名。** 驱动脚本记的是 `source_id`（v1 扮演 Agent 时的叫法），
+    # 门禁记的是工具的实参 `source`。同一件事两个名字是历史遗留 ——
+    # 以前不会撞上，是因为同会话的第二条线根本没被记进登记表；
+    # 修掉那个合并 bug 之后，门禁记的线第一次流到这里来了。
+    src = params.get("source_id") or params.get("source") or ""
+    tbl = params.get("table") or ""
+    if not (src and tbl):
+        raise KeyError(f"缺 source/table：{sorted(params)}")
     s = run(src, tbl, run_id=run_id)
     status, msg = s.get("status", ""), s.get("message", "")
 

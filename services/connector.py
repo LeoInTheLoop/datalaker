@@ -39,7 +39,13 @@ _E = _env()
 # 这里保留一份「引导源」用于开发与测试；生产应当为空，
 # 全部经 register_source() 在审批通过后动态注册。
 # ---------------------------------------------------------------------------
-_BOOTSTRAP = {
+# **引导源可以整组关掉。** 只要它非空，Agent 不注册也连得上 ——
+# 于是「源是人给的」就还是一句口号：eval 里的 trap 碰不碰得到、
+# 发现覆盖率是不是真的靠问人问出来的，全都失真。
+# 生产必须为空（这一节开头就写着）；eval 跑真链路时也必须关。
+_NO_BOOTSTRAP = os.environ.get("CLAW_NO_BOOTSTRAP_SOURCES", "") in ("1", "true", "yes")
+
+_BOOTSTRAP = {} if _NO_BOOTSTRAP else {
     "olist": _E.get("SOURCE_DSN", ""),
     "northwind": _E.get("NORTHWIND_DSN", "")
                  or (_E.get("SOURCE_DSN", "").replace("/olist", "/northwind")),
@@ -57,11 +63,16 @@ _REGISTERED: dict = {}
 
 
 def register_source(source_id: str, dsn: str, approval_id: str | None = None,
-                    kind: str = "postgres", description: str = ""):
+                    kind: str = "postgres", description: str = "",
+                    by: str = "", persist: bool = True):
     """审批通过后注册一个数据源。
 
     `approval_id` 是这条注册的依据——**没有批准就没有数据源**。
-    真实部署中 dsn 应存进 secret store，这里只记引用。
+
+    **落库，不只落进程内存。** 早先只写 `_REGISTERED` 这个 dict：
+    Hermes 每次会话是新进程，上一轮批准注册的源下一轮就不认了 ——
+    表现是「明明批过了，还是说没注册」。凭证进 `source_secrets`
+    （Agent 读不到那张表），可读的只有 `source_grants` 里的 source_id。
     """
     if not approval_id and os.environ.get("REQUIRE_SOURCE_APPROVAL", "1") != "0":
         raise ConnectorError(
@@ -69,8 +80,52 @@ def register_source(source_id: str, dsn: str, approval_id: str | None = None,
             f"Agent 不能自行给自己开数据源")
     _REGISTERED[source_id] = dsn
     _LOCKS.setdefault(source_id, threading.Lock())
+    if persist:
+        _persist_source(source_id, dsn, approval_id or "", kind, by)
     return {"source_id": source_id, "kind": kind, "approval_id": approval_id,
             "description": description}
+
+
+def _persist_source(source_id, dsn, approval_id, kind, by):
+    """凭证进 `source_secrets`，**可见性**进 `source_grants`。
+
+    两张表分开是刻意的：门禁要知道「这个源被人给过」（读 grants），
+    但不该、也不需要看到连接串（secrets 那张 Agent 侧无权限）。
+    """
+    import sys as _s
+    _s.path.insert(0, str(ROOT / "plugins"))
+    from datasteward_gate.approvals import open_store
+    with open_store(readonly=False, init_schema=True) as st:
+        st.put_source_secret(source_id, dsn, approval_id, by or "connect_source",
+                             kind=kind)
+        st.grant_source(source_id, by or "connect_source",
+                        f"经批准注册（approval={approval_id[:8]}）")
+
+
+def _load_registered(source_id: str) -> str:
+    """从库里取已注册的连接串。**只有本模块调它。**
+
+    工具函数拿不到 DSN —— 那是这个模块存在的全部理由（见文件开头）。
+    """
+    try:
+        import sys as _s
+        _s.path.insert(0, str(ROOT / "plugins"))
+        from datasteward_gate.approvals import open_store
+        with open_store(readonly=False, init_schema=False) as st:
+            row = st.db.execute(
+                "SELECT dsn FROM source_secrets WHERE source_id=?",
+                (source_id,)).fetchone() if hasattr(st.db, "execute") else None
+            if row:
+                return row[0]
+            if not hasattr(st.db, "execute"):
+                with st.db.cursor() as c:
+                    c.execute("SELECT dsn FROM source_secrets WHERE source_id=%s",
+                              (source_id,))
+                    r = c.fetchone()
+                    return r[0] if r else ""
+    except Exception:                                        # noqa: BLE001
+        pass
+    return ""
 
 
 def known_sources() -> list:
@@ -78,7 +133,9 @@ def known_sources() -> list:
 
 
 def _dsn(source_id: str) -> str:
-    dsn = _REGISTERED.get(source_id) or _BOOTSTRAP.get(source_id, "")
+    # 顺序：本进程注册过的 → 库里注册过的（跨会话）→ 引导源（开发用，可关）
+    dsn = (_REGISTERED.get(source_id) or _load_registered(source_id)
+           or _BOOTSTRAP.get(source_id, ""))
     if not dsn:
         raise ConnectorError(
             f"数据源 {source_id} 未注册。Agent 不持有未经批准的凭证——"

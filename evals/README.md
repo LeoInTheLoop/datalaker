@@ -12,6 +12,7 @@
 | **红线取证** | `evals/snapshot.py`，**体外** | 自己连库看实际状态，不信 Agent 自报 |
 | 期望值 / ground truth | `evals/cases/*.json` | 纯数据，第三方能读能改 |
 | **被测系统驱动** | `tests/run_eval_case.py`，**体内** | 它 import 被测代码，故意不放 `evals/` |
+| 缺陷分类（真实世界 ↔ 注入器） | `evals/defect_taxonomy.md` | 注入类型的外部锚定与缺口清单，新增类别先查它 |
 
 > 与 CLAUDE.md 铁律 2 同一条理由：审批 callback 与 Agent 同进程时列级 GRANT
 > 形同虚设；判分器与被测系统同进程时红线指标同样形同虚设。

@@ -74,6 +74,6 @@ if __name__ == "__main__":
     if "--send" in sys.argv:
         import notify
         n = notify.get()
-        to = notify.E.get("MAIL_SPONSOR") or notify.E.get("MAIL_OWNER") or ""
+        to = notify.cfg("MAIL_SPONSOR") or notify.cfg("MAIL_OWNER") or ""
         n.send_notice(to, f"[数据管家] 周报 {time.strftime('%m-%d')}", body)
         print(f"\n已通过 {n.name} 发送至 {to}")

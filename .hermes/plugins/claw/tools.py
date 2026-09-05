@@ -7,6 +7,7 @@ SQL 由代码生成。工具签名是唯一能挂约束的地方 —— 参数�
 这个模块被 Hermes 在发现阶段导入（因为 manifest 声明了 `provides_tools`），
 所以同样保持 import 轻量：连库放进 handler。
 """
+import json
 from typing import Any
 
 _SCHEMAS = {
@@ -47,14 +48,52 @@ def _list_source_tables(args: dict, **_: Any) -> str:
     rows = r.get("tables") or []
     if not rows:
         return f"{src} 里没有可见的表（可能是权限，也可能确实是空的）。"
-    lines = [f"{src} 共 {len(rows)} 张表："]
+    # **标出哪些已经接过了。** 不标的话模型每收到一封信就重新规划一遍，
+    # 把接过的表再发一次审批 —— 实测三张表被重复申请，人白点三次链接。
+    # 它不是记不住，是**没人告诉它**：清单里只有源系统的表，
+    # lake 里已有什么得自己去查，而它没有理由想到要查。
+    done = _already_in_lake(src)
+    lines = [f"{src} 共 {len(rows)} 张表"
+             + (f"，其中 {len(done)} 张已在数据湖里：" if done else "：")]
     for t in rows[:50]:
         n = t.get("approx_rows")
         est = "行数未知" if n is None or n < 0 else f"约 {n:,} 行"
-        lines.append(f"  · {t['table']}（{est}）")
+        mark = ""
+        if t["table"] in done:
+            age = done[t["table"]]
+            mark = f"　**已接入**（{age}，要刷新才需要重接）"
+        lines.append(f"  · {t['table']}（{est}）{mark}")
     if len(rows) > 50:
         lines.append(f"  …… 另有 {len(rows) - 50} 张未列出")
+    if done:
+        lines.append("已接入的不用再申请接入 —— 重接只在需要刷新数据时做。")
     return "\n".join(lines)
+
+
+def _already_in_lake(src: str) -> dict:
+    """这个源里哪些表已经落过 bronze，以及多久以前。**读账本，不查 lake**：
+    `sync_state` 是同步这件事自己的记录，比反查表名可靠。"""
+    import time
+    out = {}
+    try:
+        from datasteward_gate.approvals import open_store
+        with open_store(readonly=True, init_schema=False) as st:
+            rows = st.db.execute(
+                "SELECT asset, last_synced_at FROM sync_state") \
+                if hasattr(st.db, "execute") else []
+            for asset, ts in rows:
+                if not str(asset).startswith(src + "."):
+                    continue
+                tbl = str(asset).split(".", 1)[1]
+                if not ts:
+                    out[tbl] = "时间未知"
+                    continue
+                h = (time.time() - float(ts)) / 3600.0
+                out[tbl] = (f"{h:.0f} 小时前同步" if h >= 1
+                            else f"{max(1, int(h * 60))} 分钟前同步")
+    except Exception:                                        # noqa: BLE001
+        pass
+    return out
 
 
 def _profile_table(args: dict, **_: Any) -> str:
@@ -378,9 +417,23 @@ def _apply_cleaning_rule(args: dict, **_: Any) -> str:
             return (f"iceberg.bronze.{bronze} 不存在 —— 先把表接进来"
                     f"（ingest_table）再洗。")
         r = clean.apply(bronze, plan, cols, pk=args.get("pk") or None,
-                        silver_table=args.get("silver_table") or None)
+                        silver_table=args.get("silver_table") or None,
+                        asset=f"{src}.{tbl}")
     except Exception as e:                                    # noqa: BLE001
         return f"清洗 {bronze} 失败：{type(e).__name__}: {str(e)[:200]}"
+
+    # **给了规则却一条都没匹配上 = 名字写错了，不是「人没批准」。**
+    # 两者的返回话术几乎一样（"未执行（没批准这条规则）"），而后果差很多：
+    # 前者是洗了等于没洗、看着还成功。实测撞过：模型抄成人类可读的
+    # "status / enum_drift"，而规则名是 "enum_drift__status"。
+    _all_rules = {a["rule"] for a in plan.get("propose", [])}
+    _matched = _all_rules & set(approved)
+    if approved and not _matched:
+        return (f"**规则名对不上，一条都没执行**（没有洗任何数据）。\n"
+                f"你给的：{'、'.join(map(str, approved))}\n"
+                f"这张表可用的：{'、'.join(sorted(_all_rules)) or '（没有可执行的规则）'}\n"
+                f"规则名要**原样抄** `propose_cleaning` 给出的那个，别改写成"
+                f"更好读的形式 —— 它是标识符，不是描述。")
 
     # **未被批准的提案要说出来**，否则「洗完了」会被读成「都处理干净了」。
     skipped = [a["rule"] for a in plan.get("propose", [])
@@ -481,7 +534,7 @@ _SCHEMAS.update({
             "bronze_table": {"type": "string",
                              "description": "bronze 表名，默认 <source>__<table>"},
             "approved_rules": {"type": "array", "items": {"type": "string"},
-                               "description": "已获批准的规则名（propose_cleaning 里给出的）"},
+                               "description": "要执行的规则名，**原样抄 propose_cleaning 给出的那个**（如 enum_drift__status）。它是标识符不是描述，改写成更好读的形式会一条都匹配不上"},
             "pk": {"type": "string", "description": "主键列，用于按主键去重"},
             "silver_table": {"type": "string", "description": "目标 silver 表名，默认同名"}},
             "required": ["source", "table"]},
@@ -530,7 +583,535 @@ _SCHEMAS.update({
 })
 
 
+# --------------------------------------------------------------- 口径沉淀
+# **问过的不再问**（readme 5.7）。人回了口径，就得落进 `asset_semantics`，
+# 否则下一轮、下一个会话、换一个部署，同一个问题还要再问一遍 ——
+# 重复问同一件事是最快失去信任的方式。
+#
+# 实测踩过：`define_semantics` 在 policy.py 里声明了 L2，**但从来没有实现**。
+# 模型于是退而求其次，把口径记进了 Hermes 自己的 `memory`（它刚好被放行）
+# —— 看着像记住了，项目的知识库里一条都没有。换个 Agent、换台机器就全丢。
+
+def _define_semantics(args: dict, **_: Any) -> str:
+    """把人确认过的口径沉淀下来（L2，Steward 确认）。"""
+    from . import _ensure_path
+    _ensure_path()
+    asset = str(args.get("asset") or "").strip()
+    # **key 必填，不给默认值。** 带默认值的参数会让「给了 semantics」和
+    # 「没给」算成两个不同的动作（指纹算的是原始参数，看不到默认值），
+    # 于是同一条口径被反复发审批、把 steward 的 WIP 占满。实测踩过。
+    key = str(args.get("key") or "").strip()
+    value = str(args.get("value") or "").strip()
+    by = str(args.get("confirmed_by") or "").strip()
+    if not asset or not value or not key:
+        return ("错误：需要 asset（如 acme.fin_monthly.region）、"
+                "key（这条口径叫什么，如 null_meaning / normalize_rule）"
+                "与 value（口径本身）。**key 要明确写出来** —— "
+                "同一列可能有好几条口径，含糊的名字以后查不出来。")
+    if not by:
+        return ("错误：需要 confirmed_by —— **口径必须记是谁定的**。"
+                "没有出处的口径下次没人认账，等于没定。")
+    try:
+        from datasteward_gate import store
+        st = store()
+        old = st.known(asset, key)
+        st.remember(asset, key, value, by, source_item=args.get("source_item"))
+    except Exception as e:                                   # noqa: BLE001
+        return f"沉淀 {asset}.{key} 失败：{type(e).__name__}: {str(e)[:200]}"
+    if old and old.get("value") != value:
+        return (f"{asset}.{key} 的口径已更新：\n"
+                f"  原：{old['value'][:80]}（{old.get('confirmed_by')}）\n"
+                f"  新：{value[:80]}（{by}）\n"
+                f"**口径改了，之前按旧口径洗过的数据要重洗** —— 别忘了这件事。")
+    return (f"已记下 {asset}.{key} = {value[:100]}（{by} 确认）。"
+            f"以后不会再就这一条问人。")
+
+
+_SCHEMAS.update({
+    "define_semantics": {
+        "name": "define_semantics",
+        "description": (
+            "把某人确认过的业务口径记下来，以后不再问第二遍。"
+            "**人在信里回了口径就该调它** —— 只记在对话里，换个会话就没了。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "asset": {"type": "string",
+                      "description": "口径针对什么，如 acme.fin_monthly.region"},
+            "key": {"type": "string",
+                    "description": "这条口径叫什么，**必填**：如 null_meaning"
+                                   "（空值什么意思）、normalize_rule（怎么归一）、"
+                                   "deprecated（废弃列）"},
+            "value": {"type": "string", "description": "口径本身，一句话说清"},
+            "confirmed_by": {"type": "string",
+                             "description": "谁确认的（邮箱或姓名）。必填"},
+            "source_item": {"type": "string",
+                            "description": "依据的那份审批/提问 id，可空"}},
+            "required": ["asset", "key", "value", "confirmed_by"]},
+    },
+})
+
+
+# --------------------------------------------------------------- 连表
+# **源系统禁 join，lake 里随便 join**（铁律 3）。这条分界不是性能取舍：
+# 一条模型生成的多表关联打在生产源库上，即使只读也可能把它拖死；
+# 而 iceberg 是我们自己的地盘，扫爆了也不影响别人。
+#
+# 门禁那一侧（`_sql_guard` → `connector.review_sql`）已经把规则写全了：
+# plane=lake 走 trino 方言、只准查 `iceberg.*`、JOIN 不算风险项；
+# plane=source 则 JOIN / 无过滤聚合 / 大 LIMIT 一律先问人。
+# **缺的一直是工具本身** —— `sql_query` 在 policy.py 里声明了 L1，
+# 但从来没有 schema 也没有 handler，于是 Agent 根本没有办法连表。
+
+def _sql_query(args: dict, **_: Any) -> str:
+    """执行一条已经过门禁准入的 SQL（L1；内容级风险由 `_sql_guard` 判）。"""
+    from . import _ensure_path
+    _ensure_path()
+    sql = str(args.get("sql") or "").strip()
+    plane = str(args.get("plane") or "source").lower()
+    if not sql:
+        return "错误：需要 sql。"
+    if plane not in ("source", "lake"):
+        return f"错误：plane 只能是 source 或 lake，收到 {plane!r}。"
+
+    # 门禁放行时会把重写过的 SQL（补了 LIMIT 等）合并回参数，并打上
+    # `_sql_gate_approved`。**这里不重新判一遍**——两处实现同一规则必然漂移，
+    # 那正是 gate 与 Connector 各有一份关键字判断时出过的事。
+    try:
+        if plane == "lake":
+            import sync
+            rows = sync._trino(sql)
+            n = len(rows)
+            head = rows[:20]
+            body = "\n".join("  " + str(r) for r in head)
+            more = f"\n  …… 共 {n} 行，只显示前 20 行" if n > 20 else ""
+            return f"查到 {n} 行：\n{body}{more}" if n else "查到 0 行。"
+        src = str(args.get("source") or args.get("source_id") or "").strip()
+        if not src:
+            return "错误：plane=source 时需要 source（源系统 id）。"
+        import connector
+        r = connector.query(src, sql, purpose=str(args.get("purpose") or ""),
+                            approved=bool(args.get("_sql_gate_approved")))
+        rows = r.get("rows") or []
+        head = rows[:20]
+        body = "\n".join("  " + str(x) for x in head)
+        more = (f"\n  …… 共 {len(rows)} 行，只显示前 20 行"
+                if len(rows) > 20 else "")
+        return f"查到 {len(rows)} 行：\n{body}{more}" if rows else "查到 0 行。"
+    except Exception as e:                                   # noqa: BLE001
+        return f"查询失败：{type(e).__name__}: {str(e)[:250]}"
+
+
+def _describe_asset(args: dict, **_: Any) -> str:
+    """一张表的结构 + **怎么和别的表连**（L0，只读）。
+
+    Agent 要 join，先得知道拿哪个字段连。以前只能一张张 `get_table_metadata`
+    去源库拉，既慢又拿不到外键 —— 关系全靠猜表名。这里把三样东西一次给全：
+    列与主键、外键指向、以及**已经落进 lake 的那些表之间**可用的 join 路径。
+
+    join 路径只在 lake 侧给：源系统禁关系展开（铁律 3），
+    在源库上提示「你可以这样 join」等于鼓励它去踩那条线。
+    """
+    from . import _ensure_path
+    _ensure_path()
+    src = str(args.get("source") or "").strip()
+    tbl = str(args.get("table") or "").strip()
+    if not (src and tbl):
+        return "错误：需要 source 与 table。"
+
+    out = []
+    try:
+        import connector
+        d = connector.describe_table(src, tbl)
+        cols = d.get("columns") or []
+        pk = d.get("primary_key") or []
+        out.append(f"{src}.{tbl}：{len(cols)} 列"
+                   + (f"，主键 {'、'.join(pk)}" if pk else "，**没有主键**"))
+        # `describe_table` 返回的是原始行元组 (name, type, is_nullable)，
+        # 不是 dict —— 按 dict 读会 TypeError，而那个错会被外面
+        # 包成一句「读结构失败」，看不出是自己写错了取值方式。
+        out.append("列：" + "、".join(
+            f"{c[0]}:{c[1]}" + ("" if str(c[2]).upper() == "YES" else "*")
+            for c in cols[:40]))
+        out.append("（`*` = NOT NULL）")
+        if len(cols) > 40:
+            out.append(f"（还有 {len(cols) - 40} 列没列出）")
+    except Exception as e:                                   # noqa: BLE001
+        return f"读 {src}.{tbl} 的结构失败：{type(e).__name__}: {str(e)[:200]}"
+
+    # 外键：源库自己声明的关系，比任何猜测都准。
+    try:
+        fks = [f for f in connector.list_foreign_keys(src)
+               if f[0].split(".")[-1] == tbl or f[2].split(".")[-1] == tbl]
+    except Exception:                                        # noqa: BLE001
+        fks = []
+    if fks:
+        out.append("外键关系：")
+        for t, c, rt, rc in fks[:12]:
+            out.append(f"  {t}.{c} → {rt}.{rc}")
+    else:
+        out.append("外键关系：源库没有声明（不代表没有关系，可能靠约定）")
+
+    # join 路径：**只给已经落进 lake 的那些**。没落进来的先接进来再说。
+    try:
+        import sync
+        have = set(sync._trino(
+            "SELECT table_name FROM iceberg.information_schema.tables"
+            " WHERE table_schema='bronze'"))
+    except Exception:                                        # noqa: BLE001
+        have = set()
+    me = f"{src}__{tbl}"
+    paths = []
+    for t, c, rt, rc in fks:
+        a, b = f"{src}__{t.split('.')[-1]}", f"{src}__{rt.split('.')[-1]}"
+        if a in have and b in have:
+            paths.append(f'  iceberg.bronze."{a}" a JOIN iceberg.bronze."{b}" b'
+                         f'  ON a.{c} = b.{rc}')
+    if paths:
+        out.append(f"可用的 join（两边都已在 lake 里）：")
+        out += paths[:8]
+        out.append("**在 lake 里 join，不要在源库上关联**（源系统禁关系展开）。")
+    elif me not in have:
+        out.append(f"这张表还没接进 lake（bronze 里没有 {me}），"
+                   f"要连表得先 ingest_table。")
+    else:
+        out.append("暂时没有两边都在 lake 里的 join 路径 —— "
+                   "对端表还没接进来。")
+    return "\n".join(out)
+
+
+_SCHEMAS.update({
+    "sql_query": {
+        "name": "sql_query",
+        "description": (
+            "执行一条只读 SQL。**plane=lake 时可以 JOIN、聚合**（在我们自己的"
+            "数据湖里，表名形如 iceberg.bronze.\"源__表\"）；plane=source 是"
+            "外部源系统，**禁止跨表关联**，重读会先问人。要连表就用 lake。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "sql": {"type": "string", "description": "只读 SQL"},
+            "plane": {"type": "string", "enum": ["source", "lake"],
+                      "description": "source=外部源系统（禁 join）；"
+                                     "lake=已复制进来的表（可 join）"},
+            "source": {"type": "string",
+                       "description": "plane=source 时的源系统 id"},
+            "purpose": {"type": "string",
+                        "description": "bulk 表示批量抽取，受低峰窗口约束"}},
+            "required": ["sql", "plane"]},
+    },
+    "describe_asset": {
+        "name": "describe_asset",
+        "description": (
+            "一张表的列、类型、主键、外键指向，以及**怎么和别的表连**。"
+            "要 join 之前先看这个 —— 关系是源库声明的，比猜表名准。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "源系统 id"},
+            "table": {"type": "string", "description": "表名"}},
+            "required": ["source", "table"]},
+    },
+})
+
+
+# --------------------------------------------------------------- 接一个新源
+# **真实世界里源是这样来的**：人在邮件里写一串连接信息，或者 IT 发个配置
+# 文件过来。不是脚本往清单里塞一行 —— 那是演的。
+#
+# 这个工具是 L3（sponsor 批）。它是**唯一**能让一个源变得可用的路：
+# 批准之后凭证进 `source_secrets`（Agent 读不到），可见性进 `source_grants`
+# （门禁读它）。没批准就没有数据源 —— `register_source` 拒绝无 approval_id
+# 的注册，这条从 R1 就写死了，只是此前 Agent 没有工具能走到它。
+
+def _dsn_from_approval(source_id: str) -> str:
+    """从**已批准**的那条 connect_source 审批里取回连接串。
+
+    只认已经有 approve 决定的那条 —— 未决的审批里也存着参数，
+    但那还不是「人同意了」。
+    """
+    try:
+        from datasteward_gate import store
+        st = store()
+        rows = st.db.execute(
+            "SELECT a.args_json FROM approvals a JOIN decisions d"
+            " ON d.approval_id = a.id WHERE a.tool_name='connect_source'"
+            " AND d.decision='approve' ORDER BY d.decided_at DESC LIMIT 20"
+        ).fetchall() if hasattr(st.db, "execute") else []
+        for (aj,) in rows:
+            d = json.loads(aj)
+            if d.get("source_id") == source_id and d.get("dsn"):
+                return str(d["dsn"])
+    except Exception:                                        # noqa: BLE001
+        pass
+    return ""
+
+
+def _connect_source(args: dict, **_: Any) -> str:
+    """把人给的连接信息注册成一个可用的源（L3，sponsor 审批）。"""
+    from . import _ensure_path
+    _ensure_path()
+    sid = str(args.get("source_id") or "").strip()
+    dsn = str(args.get("dsn") or "").strip()
+    if not sid:
+        return "错误：需要 source_id。"
+    if not dsn:
+        # **恢复时不必重新给连接串。** 被拦下那次的参数已经在审批记录里；
+        # 让模型再念一遍 dsn 意味着密码要第二次进上下文（还得指望它
+        # 记对）。这里从**已批准的那条审批**里取回来 —— 顺带也就
+        # 不需要在 monitor 的输出里写它了。
+        dsn = _dsn_from_approval(sid)
+    if not dsn:
+        return ("错误：需要 dsn。它是对方给你的连接串 —— 邮件正文里那一行，"
+                "或者附件里的配置。**拿不到就问人要，不要自己编。**")
+    if "://" not in dsn:
+        return (f"错误：{dsn[:40]!r} 不像连接串。应当形如 "
+                f"postgresql://用户:口令@主机:端口/库名。"
+                f"**拿不到就说拿不到**，不要自己编一个。")
+
+    # 走到这里说明门禁已经放行 = 票据是真的。**把那张票找出来当依据** ——
+    # `register_source` 拒绝没有 approval_id 的注册，而这个依据必须是
+    # 真发生过的那次批准，不是随手编一个 id。
+    try:
+        from datasteward_gate import store
+        st = store()
+        row = st.db.execute(
+            "SELECT a.id FROM approvals a JOIN decisions d ON d.approval_id=a.id"
+            " WHERE a.tool_name='connect_source' AND d.decision='approve'"
+            " ORDER BY d.decided_at DESC LIMIT 1").fetchone() \
+            if hasattr(st.db, "execute") else None
+        aid = row[0] if row else ""
+    except Exception:                                        # noqa: BLE001
+        aid = ""
+    if not aid:
+        return ("错误：找不到这次接入的批准记录。注册数据源必须有审批依据 —— "
+                "没有批准就没有数据源。")
+
+    try:
+        import connector
+        r = connector.register_source(
+            sid, dsn, approval_id=aid, kind=str(args.get("kind") or "postgres"),
+            description=str(args.get("description") or ""),
+            by=str(args.get("given_by") or "邮件"))
+    except Exception as e:                                   # noqa: BLE001
+        return f"注册 {sid} 失败：{type(e).__name__}: {str(e)[:200]}"
+
+    # **不要把连接串回显给模型。** 它已经在上下文里出现过一次（是参数），
+    # 但没有理由再出现第二次 —— 每多一次就多一次被写进日志、被带进
+    # 下一轮 prompt 的机会。
+    tables, err = [], ""
+    try:
+        tables = connector.list_tables(sid)
+    except Exception as e:                                   # noqa: BLE001
+        err = f"{type(e).__name__}: {str(e)[:120]}"
+
+    # **接成功或失败，都要给人一个交代 + 下一步。**
+    # 只把结果 return 给模型的话，人那边什么都看不到 —— 而这条线是他批的，
+    # 他有权知道批完之后到底连上没有。失败尤其要说：连不上多半是
+    # 连接信息不对，而只有他能给新的。
+    _notify_connect(sid, args.get("given_by"), tables, err)
+
+    if err:
+        return (f"源 {sid} 注册了（依据审批 {aid[:8]}），**但连不上**：{err}。"
+                f"已把情况回给对方，等新的连接信息。不要反复重试。")
+    return (f"已接入源 {sid}（依据审批 {aid[:8]}），能看到 {len(tables)} 张表。"
+            f"凭证已存放，之后我只用 source_id 提交查询，不再持有连接串。"
+            f"已把结果和下一步回给对方。")
+
+
+def _notify_connect(sid, given_by, tables, err):
+    """把接入结果回给人。**发不出去要说出来**，不吞。"""
+    try:
+        import notify
+        st_ = None
+        try:
+            from datasteward_gate import store
+            st_ = store()
+        except Exception:                                    # noqa: BLE001
+            pass
+        to = _resolve_to(st_, "owner") or given_by or ""
+        if err:
+            body = (f"{sid} 的接入审批已经通过，但按这份连接信息**连不上**：\n\n"
+                    f"  {err}\n\n"
+                    f"下一步：麻烦确认一下账号/口令/网络是否可达，"
+                    f"再把新的连接信息发我。在收到之前我不会反复重试。")
+            subj = f"[数据管家] {sid} 接入失败，需要新的连接信息"
+        else:
+            # `list_tables` 返回 (表名, 行数估算) 的元组列表。
+            # 行数是**估算**，-1 表示未知 —— 别把 -1 印成「-1 行」。
+            def _one(t):
+                if isinstance(t, (tuple, list)) and len(t) >= 2:
+                    n = t[1]
+                    return f"{t[0]}（约 {n:,} 行）" if isinstance(n, int) and n >= 0 \
+                        else f"{t[0]}（行数未知）"
+                return str(t)
+            names = "、".join(_one(t) for t in tables[:12])
+            body = (f"{sid} 已经接进来了，能看到 {len(tables)} 张表：\n\n"
+                    f"  {names}{'……' if len(tables) > 12 else ''}\n\n"
+                    f"下一步：告诉我先接哪几张（接哪张表优先是业务判断，"
+                    f"不是技术判断）。每张表的接入我会单独发审批给负责人。")
+            subj = f"[数据管家] {sid} 已接入，共 {len(tables)} 张表"
+        notify.get().send_notice(to, subj, body)
+    except Exception:                                        # noqa: BLE001
+        pass                     # 通知失败不改变已经完成的注册
+
+
+_SCHEMAS.update({
+    "connect_source": {
+        "name": "connect_source",
+        "description": (
+            "把某人给你的连接信息注册成一个可用的数据源。**这是接入一个新源的"
+            "唯一入口** —— 在此之前你碰不到它。需要负责人批准。"
+            "连接串来自对方的邮件正文或附件；拿不到就问，不要自己编。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "source_id": {"type": "string",
+                          "description": "给这个源起的 id，如 acme、northwind"},
+            "dsn": {"type": "string",
+                    "description": "对方给的连接串，如 "
+                                   "postgresql://user:pass@host:5432/db。"
+                                   "**恢复一次被拦下的接入时不用再给** —— "
+                                   "它已经在那份审批里了"},
+            "kind": {"type": "string", "description": "源类型，默认 postgres"},
+            "given_by": {"type": "string", "description": "谁给的（邮箱或姓名）"},
+            "description": {"type": "string", "description": "这个源是干什么的"}},
+            # **dsn 不是必填**：恢复时它已经在审批记录里了，让模型再念一遍
+            # 等于密码第二次进上下文（还得指望它记对）。schema 写成 required
+            # 的话 Hermes 在调用前就拒了 —— handler 里那段取回逻辑根本跑不到。
+            "required": ["source_id"]},
+    },
+})
+
+
+# --------------------------------------------------------------- 阶段提案
+# 周报从**播报**改成**提案**（acme_full_v2.md §3）：一轮做完了，
+# 下一步该做什么是人的决策点，不是 Agent 自行续摊。
+#
+# 这个工具是 L1 —— 和 `propose_cleaning` 完全同构：**提案本身不改任何东西**，
+# 所以它不需要审批（否则「发问」这件事自己也要先被批一次，套娃）。
+# 真正的门在别处：没有被批准的 `start_silver`，`apply_cleaning_rule`
+# 一律被门禁拒。引导在 skill 里，强制在门禁里，两层别混。
+
+def _stage_options():
+    """三个选项在 `policy.py` 里 —— 一处定义，工具 / 令牌 / 门禁三处读。"""
+    from . import _ensure_path
+    _ensure_path()
+    from datasteward_gate.policy import STAGE_KEYS, STAGE_OPTIONS
+    return STAGE_OPTIONS, STAGE_KEYS
+
+
+def _propose_stage_decision(args: dict, **_: Any) -> str:
+    """把阶段小结变成一条三选一的提问，等人拍板（L1：只发问，不改东西）。"""
+    from . import _ensure_path
+    _ensure_path()
+    summary = str(args.get("summary") or "").strip()
+    recommend = str(args.get("recommend") or "").strip()
+    reason = str(args.get("reason") or "").strip()
+    if not summary:
+        return "错误：需要 summary（这一轮的小结，人靠它做判断）。"
+    stage_options, stage_keys = _stage_options()
+    if recommend not in stage_keys:
+        return (f"错误：recommend 必须是 {sorted(stage_keys)} 之一，"
+                f"收到 {recommend!r}。**必须给建议** —— 只把三个选项摆出来"
+                f"而不说该选哪个，等于把判断推回给人。")
+    if not reason:
+        return "错误：需要 reason —— 没有理由的建议没法被反驳，也就没法被采纳。"
+
+    opts = [dict(o, recommended=(o["key"] == recommend)) for o in stage_options]
+    decider = str(args.get("decider") or "sponsor").strip()
+    try:
+        from datasteward_gate import store
+        st = store()
+        qid, created = st.ask(
+            run_id=str(args.get("run_id") or "stage"),
+            asset="__stage__",
+            question=f"{summary}\n\n下一步三选一。我建议「{recommend}」，因为{reason}",
+            options=opts, approver=decider,
+            evidence=reason)
+    except Exception as e:                                    # noqa: BLE001
+        return f"发起阶段提案失败：{type(e).__name__}: {str(e)[:200]}"
+
+    if not created:
+        return (f"这一轮的提案已经发出去过了（id={qid[:8]}），还没有人拍板。"
+                f"**不要重复打扰** —— 等回复，或者去做别的不受阻塞的事。")
+
+    # 落库了还得**发出去**。只落库不发信的话，提案在表里躺着、人从不知道，
+    # 而 Agent 这边看起来「已经问过了」—— 又一次静默。
+    sent = _send_stage_mail(qid, decider, summary, recommend, reason, opts)
+    return (f"阶段提案已发给 {decider}（id={qid[:8]}，{sent}），三个选项、建议"
+            f"「{recommend}」。**正文写同意不算数，要点链接。**"
+            f"在拍板之前不要自行开始下一轮。")
+
+
+def _resolve_to(st_, role: str) -> str:
+    """角色名 → 邮箱。**解析不出来时不要把角色名当邮箱用。**
+
+    实测撞过：阶段提案发给了字面量 "sponsor"，于是躺在一个叫 sponsor 的
+    收件箱里，谁也看不到 —— 提案发出去了、没人收到，而日志一切正常。
+    `_notify_async` 那边早就按 `MAIL_<ROLE>` 兜底了，这里漏了同一步。
+    """
+    import notify
+    who = (st_.resolve_role(role) if st_ else None) or ""
+    if "@" in who:
+        return who
+    for key in (f"MAIL_{role.upper().replace(':', '_')}",
+                "MAIL_SPONSOR", "MAIL_OWNER"):
+        v = notify.cfg(key, "")
+        if "@" in v:
+            return v
+    return ""
+
+
+def _send_stage_mail(qid, decider, summary, recommend, reason, opts) -> str:
+    """把提案连同三枚一次性链接发出去。发不出去要**说出来**，不吞。"""
+    try:
+        import notify
+        st_ = None
+        try:
+            from datasteward_gate import store
+            st_ = store()
+        except Exception:                                    # noqa: BLE001
+            pass
+        to = _resolve_to(st_, decider)
+        lines = [summary, "", f"我的建议：{recommend} —— {reason}", "",
+                 "请点其中一个链接（正文回复不算数）："]
+        for o, url in notify.choice_links(qid, decider, opts):
+            mark = "（我建议这个）" if o.get("recommended") else ""
+            lines.append(f'- {o["label"]}{mark}\n  {url}')
+        notify.get().send_notice(to, "[数据管家] 阶段提案：下一步怎么走",
+                                 "\n".join(lines))
+        return "已发出"
+    except Exception as e:                                   # noqa: BLE001
+        return f"**但没发出去**：{type(e).__name__}: {str(e)[:80]}"
+
+
+_SCHEMAS.update({
+    "propose_stage_decision": {
+        "name": "propose_stage_decision",
+        "description": (
+            "一轮做完时把小结变成给负责人的**提案**：三选一（继续追未完成 / "
+            "开始清洗轮 / 放弃剩下的），必须附上你的建议和理由。"
+            "只发问，不改任何东西 —— 阶段转换本身是人的决策点。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "summary": {"type": "string",
+                        "description": "这一轮的小结：接了多少、卡在谁那里、"
+                                       "发现了什么问题。人靠它做判断"},
+            "recommend": {"type": "string",
+                          "enum": sorted(_stage_options()[1]),
+                          "description": "你建议选哪个。必须给"},
+            "reason": {"type": "string", "description": "为什么建议这个"},
+            "decider": {"type": "string",
+                        "description": "谁拍板，角色名，默认 sponsor"},
+            "run_id": {"type": "string", "description": "任务线 id，可空"}},
+            "required": ["summary", "recommend", "reason"]},
+    },
+})
+
+
 _HANDLERS = {
+    "define_semantics": _define_semantics,
+    "sql_query": _sql_query,
+    "describe_asset": _describe_asset,
+    "connect_source": _connect_source,
+    "propose_stage_decision": _propose_stage_decision,
     "apply_cleaning_rule": _apply_cleaning_rule,
     "publish_gold": _publish_gold,
     "grant_read": _grant_read,

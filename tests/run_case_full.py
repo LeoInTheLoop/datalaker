@@ -80,13 +80,18 @@ NO_AUTHORITY = {p["email"] for p in case["people"] if p.get("role") is None}
 
 # ---------------------------------------------------------------- 建线
 def lines_from_case():
-    """每张表一条线。**不合并** —— 它们属于不同的人、不同的资产。"""
+    """每张表一条线。**不合并** —— 它们属于不同的人、不同的资产。
+
+    键名用 `source`（工具的实参名），不是 `source_id`。门禁按 args 算
+    动作指纹，两边名字不一样就认不出是同一件事 —— 同一张表会被记成
+    两条线，WIP 被自己撑爆，实测 18 条排队、一条都批不下来。
+    """
     out = []
     for s in case["sources"]:
         if s.get("kind") in ("saas", "email_attachment"):
             continue                    # 导出路径单独走，不占审批线
         for t in s.get("tables", []):
-            out.append({"source_id": s["id"], "table": t})
+            out.append({"source": s["id"], "table": t})
     return out
 
 
@@ -94,7 +99,7 @@ LINES = lines_from_case()
 print(f"\n=== 建线：{len(LINES)} 条 ===\n")
 for spec in LINES:
     rid = runs.create("ingest_table", spec,
-                      note=f"{spec['source_id']}.{spec['table']}")
+                      note=f"{spec['source']}.{spec['table']}")
     traj.tool_call("create_run", spec, rid)
 
 
@@ -200,7 +205,7 @@ def _ask_llm(email, items):
 
 
 def _what(items):
-    return "、".join(f'{r["params"]["source_id"]}.{r["params"]["table"]}'
+    return "、".join(f'{r["params"]["source"]}.{r["params"]["table"]}'
                      for r, _ in items)
 
 
@@ -483,7 +488,7 @@ import sync                                                    # noqa: E402
 # **只算本次 run 完成的线**。approvals.db 每次跑都重建，所以 runs 表里
 # 的 done 就是这一次的战果；直接扫 lake 会把上一次留下的表也算进来，
 # 出现「完成 6 条却有 15 张表」这种看着还挺好的虚报。
-mine = {f'{r["params"]["source_id"]}__{r["params"]["table"]}'
+mine = {f'{r["params"]["source"]}__{r["params"]["table"]}'
         for r in runs.by_status("done")}
 bronze = {}
 try:

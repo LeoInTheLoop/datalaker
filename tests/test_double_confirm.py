@@ -15,7 +15,15 @@ for suf in ("", "-wal", "-shm"):
     if os.path.exists(DB + suf): os.remove(DB + suf)
 os.environ.update(DATASTEWARD_DB=DB, DATASTEWARD_TOKEN_SECRET="dc-secret",
                   REQUIRE_DOUBLE_CONFIRM="1", APPROVAL_PORT="8791",
-                  APPROVAL_BASE_URL="http://127.0.0.1:8791", NOTIFY_CHANNEL="email")
+                  APPROVAL_BASE_URL="http://127.0.0.1:8791",
+                  # **走 outbox，不走真 Gmail。** 这一组测的是「第一次点击
+                  # 只发确认信、不落库；第二次才落」—— 那是本地逻辑，与
+                  # 通道无关。挂在真 Gmail 上的代价实测过：发信配额一超
+                  # （HttpError 429 user-rate limit），确认信发不出去，
+                  # 整条路返回 503，这一组就红 —— 而机制本身好好的。
+                  # 「通知失败 ≠ 门禁打开」那条另有 test_mail_isolation 专测。
+                  NOTIFY_CHANNEL="outbox",
+                  NOTIFY_OUTBOX="/tmp/dl_dc_outbox.jsonl")
 os.environ.pop("DATASTEWARD_DSN", None)
 sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, "services"))
 sys.path.insert(0, os.path.join(ROOT, "plugins"))

@@ -48,6 +48,33 @@ def call(payload, timeout=60):
 
 print(f"\n=== 模型端点验证 ===\n  endpoint: {BASE}\n  model:    {MODEL}\n")
 
+# **额度耗尽 / 限流不是代码坏了。** 这一组打的是外部付费端点，
+# 余额没了就测不了 —— 那时候整组红会淹掉真正的回归失败。
+# 但**必须喊出来**，且必须是探活走干活同一条路（真发一次请求）：
+# 静默跳过正是这个项目摔过六次的形状。
+def _endpoint_unavailable() -> str:
+    try:
+        call({"model": MODEL, "messages": [{"role": "user", "content": "hi"}],
+              "max_tokens": 4}, timeout=30)
+        return ""
+    except urllib.error.HTTPError as e:
+        body = e.read()[:300].decode(errors="replace")
+        if e.code in (402, 403, 429) and any(
+                k in body.lower() for k in ("quota", "balance", "rate", "billing",
+                                            "exhaust", "insufficient")):
+            return f"HTTP {e.code}: {body[:160]}"
+        return ""
+    except Exception:                                         # noqa: BLE001
+        return ""
+
+
+_why = _endpoint_unavailable()
+if _why:
+    print(f"  SKIP  端点额度/限流不可用，整组跳过 —— **这不是代码问题**\n"
+          f"        {_why}\n"
+          f"        余额恢复后必须重跑：tool calling 是整个方案的前提。\n")
+    sys.exit(0)
+
 # 1. 基本连通
 try:
     r = call({"model": MODEL, "messages": [{"role": "user", "content": "回答一个字：好"}],

@@ -12,13 +12,24 @@ CREATE TABLE IF NOT EXISTS approvals (
   approver     text NOT NULL,
   created_at   timestamptz NOT NULL DEFAULT now(),
   expires_at   timestamptz NOT NULL,    -- 72h，与 Escalation 时间线对齐
-  used_at      timestamptz              -- 消费即失效，防重放
+  used_at      timestamptz,             -- 消费即失效，防重放
+  -- 下面六列 R2 就加进 SQLite 侧了，PG 侧一直没跟上（M5 才发现）。
+  -- 缺它们的后果不是「少个字段」：`ask()` 的 INSERT 直接崩，
+  -- 于是 Postgres 后端上**提问、升级、放弃三条路全断**，
+  -- 而表集合看着是齐的 —— 与 R3 那次「少建五张表」是同一个坑的列级版。
+  kind             text NOT NULL DEFAULT 'approval',  -- approval | question
+  abandoned_at     timestamptz,          -- 超时放弃：退出活跃队列但不删除
+  escalation_level integer NOT NULL DEFAULT 0,
+  options          text,                 -- JSON: [{key,label,desc,recommended}]
+  question         text,
+  evidence         text
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
   id           uuid PRIMARY KEY,
   approval_id  uuid NOT NULL REFERENCES approvals(id),
-  decision     text NOT NULL CHECK (decision IN ('approve','deny')),
+  decision     text NOT NULL CHECK (decision IN ('approve','deny','answered')),
+  chosen       text,                    -- question 型：人选中的那个选项 key
   approver     text NOT NULL,
   decided_at   timestamptz NOT NULL DEFAULT now(),
   token_jti    text UNIQUE NOT NULL,    -- 令牌一次性：重放被唯一约束挡住
@@ -36,7 +47,11 @@ CREATE INDEX IF NOT EXISTS ix_dec_appr  ON decisions(approval_id);
 CREATE ROLE agent_role LOGIN PASSWORD :'agent_password';
 GRANT CONNECT ON DATABASE steward TO agent_role;
 GRANT USAGE ON SCHEMA public TO agent_role;
-GRANT INSERT (id, run_id, action_hash, tool_name, args_json, approver, created_at, expires_at)
+-- 提问（kind/options/question/evidence）是 Agent 侧发起的动作，要授。
+-- **escalation_level 与 abandoned_at 不授**：那两列由催办服务改，
+-- Agent 能改的话就可以把自己的待办标成「已放弃」来绕开 WIP 限制。
+GRANT INSERT (id, run_id, action_hash, tool_name, args_json, approver, created_at,
+              expires_at, kind, options, question, evidence)
       ON approvals TO agent_role;
 GRANT UPDATE (used_at) ON approvals TO agent_role;
 GRANT SELECT ON approvals, decisions TO agent_role;
@@ -126,6 +141,34 @@ CREATE TABLE IF NOT EXISTS events (
 );
 GRANT SELECT, INSERT ON events TO agent_role;
 GRANT USAGE, SELECT ON SEQUENCE events_seq_seq TO agent_role;
+
+-- 授权源清单（readme 8 凭证层）：**谁告诉过我们这个源存在**。
+-- 源是人给的，不是 Agent 自己找的 —— 未经授权的扫描本身就是违规。
+-- 列级约束与 decisions 同源：**Agent 只有 SELECT**，写在人那一侧。
+-- 同进程写得了的话，「没人提过的库碰不到」就只是一句口号。
+CREATE TABLE IF NOT EXISTS source_grants (
+    source_id   TEXT PRIMARY KEY,
+    revealed_by TEXT NOT NULL,
+    revealed_at DOUBLE PRECISION NOT NULL,
+    note        TEXT
+);
+GRANT SELECT ON source_grants TO agent_role;
+GRANT SELECT, INSERT ON source_grants TO approver_role;
+
+-- 源系统凭证（readme 8 凭证层）：**agent_role 连 SELECT 都没有。**
+-- 人在邮件里给的连接串经 connect_source（L3，批准后）落在这里；
+-- 之后 Agent 只提交 {source_id, sql}，DSN 只有 Connector 那一侧读得到。
+-- 这是「Agent 不持有 DSN」从架构注释变成列级机制的那一步。
+CREATE TABLE IF NOT EXISTS source_secrets (
+    source_id     TEXT PRIMARY KEY,
+    dsn           TEXT NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'postgres',
+    approval_id   TEXT NOT NULL,
+    registered_by TEXT NOT NULL,
+    registered_at DOUBLE PRECISION NOT NULL
+);
+-- 故意**不写** GRANT ... TO agent_role —— 那正是这张表的全部意义。
+GRANT SELECT, INSERT, UPDATE ON source_secrets TO approver_role;
 
 -- 业务知识沉淀：Agent 可更新（口径会修订）。
 -- 与 decisions 的只读约束是两回事——那张表关乎审批权威，这张不。

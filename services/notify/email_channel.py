@@ -3,7 +3,7 @@ import base64
 import sys
 from email.message import EmailMessage
 
-from . import E, ROOT, Notifier, approval_links
+from . import cfg, E, ROOT, Notifier, approval_links
 
 HTML = """<div style="font:15px/1.65 -apple-system,system-ui,sans-serif;color:#1a1a1a;
 max-width:34rem">
@@ -44,7 +44,7 @@ class EmailNotifier(Notifier):
     def _build(self, to, subject, text, html):
         m = EmailMessage()
         m["To"] = to
-        m["From"] = E.get("MAIL_FROM", "") or E.get("SMTP_USER", "")
+        m["From"] = cfg("MAIL_FROM", "") or cfg("SMTP_USER", "")
         m["Subject"] = subject
         m.set_content(text)
         m.add_alternative(html, subtype="html")
@@ -80,24 +80,40 @@ class EmailNotifier(Notifier):
 
     # ---------------- 传输 ----------------
     def _send(self, msg):
-        if E.get("MAIL_TRANSPORT", "smtp") == "gmail_api":
+        # **明确说了要打本地模拟邮箱，就绝不能走 Gmail API。**
+        # 只设 SMTP_* 而漏了 MAIL_TRANSPORT，信就真发到公网上去了 ——
+        # 演练与 eval 每天发几十封，撞限流是小事，发错人是大事。
+        # 这一条实测撞过：`SMTP_SECURITY=plain` 都设了，`.env` 里那句
+        # `MAIL_TRANSPORT=gmail_api` 照样把它接管了。
+        if (cfg("MAIL_TRANSPORT", "smtp") == "gmail_api"
+                and cfg("SMTP_SECURITY", "").lower() != "plain"):
             return self._gmail(msg)
         return self._smtp(msg)
 
     def _smtp(self, msg):
         import smtplib
-        user, pw = E.get("SMTP_USER", ""), E.get("SMTP_PASS", "")
-        if not (user and pw):
+        user, pw = cfg("SMTP_USER", ""), cfg("SMTP_PASS", "")
+        # **明文 SMTP 是给本地模拟邮箱用的**（演练与 eval 打到 GreenMail）。
+        # 真实收件服务器一律要 STARTTLS + 登录，所以这条路必须**显式**开：
+        # `SMTP_SECURITY=plain`。默认仍是加密+认证 —— 忘了配的后果应该是
+        # 「发不出去」，不该是「明文发到了公网上」。
+        plain = cfg("SMTP_SECURITY", "").lower() == "plain"
+        if not plain and not (user and pw):
             raise RuntimeError("SMTP_USER / SMTP_PASS 未配置")
         if not msg["From"]:
             del msg["From"]
-            msg["From"] = user
-        with smtplib.SMTP(E.get("SMTP_HOST", "smtp.gmail.com"),
-                          int(E.get("SMTP_PORT", "587")), timeout=20) as s:
-            s.starttls()
-            s.login(user, pw)
+            msg["From"] = user or cfg("MAIL_FROM", "claw@acme.test")
+        host = cfg("SMTP_HOST", "smtp.gmail.com")
+        if plain and host not in ("127.0.0.1", "localhost", "greenmail"):
+            raise RuntimeError(
+                f"SMTP_SECURITY=plain 只允许打到本地模拟邮箱，收到 host={host}")
+        with smtplib.SMTP(host, int(cfg("SMTP_PORT", "587")), timeout=20) as s:
+            if not plain:
+                s.starttls()
+                s.login(user, pw)
             s.send_message(msg)
-        return {"channel": "email", "transport": "smtp", "to": msg["To"]}
+        return {"channel": "email", "transport": "smtp",
+                "to": msg["To"], "plain": plain}
 
     def _gmail(self, msg):
         from google.oauth2.credentials import Credentials

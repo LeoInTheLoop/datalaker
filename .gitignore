@@ -39,3 +39,9 @@ spike/
 # 插件本身（.hermes/plugins/）是代码，要入库。
 .hermes/home/
 .hermes/test-home/
+
+# Hermes 运行时目录：配置里带 api_key，会话与库都是一次性的
+# 网关入站测试的临时 home
+.hermes/gw-home/
+# 手工演练的临时 home（含 api_key 与会话）
+.hermes/live-home/

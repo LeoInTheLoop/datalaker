@@ -294,6 +294,324 @@ try:
 finally:
     os.environ.pop("PER_PERSON_WIP_LIMIT", None)
 
+# 23. 恢复发生在新会话里：收尾按动作指纹找线，不按会话 id
+#
+#     cron 唤醒的 agent run 有新的 task_id，而线是旧会话记的。
+#     M2 定过「票据只绑动作指纹」——登记表不跟上的话，恢复成功后
+#     原线永远挂在 waiting_human，monitor 每分钟为它白白唤醒一次模型。
+os.environ["PER_PERSON_WIP_LIMIT"] = "99"
+os.environ["GLOBAL_WIP_LIMIT"] = "99"
+try:
+    _xa = {"table": "territories", "source": "northwind"}
+    gate("ingest_table", _xa, "session-old")          # 旧会话：挂起并记线
+    _x = runs.get("session-old")
+    check("旧会话挂起了线", _x and _x["status"] == "waiting_human",
+          str(_x and _x["status"]))
+
+    # 新会话里同一动作成功落地（批准后恢复的形状）—— audit 收尾
+    import plugins.datasteward_gate as _tg2
+    _tg2.audit("ingest_table", _xa, result="已落 5 行", status="DONE",
+               task_id="session-new")
+    _x2 = runs.get("session-old")
+    check("**收尾找的是动作指纹，不是会话 id**：旧线变 done",
+          _x2 and _x2["status"] == "done", str(_x2 and _x2["status"]))
+
+    # 挂起侧同理：老线还在等时，新会话再撞同一动作不该开第二条线
+    _ya = {"table": "region", "source": "northwind"}
+    gate("ingest_table", _ya, "session-a")
+    gate("ingest_table", _ya, "session-b")
+    check("同一件事第二个会话再挂起：不开第二条线",
+          not runs.get("session-b") and bool(runs.get("session-a")),
+          f'a={bool(runs.get("session-a"))} b={bool(runs.get("session-b"))}')
+
+    # 但**不同的动作**必须还是各自一条线 —— 指纹不同就不该混
+    _za = {"table": "suppliers", "source": "northwind"}
+    gate("ingest_table", _za, "session-c")
+    check("不同动作仍然各自一条线（指纹不同不合并）",
+          bool(runs.get("session-c")), str(runs.get("session-c") or ""))
+finally:
+    os.environ.pop("PER_PERSON_WIP_LIMIT", None)
+    os.environ.pop("GLOBAL_WIP_LIMIT", None)
+
+print("\n=== 24. 授权源清单：源是人给的，不是 Agent 自己找的 ===\n")
+
+# v2 case 的「越权发现」红线落成机制：没人提过的库，门禁直接拒。
+# **清单为空 = 未启用**（开发形态沿用引导源），一旦有人写过一行就是
+# 完整白名单 —— 与 Hermes 自己的 allowlist 判据同款。判据写在门禁里，
+# 不是写在环境变量里：一个 `if os.environ` 就是门禁上的一个开关。
+_before = gate("list_source_tables", {"source": "finance_sheet"}, "src-0")
+check("清单为空时不生效（不影响既有的开发形态）", _before is None,
+      str(_before))
+
+admin.grant_source("acme", "wang@acme.com", "day1.5 王姐提到的")
+check("人给过的源照常放行",
+      gate("list_source_tables", {"source": "acme"}, "src-1") is None)
+
+_trap = gate("list_source_tables", {"source": "finance_sheet"}, "src-2")
+check("**没人提过的源被拒**（未经授权的扫描不是勤快，是违规）",
+      is_block(_trap) and "UNGRANTED_SOURCE" in _trap["message"],
+      str(_trap)[:80])
+
+# 挡住了还不够：这次尝试本身是一次判断失误，判分要数得到。
+_ev = [e for e in store().events("sources")
+       if e[1] == "UNGRANTED_SOURCE_ATTEMPT"]
+check("尝试留了痕（挡住 ≠ 没发生过，判分要数得到）",
+      any("finance_sheet" in str(e[2]) for e in _ev), str(_ev)[:90])
+
+# 清单管的是「哪个源」，不是「哪张表」—— 已授权源里的新表照常走原有分级。
+check("清单只管源，表的分级不受影响",
+      is_block(gate("ingest_table", {"source": "acme", "table": "fin_invoice"},
+                    "src-3")),
+      "L3 仍然要审批")
+
+# 换工具名绕不过：判据在参数上，不在工具名上（与 ARG_DENY 同一条思路）。
+check("换个工具也绕不过（判据在参数，不在工具名）",
+      all(is_block(gate(t, {"source": "finance_sheet", "table": "x"}, "src-4"))
+          for t in ("get_table_metadata", "profile_table", "ingest_table")))
+
+# **但「把源加进清单」的那个动作不能被清单挡住** —— 否则第一个源之后
+# 再也没有第二个进得来。实测踩过：发现覆盖率永远停在第一个源。
+# 它不是后门：connect_source 是 L3，要人批。
+_cs = gate("connect_source",
+           {"source_id": "olist_raw", "dsn": "postgresql://u:p@h:5432/olist_raw"},
+           "src-5")
+check("**接入新源不被「该源尚未接入」挡死**（这条是死锁的解）",
+      is_block(_cs) and "UNGRANTED_SOURCE" not in _cs["message"],
+      _cs["message"][:60])
+check("它走的仍是 L3 审批（豁免的只有清单这一关）",
+      "PENDING_APPROVAL" in _cs["message"])
+
+# **Agent 侧写不进这张表** —— 与 decisions 同一条原则（铁律 2 的形状）。
+# SQLite 没有列级 GRANT，所以这条钉的是「代码里没有那条写路径」：
+# 生产的 Postgres 侧由 init-steward.sql 的 GRANT 兜底。
+import inspect as _insp
+import plugins.datasteward_gate as _tg3
+check("**门禁只读清单，不写清单**（写在人那一侧）",
+      "grant_source" not in _insp.getsource(_tg3),
+      "门禁代码里出现了 grant_source")
+
+print("\n=== 25. 轮级的门：开不开清洗轮是人拍板 ===\n")
+
+# `apply_cleaning_rule` 本来就是 L2（**每条规则**要 steward 批口径）。
+# 这里是另一个维度：**这一轮该不该开**。两个门叠加，缺一不可 ——
+# 只有前者的话，Agent 做完 bronze 可以自己接着往下洗。
+_CA = {"source": "acme", "table": "fin_invoice"}
+
+# 判据是「发过阶段提案 = 这个部署在用轮制」。没发过就不改变既有行为，
+# 否则 R1–R4 的 eval case 会被一条 v2 的新规则全打红。
+_r0 = gate("apply_cleaning_rule", _CA, "round-0")
+check("没用轮制的部署行为不变（仍是既有的 L2 审批路径）",
+      is_block(_r0) and "PENDING_APPROVAL" in _r0["message"], _r0["message"][:50])
+
+_qid, _created = admin.ask("round", "__stage__", "第一周小结……下一步三选一",
+                           [{"key": "start_silver", "label": "开清洗轮",
+                             "recommended": True}], "sponsor", "理由在此")
+check("阶段提案落成了 question 型记录", _created and bool(_qid))
+check("提案计数看得见（门禁靠它判断这个部署在用轮制）",
+      admin.stage_proposals() >= 1, str(admin.stage_proposals()))
+
+_r1 = gate("apply_cleaning_rule", _CA, "round-1")
+check("**提案发了但没人拍板 → 不许洗**",
+      is_block(_r1) and "ROUND_NOT_OPEN" in _r1["message"], _r1["message"][:60])
+check("拒绝消息告诉模型别重试（挂起语义与 PENDING 一致）",
+      "不要重试" in _r1["message"])
+
+# `decisions.chosen` 这一列 R2 就建好了，**从来没人往里写** ——
+# 「人选了哪个」只活在邮件正文里，判分读不到。补上写侧。
+check("没拍板时查不到这条决定", admin.stage_choice("start_silver") is None)
+admin.decide(_qid, "answered", "boss@acme.com", chosen="start_silver")
+_at = admin.stage_choice("start_silver")
+check("**选项落进了 decisions.chosen**（判分的 silver_gated 读它）",
+      isinstance(_at, float) and _at > 0, str(_at))
+check("选了别的选项不算开轮（chosen 是有区分度的）",
+      admin.stage_choice("abandon_rest") is None)
+
+_r2 = gate("apply_cleaning_rule", _CA, "round-2")
+check("拍板之后轮开了 —— 回到既有的 L2 审批路径（两个门叠加）",
+      is_block(_r2) and "PENDING_APPROVAL" in _r2["message"], _r2["message"][:50])
+
+# 轮级的门只管 silver 侧动作，别的工具不受影响。
+check("轮级的门不误伤别的工具",
+      gate("get_table_metadata", {"table": "orders"}, "round-3") is None)
+
+# 发提案这件事本身不需要审批 —— 否则「发问」也要先被批一次，套娃。
+from plugins.datasteward_gate.policy import POLICY as _P, Level as _L
+check("**阶段提案本身是 L1**（只发问、不改东西，与 propose_cleaning 同构）",
+      _P.get("propose_stage_decision") == (_L.L1, None),
+      str(_P.get("propose_stage_decision")))
+
+print("\n=== 26. 一次会话里接五张表 = 五条线，不是一条 ===\n")
+
+# 早先 `_track_suspend` 先按 task_id 找：会话 id 已存在就直接 suspend，
+# 于是同一会话里第二个动作往后**全部悄悄合并进第一条线**。
+# 登记表里看着只发起了一个动作，而实际挂了五个待批 ——
+# 大 case 实测时 18 张表只记下 8 条，就是这么丢的。
+os.environ["PER_PERSON_WIP_LIMIT"] = "99"
+os.environ["GLOBAL_WIP_LIMIT"] = "99"
+try:
+    _n0 = sum(len(runs.by_status(s)) for s in
+              ("running", "waiting_human", "done", "abandoned", "failed"))
+    _tbls = ["t_alpha", "t_beta", "t_gamma", "t_delta", "t_epsilon"]
+    for _t in _tbls:
+        gate("ingest_table", {"source": "acme", "table": _t}, "one-session")
+    _n1 = sum(len(runs.by_status(s)) for s in
+              ("running", "waiting_human", "done", "abandoned", "failed"))
+    check("**五个动作记出五条线**（会话只是线默认的名字，不是身份）",
+          _n1 - _n0 == 5, f"新增 {_n1 - _n0} 条")
+
+    # 每条线的参数必须是它自己的，不能都指向第一张表。
+    _params = {(r["params"] or {}).get("table")
+               for r in runs.by_status("waiting_human")}
+    check("每条线记的是自己那张表（没有被第一条覆盖）",
+          set(_tbls) <= _params, str(sorted(_params & set(_tbls))))
+
+    # 同一动作再来一次仍然不开第二条 —— 指纹才是身份。
+    gate("ingest_table", {"source": "acme", "table": "t_alpha"}, "another-session")
+    _n2 = sum(len(runs.by_status(s)) for s in
+              ("running", "waiting_human", "done", "abandoned", "failed"))
+    check("同一动作换个会话再来，仍然不开第二条", _n2 == _n1, f"{_n2} vs {_n1}")
+finally:
+    os.environ.pop("PER_PERSON_WIP_LIMIT", None)
+    os.environ.pop("GLOBAL_WIP_LIMIT", None)
+
+print("\n=== 27. 凭证不参与动作身份 ===\n")
+
+# 「接入 acme」是一个动作；换个口令重连仍然是同一个动作。
+# 把 dsn 算进指纹的后果实测踩过：恢复时模型调 connect_source(source_id=acme)
+# 不带 dsn（工具会自己从审批里取回），指纹对不上原票据 ——
+# 于是又发一份新审批、又开一条新线，人批过的那次白批了。
+# **除凭证外其余字段必须一致** —— 否则测的是「少个字段指纹会变」，
+# 那是另一回事（而且它本来就该变）。
+# 实测第一次调用带的是这些 —— 修饰字段一个不少。恢复时模型只写 source_id。
+_a1 = {"source_id": "acme", "dsn": "postgresql://u:p1@h/acme",
+       "given_by": "it@acme.com", "description": "acme 财务库，含两张表"}
+_a2 = {"source_id": "acme"}
+_a3 = {"source_id": "acme", "dsn": "postgresql://u:CHANGED@h/acme"}
+check("**带不带口令是同一个动作**（恢复时对得上原票据）",
+      action_hash("connect_source", _a1) == action_hash("connect_source", _a2),
+      "指纹不同 → 恢复会再发一份审批")
+check("换了口令还是同一个动作",
+      action_hash("connect_source", _a1) == action_hash("connect_source", _a3))
+check("换了源就不是同一个动作了（剔除修饰字段 ≠ 什么都不看）",
+      action_hash("connect_source", _a1)
+      != action_hash("connect_source", {"source_id": "other"}))
+# **一个身份字段都没给到时退回全字段。** 不退的话 clean 是空字典，
+# 「同一个工具的任何调用」都算同一个动作 —— 参数完全不同的线会被
+# 幂等判重吃掉。实测撞过（三条线只剩一条）。
+check("身份字段一个都没给到时，按全字段算（不退化成只认工具名）",
+      action_hash("ingest_table", {"t": "a"})
+      != action_hash("ingest_table", {"t": "b"}))
+
+# 没声明身份字段的工具走默认：全字段（除凭证）。**宁可吵，不可松。**
+# 用 L1 的 profile_table —— 它不需要审批，也就不需要声明身份。
+check("没声明身份字段的工具仍按全字段算（默认最严）",
+      action_hash("profile_table", {"source": "a", "table": "t"})
+      != action_hash("profile_table", {"source": "a", "table": "t", "x": 1}))
+
+# 反过来：指纹里不该留下口令的痕迹。
+check("指纹不随口令变（审批表里不藏口令的哈希）",
+      action_hash("connect_source", _a1) == action_hash("connect_source", _a3))
+
+# 端到端：批准之后不带 dsn 再调，应当消费票据而不是重新挂起。
+_ca = {"source_id": "live_src", "dsn": "postgresql://u:p@h/live_src"}
+_r1 = gate("connect_source", _ca, "cred-1")
+check("第一次调用被挂起", is_block(_r1) and "PENDING_APPROVAL" in _r1["message"])
+_row = admin.db.execute("SELECT id FROM approvals WHERE tool_name='connect_source'"
+                        " ORDER BY created_at DESC LIMIT 1").fetchone()
+admin.decide(_row[0], "approve", "sponsor@acme.com")
+# 恢复时模型**顺手换了个 dsn**（现实里更可能是它自己编了一个）。
+# 放行的形式是 modify —— 门禁把人批准的那份参数回填了。
+_ok2 = gate("connect_source",
+            {"source_id": "live_src", "dsn": "postgresql://attacker:x@evil/db"},
+            "cred-2")
+check("**批准后再调：放行，不再发新审批**", not is_block(_ok2), str(_ok2)[:70])
+check("**执行的是人看过的那一份参数，不是模型这次给的**",
+      isinstance(_ok2, dict) and _ok2.get("action") == "modify"
+      and _ok2["args"].get("dsn") == _ca["dsn"]
+      and "evil" not in _ok2["args"].get("dsn", ""),
+      str(_ok2.get("args", {}).get("dsn"))[:60] if isinstance(_ok2, dict) else str(_ok2))
+
+# 票据一次性：用完了还得重新走审批。
+check("票据用完了要重新审批（回填不等于长期通行证）",
+      is_block(gate("connect_source", {"source_id": "live_src"}, "cred-3")))
+
+print("\n=== 28. WIP 满了也不能挡住已经批准的动作 ===\n")
+
+# WIP 限制的是「新发起的请求会不会淹没人」。已经批过的动作不产生新打扰。
+# **顺序反了会死锁**：待办堆到上限时恢复也被拒，而堆着的那些待办
+# 正是这些线自己，谁也推不动。实测撞上：6 张票已批准未用，
+# 全被「steward 当前已有 3 件待办」挡在门外。
+# 先在不限 WIP 时发起并批准一条，再把 WIP 收紧到已满 —— 这才是
+# 真实的顺序：人批的时候队列还没满，等轮到恢复时队列已经堆起来了。
+os.environ["PER_PERSON_WIP_LIMIT"] = "99"
+os.environ["GLOBAL_WIP_LIMIT"] = "99"
+_wa = {"asset": "acme.t.c", "key": "null_meaning", "value": "空=合法",
+       "confirmed_by": "wang@acme.com"}
+_w1 = gate("define_semantics", _wa, "wip-1")
+check("第一条：正常挂起", is_block(_w1) and "PENDING_APPROVAL" in _w1["message"],
+      str(_w1)[:60])
+_wrow = admin.db.execute(
+    "SELECT id FROM approvals WHERE tool_name='define_semantics'"
+    " ORDER BY created_at DESC LIMIT 1").fetchone()
+if _wrow:
+    admin.decide(_wrow[0], "approve", "steward@acme.com")
+
+os.environ["PER_PERSON_WIP_LIMIT"] = "1"
+os.environ["GLOBAL_WIP_LIMIT"] = "1"
+try:
+    # 队列已满：**新的**动作该被挡。
+    _w2 = gate("define_semantics", {**_wa, "key": "brand_new"}, "wip-2")
+    check("队列满时新动作被 WIP 挡住（限制本身还在起作用）",
+          is_block(_w2) and "WIP_LIMIT" in _w2["message"], _w2["message"][:50])
+
+    # **关键**：那条已经批了，队列满不该挡住它。
+    _w3 = gate("define_semantics", _wa, "wip-3")
+    check("**已批准的动作在 WIP 满时照样放行**（否则恢复彻底死锁）",
+          not is_block(_w3), str(_w3)[:80])
+finally:
+    os.environ.pop("PER_PERSON_WIP_LIMIT", None)
+    os.environ.pop("GLOBAL_WIP_LIMIT", None)
+
+print("\n=== 29. 每个要审批的动作都得说清「身份是什么」 ===\n")
+
+# 恢复发生在新会话：模型只知道「推进哪张表的清洗」，不会把当初那份
+# approved_rules / pk / silver_table 一字不差再列一遍。身份字段没声明
+# 的话指纹必然对不上 —— 又发一份新审批、又开一条新线，人批过的白批了。
+# **这个形状踩了四次**：connect_source(dsn) → define_semantics(description)
+# → define_semantics(默认值 key) → apply_cleaning_rule(approved_rules)。
+from plugins.datasteward_gate.policy import (IDENTITY_KEYS,    # noqa: E402
+                                             POLICY as _POLI, Level as _LV)
+
+_needs_identity = {t for t, (lv, _) in _POLI.items()
+                   if _LV.L2 <= lv < _LV.L4}
+_no_identity = sorted(_needs_identity - set(IDENTITY_KEYS))
+check("**所有要审批的动作都声明了身份字段**（不声明 = 恢复必然对不上）",
+      not _no_identity,
+      f"没声明的：{_no_identity} —— 它们恢复时会重复发审批")
+
+# 身份字段必须真的是「作用在什么对象上」，不能把执行细节算进去。
+_leaky = {t: k for t, k in IDENTITY_KEYS.items()
+          if {"approved_rules", "dsn", "value", "sql", "description"} & set(k)}
+check("身份字段里没有执行细节（那会让恢复永远对不上）", not _leaky, str(_leaky))
+
+# 端到端：批准一份带执行细节的清洗，恢复时只给 (source, table)。
+_cl = {"source": "acme", "table": "t_clean", "approved_rules": ["enum_drift"],
+       "pk": "id", "bronze_table": "acme__t_clean"}
+_c1 = gate("apply_cleaning_rule", _cl, "clean-1")
+check("清洗第一次被挂起", is_block(_c1) and "PENDING_APPROVAL" in _c1["message"],
+      str(_c1)[:60])
+_crow = admin.db.execute(
+    "SELECT id FROM approvals WHERE tool_name='apply_cleaning_rule'"
+    " ORDER BY created_at DESC LIMIT 1").fetchone()
+if _crow:
+    admin.decide(_crow[0], "approve", "steward@acme.com")
+_c2 = gate("apply_cleaning_rule", {"source": "acme", "table": "t_clean"}, "clean-2")
+check("**恢复时只给 (source, table) 就对得上票**", not is_block(_c2), str(_c2)[:70])
+check("**回填的规则是人批准的那组**（模型在恢复这一步加不了新规则）",
+      isinstance(_c2, dict) and _c2["args"].get("approved_rules") == ["enum_drift"]
+      and _c2["args"].get("pk") == "id",
+      str(_c2.get("args", {}))[:90] if isinstance(_c2, dict) else str(_c2))
+
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 if bad:
     print("失败项:", ", ".join(bad))

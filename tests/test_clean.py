@@ -5,6 +5,7 @@
 看起来很能干，直到财务发现报表少了一个亿。
 """
 import os
+import pathlib
 import subprocess
 import sys
 import uuid
@@ -119,6 +120,38 @@ else:
     chk("没有台账引用的规则不登记",
         clean.register_rules([{"column": "c", "issue": "unknown", "rule": "r"}],
                              {}) == [])
+
+print("\n=== 标准形按人定的口径来 ===\n")
+
+# `enum_drift` 的注释从 R2 起就写着「标准形取哪个**要人定**」，
+# 而实现一直写死 `lower()` —— 人定了全大写也照样洗成小写。
+# 口径确实沉淀在 asset_semantics 里，只是**没有人去读**：
+# 「闸门读的量没人写」的镜像 —— 量写了，闸门不读。
+_semdb = "/tmp/dl_clean_sem.db"
+for _suf in ("", "-wal", "-shm"):
+    _f = pathlib.Path(_semdb + _suf)
+    if _f.exists():
+        _f.unlink()
+_saved_db = os.environ.get("DATASTEWARD_DB")
+os.environ["DATASTEWARD_DB"] = _semdb
+try:
+    from plugins.datasteward_gate.approvals import Store as _St
+    _s2 = _St(_semdb, readonly=False)
+    chk("没定过口径时返回 None（不猜一个默认值）",
+          clean.normalized_case("a.b", "c") is None)
+    _s2.remember("a.b.c", "normalize_rule", "统一成全大写 PAID/VOID", "wang")
+    chk("**人定了全大写就返回 upper**", clean.normalized_case("a.b", "c") == "upper")
+    _s2.remember("a.b.d", "normalize_rule", "统一成小写", "wang")
+    chk("人定了小写就返回 lower", clean.normalized_case("a.b", "d") == "lower")
+    # 两种都提到 = 看不懂，**别猜**：猜错的方向是「按你没说过的规矩改了你的数据」。
+    _s2.remember("a.b.e", "normalize_rule", "大写还是小写你们定", "wang")
+    chk("看不懂就返回 None（宁可不洗，不许猜）",
+          clean.normalized_case("a.b", "e") is None)
+finally:
+    if _saved_db is None:
+        os.environ.pop("DATASTEWARD_DB", None)
+    else:
+        os.environ["DATASTEWARD_DB"] = _saved_db
 
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 if bad:

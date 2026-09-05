@@ -94,49 +94,47 @@ Data Owner **2–3 小时**。而 Steward 公认的四个痛点里，**三个是
 
 ## 3. 架构
 
+> 现行形态（重排后，权威版在 [docs/restructure.md](docs/restructure.md) 第 1 节）。
+> 早期版本画的是自建 HARNESS 七件套 —— 那些能力没有消失，
+> 落点变了：loop / 邮件 / 会话 / 记忆由 Hermes 上游提供，
+> Event Log·挂起·升级·预算落在 claw 插件的钩子与 cron 里。
+
 ```
-                    Data Steward Claw
-                            │
-        ┌───────────────────┴───────────────────┐
-        │        HARNESS (loop + hook 层)         │
-        │  ┌──────────────────────────────────┐ │
-        │  │ Event Log      · 可重放的 run state│ │
-        │  │ Suspend/Resume · PENDING_HUMAN 挂起│ │
-        │  │ Approval Gate  · 声明式工具授权     │ │
-        │  │ Escalation     · 超时逐级上报       │ │
-        │  │ Memory         · 跨会话的人/表/口径 │ │
-        │  │ Stop Rules     · 停止点 / 迭代上限   │ │
-        │  │ Budget Guard   · 调用/时长/成本上限  │ │
-        │  └──────────────────────────────────┘ │
-        └───────────────────┬───────────────────┘
-                            │
-  ┌─────────┬────────┬──────┼───────┬────────┬─────────┐
- SQL     Metadata  Access  Contact  Email    DQ      Media
- Tool      Tool     Tool    Tool    Tool     Tool     Tool
-  │          │        │              │
-  │          │        │          ┌───┴────┐
-Connector OpenMeta  Policy      发起询问 接收批准
-Service   REST API   Sync                (token 链接)
-(只读准入 +           │
- 队列/限流/熔断)
-  │              ┌────┴────┐
-  │           Trino OPA  MinIO IAM
-  ▼
-─────────────────────────────────────────────
-              独立 Data Platform
-─────────────────────────────────────────────
- Trino ─ Iceberg ─ MinIO
-   ├─ bronze(原样落地)
-   ├─ silver(清洗)
-   ├─ gold(发布)
-   ├─ media(音视频 / 文档 / 转写)
-   ├─ remediation_ledger ──► 反向整改建议(数据 + 权限)
-   └─ access_policy / access_audit
- 
- OpenMetadata: Catalog / Lineage / Owner / Data Quality / Classification
-─────────────────────────────────────────────
- OpenTelemetry ──► Phoenix
+┌─────────────────────────────────────────────────┐
+│ ④ supervisor    起停 Hermes · token 限额 · 健康   │  体外，Hermes 挂了它还活着（M6，待做）
+├─────────────────────────────────────────────────┤
+│ ③ Hermes（主程序）= Data Steward Claw            │
+│    loop / 工具分发 / 邮件收发 / 会话 / 记忆        │  ← 上游提供，零改动挂载
+│    ┌───────────────────────────────────────┐    │
+│    │ claw 插件（.hermes/plugins/claw/）      │    │  ← 我们写的领域件
+│    │  pre_tool_call 门禁：分级·票据·指纹·     │    │     唯一能否决的挂载点
+│    │    SQL 准入·预算·WIP·参数级禁令          │    │
+│    │  post_tool_call 记账 · post_llm 花销    │    │     观察者
+│    │  cron：恢复(monitor)·催办·周报           │    │
+│    │  13 个工具：发现/画像/接入/清洗/发布/授权 │    │
+│    │  Connector 护栏：只读准入+LIMIT/EXPLAIN/ │    │
+│    │    队列/限流/负载账本                    │    │
+│    └───────────────────────────────────────┘    │
+├─────────────────────────────────────────────────┤
+│ ② approval callback   独立进程+独立 DB 账号       │  唯一能写 decisions（铁律 2）
+│    审批邮件里的一次性签名链接点到这里              │  故意不在 Hermes 里
+├─────────────────────────────────────────────────┤
+│ ① lakehouse     Claw 挂了它仍是完整交付物          │
+│    Trino ─ Iceberg ─ MinIO                       │
+│      bronze(原样) → silver(清洗,原值留 _raw)      │
+│      → gold(发布) + rules.json 列级遮蔽           │
+│    remediation_ledger · assets · runs · 账本      │
+│    源系统(Postgres×N / SaaS 导出) 只读接入         │
+└─────────────────────────────────────────────────┘
 ```
+
+层与层之间只走接口，不走 import：supervisor 用进程信号与用量 API，
+Hermes 用工具签名，lakehouse 用 SQL。
+
+与早期设计的三处降级（原因见 CLAUDE.md 的 OpenMetadata 评估）：
+OpenMetadata 全家桶 → 轻量 `assets` 表（本机内存跑不下，接口保持一致）；
+OPA → `rules.json` 文件策略（事实来源同一份，换 OPA 只改渲染）；
+Media Tool 未做（不在关键路径）。可观测仍是 OpenTelemetry → Phoenix（可选）。
 
 ---
 
@@ -2272,6 +2270,66 @@ Post-fix DQ Pass Rate      __._%
 > 数字待实测填入。**不得预先填写未经测量的数值。**
 
 配合 Phoenix 的 trace 时间线截图（其中 `WAITING_FOR_HUMAN` 一行直接可视化了 Suspend/Resume 机制），构成完整的工程证据链。
+
+---
+
+## 16.7 后续要加的三个工具：**查得准，而不是每次重新抓**
+
+> 记于 2026-09-05。这三个是同一件事的三个面：**Agent 现在每次要用一份
+> 事实，都得去源头重新抓一遍** —— 慢、烧 token，而且抓回来的东西每次
+> 措辞都不一样，模型的判断跟着抖。把「已经确认过的事实」做成可查的接口，
+> 查一次就准，是省 token 的主线，不是优化。
+
+### 16.7.1 通讯录：`lookup_contact`
+
+现在 Agent 想知道「fin_invoice 归谁管」只有两条路：翻自己的上下文，
+或者猜。而库里其实有 `role_assignment`（角色 → 当前持有人，换岗自动跟随）
+和 `asset_semantics`（问过的口径），只是**没有暴露成工具**。
+
+- 输入：角色名 / 资产名 / 人名，任一
+- 输出：这个人是谁、持有哪些角色、经手过哪些资产、上次响应用了多久
+- 级别：L0（只读自己的库，不碰源系统）
+- 关键点：**换岗后指向继任者**，这是 `resolve_role` 已经做到的
+  （大 case 第 7 条判定测的就是它）。工具只是把它露出来
+
+### 16.7.2 结构与关联：`describe_asset`
+
+表头、类型、主键、外键、以及**怎么 join**。现在 `get_table_metadata`
+每次去源库拉一遍（受 8.1 的限流与串行队列约束），而这些东西在
+`sync_state.schema_hash` 没变的时候**一个字都不会变**。
+
+- 输入：资产名（`source.table`）
+- 输出：列与类型、主键、外键指向、已确认的列口径（`asset_semantics`）、
+  可用的 join 路径、上次同步时刻与新鲜度
+- 级别：L0
+- 关键点：
+  - **命中缓存与回源必须能区分**：返回里带上「这份结构取自
+    <时刻> 的快照，schema_hash 未变」。分不清的话，schema 漂移
+    （G1，defect_taxonomy）就会被一份陈旧的结构盖过去
+  - join 路径只在**已接进 lake 的表之间**给 —— 源系统禁关系展开（铁律 3）
+  - `schema_hash` 变了就必须回源，且这是**停下来问人**的信号，不是自动续传
+
+### 16.7.3 事实索引：`recall` / 后台写入接口
+
+前两个是特例，这个是通用形态：**一个后台不断写、Agent 只读的事实索引**。
+逻辑是「每次调用都准确且省 token」——Agent 不再把整段历史塞进上下文，
+而是按需查一条。
+
+- 写侧：各个环节顺手写（同步完写结构、人回信写口径、门禁拦下写阻塞项），
+  **不给 Agent 写权限** —— 与 `decisions` / `source_grants` 同一条原则，
+  否则它可以自己往索引里写一条「王姐说可以了」
+- 读侧：一个 `recall(question)` 工具，L0
+- 关键点（这几条决定它是省 token 还是变成新的噪音源）：
+  - **返回必须是结论 + 出处**，不是原文段落。「ship_region 空值合法，
+    王姐 2026-09-01 确认，出处 approval#7f39」——三行顶三页
+  - **查不到就说查不到**，不许拿相似的顶上。这与 `_source_not_granted`
+    是同一条：没有的东西不能假装有
+  - 不做向量检索（§17 已经排除）。**结构化键 + 精确匹配**够用了：
+    资产名、角色名、issue 类型都是有限集合。上向量的那一刻，
+    「查得准」就变成了「查得像」
+
+**三个都在 `policy.py` 里显式声明 L0**（铁律 5），且都只读我们自己的库——
+它们不碰源系统，所以不受 8.1 的限流约束，也正因如此才敢让 Agent 随便查。
 
 ---
 

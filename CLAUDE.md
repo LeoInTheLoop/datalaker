@@ -99,8 +99,13 @@ spike/                        R0 概念验证，可随时删除
   项目 `.venv`、容器镜像（`docker/Dockerfile`）、Hermes 的 `.venv-h`
   （uv 建的无 pip，用 `VIRTUAL_ENV=<path> uv pip install`）
 - 跑测试：`HERMES=<hermes-agent 路径> ./tests/run_all.sh`
-  - 接上 docker（core 组）时 **739 条必须全绿**，唯一允许的 SKIP 是 Phoenix
-  - 不接外置盘（Docker 起不来）时，**不依赖 docker 的 395 条必须全绿**
+  - 接上 docker（core + mail 组）时 **977 条必须全绿**，唯一允许的 SKIP 是 Phoenix
+    （mail 组：`docker compose --profile mail up -d greenmail`，
+    不起的话 5.2 与 mailsim 两组会整组 SKIP，数字对不上）
+  - 不接外置盘（Docker 起不来）时，**不依赖 docker 的那些必须全绿**——
+    具体条数待下次拔盘实测校准（M5 新增的三组里，5.2 入站依赖 GreenMail、
+    5.55 恢复链只有两条 lake 断言依赖 docker）。
+    在服务还活着的机器上屏蔽 docker CLI 测出的数不算数
   - 数字必须是实测出来的。写一个没跑过的数，正是「整组静默 SKIP
     而回归看着还是绿的」的来源 —— 这个项目已经在同一个坑里摔过四次
 - 看状态：`python3 ops/claw-status.py`（退出码 2 = 有告警）

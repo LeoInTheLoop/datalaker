@@ -59,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/health":
             return self._send(200, "ok")
-        if u.path not in ("/approve", "/deny"):
+        if u.path not in ("/approve", "/deny", "/choose"):
             return self._send(404, page("找不到页面", "链接无效。", "404",
                                         "#eee", "#666"))
 
@@ -75,12 +75,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, page("令牌无效", f"{e}。请向发起人索取新的审批链接。",
                                         "拒绝", "#fde8e8", "#b42318"))
 
-        # 2. 令牌里的意图必须与访问的路径一致，防止改 URL 把 deny 变 approve
-        want = "approve" if u.path == "/approve" else "deny"
-        if payload["d"] != want:
-            return self._send(403, page("令牌与操作不符",
-                                        "这枚令牌不是用于该操作的。", "拒绝",
-                                        "#fde8e8", "#b42318"))
+        # 2. 令牌里的意图必须与访问的路径一致，防止改 URL 把 deny 变 approve。
+        #    /choose 是三选一（阶段提案）：意图必须是**某个已知选项**，
+        #    否则改 URL 就能凭空造出一个决定。
+        if u.path == "/choose":
+            if payload["d"] not in _stage_keys():
+                return self._send(403, page(
+                    "令牌与操作不符", "这枚令牌不是用于阶段选择的。", "拒绝",
+                    "#fde8e8", "#b42318"))
+        else:
+            want = "approve" if u.path == "/approve" else "deny"
+            if payload["d"] != want:
+                return self._send(403, page("令牌与操作不符",
+                                            "这枚令牌不是用于该操作的。", "拒绝",
+                                            "#fde8e8", "#b42318"))
 
         # 3. 双重确认（readme 10.5）：第一次点击不落库，只发确认信。
         #    链接被转发多少次都无所谓 —— 确认信只到 approver 的注册邮箱。
@@ -103,12 +111,19 @@ class Handler(BaseHTTPRequestHandler):
 
         # 4. 写入决定。token_jti 唯一约束负责挡住重放。
         #    连接用完即关 —— 否则会持有 SQLite 写锁，把 Agent 进程挡在门外。
+        # 三选一落的是 `answered` + `chosen`，不是 approve/deny。
+        # `decisions.chosen` 这一列建了很久却一直没人写 —— 判分的
+        # silver_gated 读的就是它。
+        _is_choice = u.path == "/choose"
         with open_store(readonly=False, init_schema=False) as store:
             ok = store.decide(
-                payload["aid"], payload["d"], payload["who"],
+                payload["aid"],
+                "answered" if _is_choice else payload["d"],
+                payload["who"],
                 token_jti=payload["jti"],
                 client_ip=self.client_address[0],
                 user_agent=self.headers.get("User-Agent", ""),
+                chosen=payload["d"] if _is_choice else None,
             )
             if not ok:
                 return self._send(409, page("这枚链接已经用过了",
@@ -116,7 +131,14 @@ class Handler(BaseHTTPRequestHandler):
                                             "已处理", "#fef3c7", "#92400e"))
             store.append_event(payload["aid"], f"DECIDED_{payload['d'].upper()}",
                                payload["who"])
-            _receipt(store, payload)
+            _receipt(payload)
+        if _is_choice:
+            _label = {o["key"]: o["label"] for o in _stage_options()}.get(
+                payload["d"], payload["d"])
+            return self._send(200, page(
+                "已记录你的选择", f"你选了：{_label}", "已拍板",
+                "#dcfce7", "#166534",
+                f"{payload['who']} · 决定已写入审计表，Agent 改不了。"))
         if payload["d"] == "approve":
             return self._send(200, page(
                 "已批准", "任务将在下次唤醒时继续执行。", "已批准",
@@ -126,6 +148,20 @@ class Handler(BaseHTTPRequestHandler):
             "已拒绝", "该动作不会执行，Agent 也不会就同一动作重复发起审批。",
             "已拒绝", "#fde8e8", "#b42318",
             f"审批人 {payload['who']} · 如需改变，请让 Agent 提出新的方案。"))
+
+
+def _stage_options():
+    """三个选项在 `policy.py`（一处定义）。拿不到就当没有 —— 于是
+    `/choose` 的意图校验必然失败，fail closed。"""
+    try:
+        from plugins.datasteward_gate.policy import STAGE_OPTIONS
+        return STAGE_OPTIONS
+    except Exception:                                        # noqa: BLE001
+        return []
+
+
+def _stage_keys():
+    return {o["key"] for o in _stage_options()}
 
 
 def _send_confirm(payload) -> bool:
@@ -140,8 +176,14 @@ def _send_confirm(payload) -> bool:
     import notify
     base = os.environ.get("APPROVAL_BASE_URL", f"http://127.0.0.1:{PORT}").rstrip("/")
     t2 = tokens.issue(payload["aid"], payload["d"], payload["who"], stage="confirm")
-    path = "approve" if payload["d"] == "approve" else "deny"
-    verb = "批准" if payload["d"] == "approve" else "拒绝"
+    # 三选一走 /choose —— 路径跟着令牌里的意图走，写死 approve/deny
+    # 会让确认信里的链接永远验不过（意图与路径不符）。
+    if payload["d"] in _stage_keys():
+        path = "choose"
+        verb = "选择"
+    else:
+        path = "approve" if payload["d"] == "approve" else "deny"
+        verb = "批准" if payload["d"] == "approve" else "拒绝"
     try:
         notify.get().send_notice(
             payload["who"], f"[数据管家] 请确认你的{verb}操作",
@@ -158,20 +200,29 @@ def _send_confirm(payload) -> bool:
         return False
 
 
-def _receipt(store, payload):
+def _receipt(payload):
     """回执：告诉他刚才批准了什么（readme 10.6）。
 
     在后台线程发送——回执失败不能影响决定落库，决定已经生效了。
     这与 Agent 侧「通知失败 ≠ 门禁打开」是同一条原则的两面。
+
+    **线程自己建连接。** 原先它借调用方那个 store，而调用方是
+    `with open_store(...)` —— with 块一退出连接就关了，线程随后拿它查库，
+    报「SQLite objects created in a thread can only be used in that same
+    thread」。两条路径全崩：回执发不出，连「回执失败」这条事件也写不进去。
+    `plugins/datasteward_gate/__init__.py` 的 `_notify_async` 早就写过
+    同一条注释（「后台线程必须建自己的连接」），当时只修了那一处。
     """
     import threading
 
     def _go():
+        st = None
         try:
             import notify
-            row = store.db.execute(
+            st = open_store(readonly=False, init_schema=False)
+            row = st.db.execute(
                 "SELECT tool_name, args_json FROM approvals WHERE id=?",
-                (payload["aid"],)).fetchone() if hasattr(store.db, "execute") else None
+                (payload["aid"],)).fetchone() if hasattr(st.db, "execute") else None
             tool = row[0] if row else "(未知动作)"
             target = ""
             if row:
@@ -182,9 +233,19 @@ def _receipt(store, payload):
                     target = row[1]
             notify.get().send_receipt(payload["who"], payload["aid"],
                                       payload["d"], tool, target, payload["who"])
-            store.append_event(payload["aid"], "RECEIPT_SENT", payload["who"])
-        except Exception as e:
-            store.append_event(payload["aid"], "RECEIPT_FAILED", str(e)[:180])
+            st.append_event(payload["aid"], "RECEIPT_SENT", payload["who"])
+        except Exception as e:                               # noqa: BLE001
+            try:
+                (st or open_store(readonly=False, init_schema=False)).append_event(
+                    payload["aid"], "RECEIPT_FAILED", str(e)[:180])
+            except Exception:                                # noqa: BLE001
+                pass          # 连「失败」都记不下来时也不能把线程带崩
+        finally:
+            try:
+                if st is not None:
+                    st.close()
+            except Exception:                                # noqa: BLE001
+                pass
 
     threading.Thread(target=_go, daemon=True).start()
 

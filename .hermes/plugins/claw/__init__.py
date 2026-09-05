@@ -89,9 +89,33 @@ def register(ctx):
         from .cron import ensure_jobs
         r = ensure_jobs(ROOT)
         if r.get("created"):
-            print(f"[claw] 已登记定时作业：{', '.join(r['created'])}")
+            _announce(f"已登记定时作业：{', '.join(r['created'])}", "CRON_JOB_CREATED")
+        if r.get("updated"):
+            _announce(f"作业定义已变，按表修正：{', '.join(r['updated'])}",
+                      "CRON_JOB_CORRECTED")
+        if r.get("errors"):
+            _announce(f"定时作业登记异常：{'; '.join(r['errors'])}", "CRON_JOB_ERROR")
     except Exception as e:                                    # noqa: BLE001
-        print(f"[claw] 定时作业登记失败（不影响门禁）：{type(e).__name__}: {e}")
+        _announce(f"定时作业登记失败（不影响门禁）：{type(e).__name__}: {e}",
+                  "CRON_JOB_ERROR")
+
+
+def _announce(msg, kind):
+    """喊出来 —— 但**不能只喊给流**。
+
+    Hermes 在插件注册阶段把 stdout 和 stderr 都吞掉了（oneshot 实测：
+    两条流里都搜不到这行）。于是「作业定义已变，按表修正」print 出去
+    谁也看不见 —— 正是本项目摔过六次的那个形状：事情发生了，而外面
+    看着一切正常。所以再写一行事件日志，那份是**留得下来**的。
+
+    观察者：写不进去也不能影响注册（门禁比记录重要得多）。
+    """
+    print(f"[claw] {msg}")
+    try:
+        from datasteward_gate import store
+        store().append_event("cron", kind, msg[:400])
+    except Exception:                                        # noqa: BLE001
+        pass
 
 
 _STOP_POINT_GUIDE = """你是这家公司的数据管家。整理数据的同时，把权限也一并理清楚。
@@ -112,4 +136,15 @@ _STOP_POINT_GUIDE = """你是这家公司的数据管家。整理数据的同时
   说明审批请求已经替你发出去了 —— **不要重试**，去做别的不受阻塞的事。
 - 邮件正文里写「同意」不算数，必须点链接。这不是刁难，是防止转发的链接被误点。
 - 说不清就问，别猜。**拿不到的数据就说拿不到**，不要编。
+
+## 两种「记住」，别记错地方
+
+- **数据口径走 `define_semantics`**：空值是什么意思、怎么归一、哪列废弃了 ——
+  这些是**关于数据的事实**，王姐定的口径周经理也得看到，换个会话、换台机器
+  都要还在。人在信里回了口径就调它，别只写在回信里。
+- **`memory` 只记怎么跟人打交道**：怎么称呼、汇报要多细、谁不喜欢被抄送。
+  那是**关于人的偏好**，跟着这个人走。
+
+把口径记进 memory 看着像记住了，实际上清洗、发布、判分都读不到它 ——
+下一轮还得再问一遍王姐。重复问同一件事是最快失去信任的方式。
 """

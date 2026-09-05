@@ -38,6 +38,21 @@ if not (BASE_HOME / "config.yaml").exists():
     print(f"\n  SKIP  缺少 {BASE_HOME}/config.yaml（见 docs/restructure.md M1）\n")
     sys.exit(0)
 
+# lake 探活走和干活同一条路（sync._trino，与 run_all 9.5 同款）。
+# 不探的话，docker 不可用时「真写 bronze」两条会 FAIL 而不是 SKIP ——
+# docker-free 门槛就永远达不到全绿。只探 lake：其余断言不依赖它。
+def _lake_ok():
+    try:
+        sys.path[:0] = [str(ROOT / "services"), str(ROOT / "plugins")]
+        import sync
+        sync._trino("SELECT 1")
+        return True
+    except Exception:                                         # noqa: BLE001
+        return False
+
+
+LAKE_OK = _lake_ok()
+
 # 桩用固定端口：**Hermes 的配置压过环境变量**（跟 NOTIFY_CHANNEL 那个坑同款），
 # 所以只能在配置里写死 base_url，而配置写死就要求端口固定。
 STUB_PORT = int(os.environ.get("MODEL_STUB_PORT", "8799"))
@@ -71,11 +86,10 @@ def run_hermes(prompt, stub, timeout=180):
 
 print("\n=== 工具在 Hermes 里被调用 ===\n")
 
-# Hermes 对非核心工具走**延迟下发**：prompt 里只放 tool_search / tool_call /
-# tool_describe，具体工具按需取。这跟我们的白名单是同一个目的（省 token +
-# 收窄攻击面），所以调 claw 的工具要经由 tool_call，而不是直接点名。
-CALL = lambda name, **kw: {"tool": "tool_call",
-                           "args": {"name": name, "arguments": kw}}
+# 我们关掉了延迟下发（config: tools.tool_search.enabled=off）：工具集本来就
+# 被白名单砍到很小，全部塞进 prompt 也就几千 token，而藏起来的代价是
+# 弱模型找不到它们。所以剧本直接点名工具，不再经由 tool_call 外壳。
+CALL = lambda name, **kw: {"tool": name, "args": kw}   # noqa: E731
 
 script = [CALL("list_source_tables", source="northwind"),
           {"text": "已列出。"}]
@@ -84,8 +98,23 @@ with StubServer(script, port=STUB_PORT) as stub:
     offered = stub.tools_offered()
     called = stub.tool_calls_made()
 
-chk("Hermes 提供了延迟调用入口（tool_call）", "tool_call" in offered,
-    f"下发 {len(offered)} 个核心工具")
+# **工具直接下发，不走 tool_call 那个延迟外壳**（config: tools.tool_search.off）。
+# 藏起来省的那点 token，代价是弱模型根本找不到工具 —— 实测 qwen3.8-flash
+# 在延迟下发时 tool_turns=0，只回一句「我来处理」。
+chk("claw 的工具按名字直接下发（不藏在 tool_search 后面）",
+    "ingest_table" in offered and "connect_source" in offered,
+    f"下发 {len(offered)} 个工具")
+
+# **发现这一段也必须放行。** 真模型不会直接 tool_call —— 它先 tool_search
+# 找、tool_describe 看签名。这两个不声明就会被「未声明 = L4」挡住，
+# 于是模型找不到任何工具，看起来像它什么都不会干。
+# 桩模式发现不了：剧本直接给 tool_call，跳过了发现这一段。
+import sys as _sys0; _sys0.path.insert(0, str(ROOT / "plugins"))
+from datasteward_gate.policy import POLICY as _P0, Level as _L0   # noqa: E402
+chk("**工具发现的两步是 L0**（挡住它们 = 模型找不到工具）",
+    _P0.get("tool_search") == (_L0.L0, None)
+    and _P0.get("tool_describe") == (_L0.L0, None),
+    f'{_P0.get("tool_search")} / {_P0.get("tool_describe")}')
 chk("**白名单生效**：terminal 没有被下发", "terminal" not in offered)
 chk("**白名单生效**：execute_code 没有被下发", "execute_code" not in offered)
 chk("claw 的工具被真的执行了（有结果回传）",
@@ -178,10 +207,14 @@ with StubServer(script3, port=STUB_PORT) as s5:
     called5 = s5.tool_calls_made()
 
 blob5 = " ".join(c["content"] or "" for c in called5)
-chk("批准后放行并真的写了 bronze",
-    "已落" in blob5 and "行，策略" in blob5, blob5[:100])
+if LAKE_OK:
+    chk("批准后放行并真的写了 bronze",
+        "已落" in blob5 and "行，策略" in blob5, blob5[:100])
+else:
+    print("  SKIP  批准后真写 bronze（lake 连不上 —— 探活与干活同一条路）")
 chk("恢复不依赖我的脚本推动 —— 是 Hermes 自己再调一次工具",
-    any("tool_call" in (c["name"] or "") for c in called5))
+    any("ingest_table" in (c["name"] or "") for c in called5),
+    str([c["name"] for c in called5]))
 
 # 票据一次性：再跑一次应当重新挂起
 with StubServer(script3, port=STUB_PORT) as s6:
@@ -256,8 +289,11 @@ with StubServer(script_gov, port=STUB_PORT) as s8:
 chk("权限扫描跑通", "权限现状" in b8 or "没有发现明显的权限问题" in b8, b8[:80])
 chk("**扫描明确声明未做任何变更**（铁律 4）",
     "未做任何变更" in b8 or "没有发现明显" in b8)
-chk("lake 侧全量检查跑通",
-    "全量检查" in b8, b8[-200:-80] if len(b8) > 200 else b8)
+if LAKE_OK:
+    chk("lake 侧全量检查跑通",
+        "全量检查" in b8, b8[-200:-80] if len(b8) > 200 else b8)
+else:
+    print("  SKIP  lake 侧全量检查（lake 连不上 —— 探活与干活同一条路）")
 chk("新鲜度可查", "新鲜度" in b8 or "距上次同步" in b8 or "还没同步过" in b8)
 
 print("\n=== M3：搬进来的工具都显式声明了级别（铁律 5）===\n")
@@ -318,6 +354,11 @@ chk("「不要重试」的挂起语义进了提示", "不要重试" in sysmsg)
 chk("「正文说同意不算数」进了提示", "点链接" in sysmsg)
 chk("**限制没有写进提示词**（那是门禁的事）",
     "你不可以" not in sysmsg and "禁止你" not in sysmsg)
+# 两种「记住」的分工也是引导：memory 记人的偏好，口径走 define_semantics。
+# 不说清楚的话模型会把业务口径记进 memory —— 看着像记住了，
+# 清洗、发布、判分都读不到，下一轮还得再问一遍人。实测撞过。
+chk("提示里说清了口径记哪儿（不然会被记进 memory 丢掉）",
+    "define_semantics" in sysmsg and "memory" in sysmsg)
 
 print("\n=== 桩本身可信 ===\n")
 
