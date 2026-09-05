@@ -122,6 +122,36 @@ def _profile_table(args: dict, **_: Any) -> str:
     return "\n".join(lines)
 
 
+def _recently_synced(asset: str, within_h: float = 6.0):
+    """这张表是不是刚接过。返回一句人话，或 None。
+
+    **重复接同一张表是模型最常见的浪费**：它每收到一封信就重新规划，
+    把接过的表再申请一遍 —— 人白点一次链接，源库白扫一次全表。
+    `list_source_tables` 已经在清单里标了「已接入」，但模型不一定去看清单；
+    真正要拦住的是**动手那一刻**。
+    """
+    import time
+    try:
+        from datasteward_gate.approvals import open_store
+        with open_store(readonly=True, init_schema=False) as st:
+            row = st.db.execute(
+                "SELECT last_synced_at, row_count, schema_hash FROM sync_state"
+                " WHERE asset=?", (asset,)).fetchone() \
+                if hasattr(st.db, "execute") else None
+    except Exception:                                        # noqa: BLE001
+        return None
+    if not row or not row[0]:
+        return None
+    age_h = (time.time() - float(row[0])) / 3600.0
+    if age_h > within_h:
+        return None
+    ago = (f"{age_h:.1f} 小时前" if age_h >= 1
+           else f"{max(1, int(age_h * 60))} 分钟前")
+    return (f"{asset} **{ago}刚接过**（{row[1] or 0:,} 行），没有重接。\n"
+            f"要刷新数据用 full_refresh；只是想看内容的话表已经在 "
+            f"iceberg.bronze 里了，直接 sql_query（plane=lake）。")
+
+
 def _ingest_table(args: dict, **_: Any) -> str:
     """接入一张表到 bronze。**L3 —— 门禁会先拦下它。**
 
@@ -134,6 +164,9 @@ def _ingest_table(args: dict, **_: Any) -> str:
         return "错误：需要 source 与 table。"
     from . import _ensure_path
     _ensure_path()
+    dup = _recently_synced(f"{src}.{tbl}")
+    if dup:
+        return dup
     try:
         import sync
         r = sync.sync_table(src, tbl)

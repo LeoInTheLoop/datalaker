@@ -128,5 +128,26 @@ check("欠账清单里没有已经实现了的（清单要跟着代码走）", n
 _no_schema = sorted(set(_T3._HANDLERS) - set(_T3._SCHEMAS))
 check("每个 handler 都有对应的 schema", not _no_schema, str(_no_schema))
 
+print("\n=== 身份字段得是工具真有的那个参数名 ===\n")
+
+# **想当然的代价**：给 `ingest_export` 声明身份时写了 ("source","table")，
+# 而它的参数名其实是 `saas_source` —— 于是身份字段只匹配上一半，
+# 恢复时指纹对不上，人批过的又白批了。而这种错**看起来完全正常**：
+# 声明有了、测试也过，只有真跑一次带附件的接入才会暴露。
+from datasteward_gate.policy import IDENTITY_KEYS as _IK          # noqa: E402
+
+_bad_ident = {}
+for _t, _keys in _IK.items():
+    _sch = _T3._SCHEMAS.get(_t)
+    if not _sch:
+        continue                       # 还没实现的工具没 schema，跳过
+    _props = set((_sch.get("parameters") or {}).get("properties") or {})
+    _miss = [k for k in _keys if k not in _props]
+    if _miss:
+        _bad_ident[_t] = _miss
+check("**身份字段都是工具 schema 里真有的参数**（写错名字 = 恢复永远对不上）",
+      not _bad_ident,
+      "; ".join(f"{t} 里没有 {m}" for t, m in _bad_ident.items()))
+
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")
 sys.exit(1 if bad else 0)

@@ -164,12 +164,13 @@ IDENTITY_KEYS: dict[str, tuple] = {
     # 现在就该写死 —— 等哪天有人给它们加个可选参数，指纹就又对不上了，
     # 而那种失败长得像「模型不听话」，查起来极贵。
     "ingest_table": ("source", "table"),
-    "publish_gold": ("source", "table"),
+    # 发布的对象是**那张 silver 表**，不是源表
+    "publish_gold": ("silver_table",),
     "grant_read": ("principal", "asset"),
     # 下面这几个还没实现（见 tests/test_toolset_whitelist.py 的
     # NOT_YET_IMPLEMENTED），但**身份属于设计，不是实现细节** ——
     # 现在写清楚，等补实现时就不会再踩一次「恢复对不上票」。
-    "ingest_export": ("source", "table"),
+    "ingest_export": ("saas_source", "table"),   # 注意不是 source
     "full_refresh": ("source", "table"),
     "confirm_column_mapping": ("asset",),
     "connect_saas_control_plane": ("source_id",),
