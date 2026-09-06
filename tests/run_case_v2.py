@@ -10,7 +10,7 @@
 四个动词都已落地（M5 实测过）：
   发邮件  `mailsim.send()` → GreenMail，Hermes 自己的 adapter 收
   点链接  outbox JSONL 里的一次性签名链接 → HTTP GET
-  唤醒    `hermes cron run claw-resume`（同步、走 monitor 门）
+  唤醒    `hermes cron run data-steward-resume`（同步、走 monitor 门）
   给源    **把连接串写进信里**，Agent 自己调 `connect_source`（L3）——
           批准之后由那次注册写 `source_grants`。脚本不碰任何权限表
 
@@ -90,7 +90,7 @@ def click_approvals(outbox: pathlib.Path) -> int:
 
 
 def wake_hermes(home=None, hermes=None, timeout=420):
-    """唤醒一次：`hermes cron run claw-resume`（同步执行、走 monitor 门）。
+    """唤醒一次：`hermes cron run data-steward-resume`（同步执行、走 monitor 门）。
 
     **不是 `cron tick`** —— tick 只跑到点的作业，测试里没法确定性触发。
     monitor 源（`ops/resumable.py`）输出没变时这一次唤醒**根本不点模型**，
@@ -105,7 +105,7 @@ def wake_hermes(home=None, hermes=None, timeout=420):
         env["HERMES_HOME"] = str(home)
     env.setdefault("HERMES_ENABLE_PROJECT_PLUGINS", "1")
     env.setdefault("CLAW_ROOT", str(ROOT))
-    r = subprocess.run([f"{h}/.venv-h/bin/hermes", "cron", "run", "claw-resume"],
+    r = subprocess.run([f"{h}/.venv-h/bin/hermes", "cron", "run", "data-steward-resume"],
                        capture_output=True, text=True, timeout=timeout,
                        cwd=str(ROOT), env=env)
     return r.returncode == 0 and "succeeded" in r.stdout
@@ -298,11 +298,11 @@ def _has_weekly_proposal() -> bool:
         from datasteward_gate import _silver_round_closed      # 门禁：轮级的门
         import importlib.util as ilu
         spec = ilu.spec_from_file_location(
-            "claw_cron_probe", ROOT / ".hermes" / "plugins" / "claw" / "cron.py")
+            "claw_cron_probe", ROOT / ".hermes" / "plugins" / "data-steward" / "cron.py")
         m = ilu.module_from_spec(spec)
         spec.loader.exec_module(m)
-        wk = m.JOBS.get("claw-weekly-report") or {}
-        skill = (ROOT / ".hermes" / "skills" / "claw-stage-proposal" / "SKILL.md")
+        wk = m.JOBS.get("data-steward-weekly-report") or {}
+        skill = (ROOT / ".hermes" / "skills" / "data-steward-stage-proposal" / "SKILL.md")
         return bool(STAGE_OPEN_SILVER in STAGE_KEYS and _silver_round_closed
                     and wk.get("skills") and not wk.get("no_agent")
                     and skill.exists())
@@ -951,13 +951,13 @@ def _weekly(env, hermes, port, tr, case, real=False):
            else StubServer([CALL, {"text": "提案已发。"}], port=port))
     with ctx as stub:
         r = subprocess.run([f"{hermes}/.venv-h/bin/hermes", "cron", "run",
-                            "claw-weekly-report"], capture_output=True,
+                            "data-steward-weekly-report"], capture_output=True,
                            text=True, timeout=900 if real else 600,
                            cwd=str(ROOT), env=env)
         calls = stub.tool_calls_made() if stub else []
     if real:
         calls = _calls_from_events(db, since=t0)
-    tr.note("📋 周报作业跑了一次（带 claw-stage-proposal skill）")
+    tr.note("📋 周报作业跑了一次（带 data-steward-stage-proposal skill）")
     tr.tools(calls)
     if r.returncode != 0:
         tr.note(f"⚠️ 周报作业退出码 {r.returncode}")

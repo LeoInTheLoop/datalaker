@@ -302,7 +302,7 @@ sys.path.insert(0, str(ROOT / "plugins"))
 from datasteward_gate.policy import POLICY, Level             # noqa: E402
 import yaml as _yaml                                          # noqa: E402
 
-_man = _yaml.safe_load((ROOT / ".hermes" / "plugins" / "claw"
+_man = _yaml.safe_load((ROOT / ".hermes" / "plugins" / "data-steward"
                         / "plugin.yaml").read_text(encoding="utf-8"))
 _declared = _man.get("provides_tools") or []
 chk("manifest 列出了工具", len(_declared) >= 6, f"{len(_declared)} 个")
@@ -333,7 +333,7 @@ chk("**所有会改东西的工具都在 L2 以上**（漏标级别时这条会�
     str({t: int(_lv.get(t, -1)) for t in sorted(_writers & set(_declared))}))
 
 # handler 里不该有审批判断 —— 那是门禁的事（铁律 1）。
-_tools_src = (ROOT / ".hermes" / "plugins" / "claw"
+_tools_src = (ROOT / ".hermes" / "plugins" / "data-steward"
               / "tools.py").read_text(encoding="utf-8")
 _leaks = [w for w in ("find_valid", "is_denied", "st.request(", "has_approval")
           if w in _tools_src]

@@ -38,7 +38,8 @@ def chk(n, c, d=""):
 
 import datasteward_gate as G                                   # noqa: E402
 from datasteward_gate.approvals import Store                   # noqa: E402
-import claw.tools as T                                         # noqa: E402
+import importlib
+T = importlib.import_module("data-steward.tools")                                         # noqa: E402
 
 st = Store(DB, readonly=False)
 

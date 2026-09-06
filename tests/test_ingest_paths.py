@@ -80,7 +80,8 @@ print("\n=== 重复接同一张表要认得出来 ===\n")
 import sys as _s9                                             # noqa: E402
 import pathlib as _p9                                         # noqa: E402
 _s9.path.insert(0, str(_p9.Path(__file__).resolve().parent.parent / ".hermes" / "plugins"))
-import claw.tools as _T9                                      # noqa: E402
+import importlib
+_T9 = importlib.import_module("data-steward.tools")                                      # noqa: E402
 
 chk("刚接过的表会被认出来（不重接、不白扫）",
     callable(getattr(_T9, "_recently_synced", None)))

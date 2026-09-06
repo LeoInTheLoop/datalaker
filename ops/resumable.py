@@ -33,7 +33,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "services"), str(ROOT / "plugins")]
 def _silver_ready() -> list:
     """轮开了、bronze 有表、口径也有了 —— 这些表可以洗了。
 
-    **bronze 轮做完之后没有任何东西驱动进入 silver**：`claw-resume` 只推
+    **bronze 轮做完之后没有任何东西驱动进入 silver**：`data-steward-resume` 只推
     「有决定在等」的线，而清洗是个新动作、没有线在等它；周报一周一次。
     人点了 `start_silver` 之后这一棒没人接 —— 实测跑到这里就停住了，
     提案出了、口径记了、bronze 落了，然后什么都不再发生。

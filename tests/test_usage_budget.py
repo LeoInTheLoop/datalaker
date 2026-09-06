@@ -27,7 +27,7 @@ def chk(n, c, d=""):
 
 
 _spec = ilu.spec_from_file_location(
-    "claw_usage", ROOT / ".hermes" / "plugins" / "claw" / "usage.py")
+    "claw_usage", ROOT / ".hermes" / "plugins" / "data-steward" / "usage.py")
 U = ilu.module_from_spec(_spec)
 sys.modules["claw_usage"] = U
 _spec.loader.exec_module(U)

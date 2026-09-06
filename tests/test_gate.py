@@ -203,7 +203,7 @@ finally:
 #     `grant_read` 本身是 L3（Owner 审批的正常业务），但 principal 指向
 #     Agent 自己时就是自我提权 —— 只按工具名分级的话，第 18 组那五条
 #     全都有一个换名字的绕过口。
-for who in ("claw", "CLAW", " agent ", "data_steward"):
+for who in ("claw", "CLAW", " agent ", "data_steward", "data-steward"):
     r = gate("grant_read", {"principal": who, "asset": "gold.customer_360"}, RUN)
     check(f"给自己开权限被拒: principal={who!r}",
           is_block(r) and "L4" in r.get("message", ""))

@@ -336,7 +336,7 @@ def _silver_round_closed(st, tool_name: str):
 
     **这条判据的弱点必须写明**：Agent 不发提案，门就不生效。
     它不是硬边界，靠的是「周报作业会发提案」这个时序 ——
-    而周报作业的定义在我们手里，不在模型手里（`.hermes/plugins/claw/cron.py`）。
+    而周报作业的定义在我们手里，不在模型手里（`.hermes/plugins/data-steward/cron.py`）。
     真正的硬边界要等 M6 的体外监控层，那时才谈得上「轮」是被外部推进的。
     在此之前这是**自觉的取舍**，不是没想到。
     """

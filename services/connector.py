@@ -592,7 +592,9 @@ def describe_table(source_id: str, table: str) -> dict:
                     "AND a.attnum = ANY(i.indkey) "
                     "WHERE i.indrelid = to_regclass(%s) AND i.indisprimary",
                     (table,))
-    return {"columns": cols["rows"], "primary_key": [r[0] for r in pk["rows"]]}
+    out = {"columns": cols["rows"], "primary_key": [r[0] for r in pk["rows"]]}
+    _catalog_observed(source_id, table, out)
+    return out
 
 
 def list_foreign_keys(source_id: str) -> list:
@@ -610,7 +612,32 @@ def list_foreign_keys(source_id: str) -> list:
         WHERE c.contype = 'f'
           AND c.connamespace = 'public'::regnamespace
     """)
-    return [tuple(row) for row in r["rows"]]
+    fks = [tuple(row) for row in r["rows"]]
+    _catalog_fks(source_id, fks)
+    return fks
+
+
+# 采集即建档（R6 闭环 A）。**观测事实只从这里进档案** ——
+# 把落档挂在 Connector 上而不是某个工具上，是因为读结构的路径不止一条
+# （describe_asset / get_table_metadata / profile_table / sync 都会读），
+# 挂在工具上就会漏，而漏掉的那次正是「新会话查不到」的来源。
+#
+# 与 `_persist` 同一条原则：**落档失败不能影响查询本身**，整体吞掉异常。
+# 但吞掉之后档案就是旧的 —— 所以读档那侧必须报出快照时刻（catalog.render）。
+def _catalog_observed(source_id, table, meta):
+    try:
+        import catalog
+        catalog.record_observed(source_id, table, meta)
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
+def _catalog_fks(source_id, fks):
+    try:
+        import catalog
+        catalog.record_foreign_keys(source_id, fks)
+    except Exception:                                        # noqa: BLE001
+        pass
 
 
 def load_report(source_id: str | None = None) -> dict:

@@ -49,7 +49,9 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     "get_table_metadata":   (Level.L0, None),
     "search_asset":         (Level.L0, None),
     "get_lineage":          (Level.L0, None),
-    # 结构 + 外键 + 怎么 join。只读元数据，不碰数据内容
+    # 结构 + 外键 + 负责人 + 口径 + 怎么 join。
+    # **默认读治理库里的档案，连源库都不碰**；refresh=true 才回源采一次，
+    # 那也只是元数据，不碰数据内容
     "describe_asset":       (Level.L0, None),
     # 溯源：只读治理库自己的记录，不碰源系统也不碰数据内容
     "trace_asset":          (Level.L0, None),
@@ -136,7 +138,7 @@ UNDECLARED = (Level.L4, None)
 # 一个被误批的机会。
 # ---------------------------------------------------------------------------
 # Agent 自己的身份。Trino / Postgres 里 Claw 用的就是这些名字。
-SELF_PRINCIPALS = {"claw", "agent", "steward", "datasteward", "data_steward"}
+SELF_PRINCIPALS = {"claw", "agent", "steward", "datasteward", "data_steward", "data-steward"}
 
 # ---------------------------------------------------------------------------
 # 什么算「同一个动作」：参与指纹的字段

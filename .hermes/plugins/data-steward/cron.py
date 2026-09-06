@@ -41,9 +41,9 @@ import os
 #                          跳过这次 agent 运行**（记一次 no_change）。
 #                          于是「一分钟一次」的实际成本是一次 SQL 查询。
 JOBS = {
-    "claw-resume": {
+    "data-steward-resume": {
         "schedule": "every 1 minute",
-        "monitor_script": "claw_resumable.py",
+        "monitor_script": "data_steward_resumable.py",
         "prompt": (
             "有任务线的审批已经有决定了 —— 上面 MONITOR CHANGE DETECTED 里"
             "列出的就是。\n"
@@ -58,9 +58,9 @@ JOBS = {
             "（原样抄，别改写）调 `apply_cleaning_rule`。"
         ),
     },
-    "claw-escalate": {
+    "data-steward-escalate": {
         "schedule": "every 1 hour",
-        "script": "claw_escalate.py",
+        "script": "data_steward_escalate.py",
         "no_agent": True,
     },
     # 周报**要点模型**：它写给人看，要给建议和理由。一周一次，成本可忽略。
@@ -69,14 +69,14 @@ JOBS = {
     # agent 模式下它的 stdout 会以 `## Script Output` 注入 prompt。
     # skill 只管文体和「必须调 propose_stage_decision」；能不能开下一轮
     # 由门禁的 `_silver_round_closed` 管（引导走 prompt，强制走门禁）。
-    "claw-weekly-report": {
+    "data-steward-weekly-report": {
         "schedule": "every monday at 09:00",
-        "script": "claw_weekly_report.py",
-        "skills": ["claw-stage-proposal"],
+        "script": "data_steward_weekly_report.py",
+        "skills": ["data-steward-stage-proposal"],
         "prompt": (
             "上面 Script Output 里是这一周的四段事实，已经查过库了 —— "
             "**不要重算，也不要改写数字**。\n"
-            "按 claw-stage-proposal 这个 skill 写：压成一段给人看的小结，"
+            "按 data-steward-stage-proposal 这个 skill 写：压成一段给人看的小结，"
             "然后调 `propose_stage_decision` 把它变成三选一的提案，"
             "带上你的建议和理由。\n"
             "调完就停下来。开不开下一轮不由你决定。"
@@ -126,7 +126,7 @@ def _drift(rec: dict, job: dict, parse_schedule) -> list:
     **每加一个会写进 cron 的字段，这里必须同步加一行比对。**
     漏一个的后果是「名字对得上、定义对不上」—— 存量作业带着旧定义
     一直跑，而失败只记在 Hermes 侧的日志里，我们这边什么都看不见。
-    `claw-resume` 从 no_agent 脚本改成 monitor 作业时踩过一次；
+    `data-steward-resume` 从 no_agent 脚本改成 monitor 作业时踩过一次；
     `skills` 是第二个这样的字段（周报带 skill 之后）。
     """
     diff = [k for k in ("script", "monitor_script")
@@ -157,7 +157,7 @@ def ensure_jobs(root: str) -> dict:
     按 **name** 判重 —— Hermes 每次启动都会调 `register`，
     不判重的话每重启一次就多三个同样的作业。
 
-    但名字相同不代表定义相同：`claw-resume` 就从 no_agent 脚本改成过
+    但名字相同不代表定义相同：`data-steward-resume` 就从 no_agent 脚本改成过
     monitor 作业。只按名字跳过的话，老作业会一直跑一个已删掉的脚本，
     而失败只记在 Hermes 侧的日志里，我们这边什么都看不见。
     所以存量作业要与定义表**逐字段比对**，对不上就按表修正并喊出来。
@@ -182,13 +182,31 @@ def ensure_jobs(root: str) -> dict:
     for name, job in JOBS.items():
         job = dict(job, _model=model)      # pin 到当前配置，见 _current_model
         rec = have.get(name)
+        legacy_name = name.replace("data-steward-", "claw-", 1)
+        legacy = have.get(legacy_name)
+        if rec is not None and legacy is not None:
+            # 保留新作业，停用旧作业；不删除旧 ID 及执行历史。
+            try:
+                if legacy.get("enabled", True):
+                    result = update_job(legacy["id"], {"enabled": False})
+                    if result is None:
+                        raise RuntimeError("legacy job disappeared during migration")
+                    out["updated"].append(f"{legacy_name}(disabled duplicate)")
+            except Exception as e:
+                out.setdefault("errors", []).append(f"{legacy_name}: {e}")
+                continue
+        if rec is None:
+            rec = legacy  # 原地改名，保留 ID、开关和执行历史，不重建。
         if rec is not None:
             try:
                 diff = _drift(rec, job, parse_schedule)
+                if rec.get("name") != name:
+                    diff.append("name")
                 if not diff:
                     out["existing"].append(name)
                     continue
-                update_job(rec["id"], {
+                result = update_job(rec["id"], {
+                    "name": name,
                     "schedule": job["schedule"],
                     "prompt": job.get("prompt") or "",
                     "script": job.get("script"),
@@ -197,6 +215,8 @@ def ensure_jobs(root: str) -> dict:
                     "skills": list(job.get("skills") or []),
                     **({"model": model, "provider": provider} if model else {}),
                 })
+                if result is None:
+                    raise RuntimeError("job disappeared during migration")
                 out["updated"].append(f"{name}({', '.join(diff)})")
             except Exception as e:                            # noqa: BLE001
                 out.setdefault("errors", []).append(f"{name}: {e}")

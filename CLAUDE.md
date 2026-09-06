@@ -47,7 +47,11 @@
 
 ## 实现约定
 
-- 优先通过 `.hermes/plugins/claw/` 的工具、hook、cron 和 Skill 扩展 Hermes；当前不修改上游代码。
+- 数据治理扩展统一称为 `data-steward`，产品名为 Data Steward Claw，运行时为 Hermes。
+  注册入口为 `.hermes/plugins/data-steward/`，插件与工具集标识均为 `data-steward`。
+- 优先使用 Hermes 的工具、hook、cron、Skill 等扩展接口；接口无法满足必要的执行、状态或
+  上下文需求时，允许对 Hermes 本体做最小修改，记录原因、兼容影响和验证结果。
+  当前通过扩展接入；不要为保持“零改动”而依赖脆弱的内部替换。
 - `services/` 是业务模块目录，不代表每个文件都是独立服务；callback 的进程隔离须单独保证。
 - 业务知识放治理库，区分观测、推断与人工确认；模型写的摘要不能替代审批证据。
 - OpenMetadata 的历史调研按需查阅。目前不引入其 agent、MCP 或 ingestion 作为执行入口；

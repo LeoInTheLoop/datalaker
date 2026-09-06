@@ -74,9 +74,9 @@ from datasteward_gate.policy import POLICY as _POL            # noqa: E402
 _cfg2 = (_ROOT2 / ".hermes" / "home" / "config.yaml").read_text(encoding="utf-8")
 _m2 = _re2.search(r"^\s+enabled_toolsets:\s*$(.*?)(?=^\s+\w+:|\Z)",
                   _cfg2, _re2.M | _re2.S)
-_enabled = _re2.findall(r"^\s+-\s+(\w+)", _m2.group(1) if _m2 else "", _re2.M)
+_enabled = _re2.findall(r"^\s+-\s+([\w-]+)", _m2.group(1) if _m2 else "", _re2.M)
 # claw 是我们自己的工具集，逐个工具已在 policy 里；这里只查 Hermes 自带的。
-_hermes_sets = [t for t in _enabled if t != "claw"]
+_hermes_sets = [t for t in _enabled if t != "data-steward"]
 _undeclared2 = [t for t in _hermes_sets if t not in _POL]
 check("**enabled_toolsets 里的 Hermes 工具都在 policy 里声明了**",
       not _undeclared2,
@@ -106,10 +106,11 @@ NOT_YET_IMPLEMENTED = {
 
 import importlib.util as _ilu3                               # noqa: E402
 _sp = _ilu3.spec_from_file_location(
-    "claw_tools_probe", _ROOT2 / ".hermes" / "plugins" / "claw" / "tools.py",
-    submodule_search_locations=[str(_ROOT2 / ".hermes" / "plugins" / "claw")])
+    "claw_tools_probe", _ROOT2 / ".hermes" / "plugins" / "data-steward" / "tools.py",
+    submodule_search_locations=[str(_ROOT2 / ".hermes" / "plugins" / "data-steward")])
 _s2.path.insert(0, str(_ROOT2 / ".hermes" / "plugins"))
-import claw.tools as _T3                                     # noqa: E402
+import importlib
+_T3 = importlib.import_module("data-steward.tools")                                     # noqa: E402
 
 # Hermes 自带的那些不需要我们实现 —— 它们的实现在 Hermes 里。
 _HERMES_OWN = {"tool_search", "tool_describe", "tool_call", "skill_view",

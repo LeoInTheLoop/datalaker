@@ -188,6 +188,32 @@ GRANT SELECT, INSERT ON asset_provenance TO agent_role;
 GRANT USAGE, SELECT ON SEQUENCE asset_provenance_id_seq TO agent_role;
 GRANT SELECT ON asset_provenance TO approver_role;
 
+-- 资产档案（R6 闭环 A）：不回源库也说得清一张表。
+-- 三类内容按 status 分行存，各自成行、互不覆盖；append-only，
+-- 取代关系记在 superseded_by。设计与取代规则见
+-- plugins/datasteward_gate/approvals.py 的同名 DDL 注释。
+--
+-- **observed 层只由采集路径写。** 权限上 agent_role 与采集共用同一个账号，
+-- 拦不住；真正的边界在工具签名 —— 没有任何工具让模型写 observed。
+-- TODO(R6): 采集若拆成独立账号，这里改成只给 observed 的写权限。
+CREATE TABLE IF NOT EXISTS asset_catalog (
+    id            BIGSERIAL PRIMARY KEY,
+    asset         TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    key           TEXT NOT NULL,
+    value         TEXT NOT NULL,
+    status        TEXT NOT NULL CHECK (status IN ('observed','inferred','confirmed','refuted')),
+    evidence      TEXT,
+    actor         TEXT NOT NULL,
+    observed_at   DOUBLE PRECISION NOT NULL,
+    fingerprint   TEXT,
+    superseded_by BIGINT
+);
+CREATE INDEX IF NOT EXISTS ix_cat_cur ON asset_catalog(asset, kind, superseded_by);
+GRANT SELECT, INSERT, UPDATE (superseded_by) ON asset_catalog TO agent_role;
+GRANT USAGE, SELECT ON SEQUENCE asset_catalog_id_seq TO agent_role;
+GRANT SELECT ON asset_catalog TO approver_role;
+
 -- 业务知识沉淀：Agent 可更新（口径会修订）。
 -- 与 decisions 的只读约束是两回事——那张表关乎审批权威，这张不。
 GRANT SELECT, INSERT, UPDATE ON asset_semantics TO agent_role;

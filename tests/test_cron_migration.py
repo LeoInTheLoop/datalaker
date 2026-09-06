@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # 测试也得照真实方式加载，否则测出来的是一个假的失败原因。
 import importlib.util as _ilu
 _spec = _ilu.spec_from_file_location(
-    "claw_cron", ROOT / ".hermes" / "plugins" / "claw" / "cron.py")
+    "claw_cron", ROOT / ".hermes" / "plugins" / "data-steward" / "cron.py")
 C = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(C)
 
@@ -33,34 +33,34 @@ def chk(n, c, d=""):
 print("\n=== 作业表 ===\n")
 
 chk("三件事都有作业：恢复 / 升级 / 周报", set(C.JOBS) == {
-    "claw-resume", "claw-escalate", "claw-weekly-report"}, str(sorted(C.JOBS)))
+    "data-steward-resume", "data-steward-escalate", "data-steward-weekly-report"}, str(sorted(C.JOBS)))
 
 # 恢复要「等的人回了就往下走」，一小时太慢；升级阶梯按天算，一分钟太密。
 chk("恢复是分钟级、升级是小时级（节奏对得上各自的语义）",
-    "minute" in C.JOBS["claw-resume"]["schedule"]
-    and "hour" in C.JOBS["claw-escalate"]["schedule"],
-    f'{C.JOBS["claw-resume"]["schedule"]} / {C.JOBS["claw-escalate"]["schedule"]}')
+    "minute" in C.JOBS["data-steward-resume"]["schedule"]
+    and "hour" in C.JOBS["data-steward-escalate"]["schedule"],
+    f'{C.JOBS["data-steward-resume"]["schedule"]} / {C.JOBS["data-steward-escalate"]["schedule"]}')
 
 print("\n=== 该不该点模型 ===\n")
 
 # 催办是确定性阶梯判断 —— 走 no_agent 就不会每小时点一次模型。
-chk("claw-escalate 不点模型（升级阶梯是确定性的）",
-    C.JOBS["claw-escalate"].get("no_agent") is True)
+chk("data-steward-escalate 不点模型（升级阶梯是确定性的）",
+    C.JOBS["data-steward-escalate"].get("no_agent") is True)
 
 # **周报是反例**：它写给人看、要给建议和理由，所以要点模型。
 # 一周一次，成本可忽略 —— 「不点模型」在这里不是优点。
-_wk = C.JOBS["claw-weekly-report"]
+_wk = C.JOBS["data-steward-weekly-report"]
 chk("周报点模型（要给建议和理由，不是播报）", not _wk.get("no_agent"))
 # 但数字仍由脚本查库算：事实不该让模型编。
 chk("周报的四段数字仍由脚本供（agent 模式下当 Script Output 注入）",
-    _wk.get("script") == "claw_weekly_report.py")
-chk("周报带了写提案的 skill", _wk.get("skills") == ["claw-stage-proposal"],
+    _wk.get("script") == "data_steward_weekly_report.py")
+chk("周报带了写提案的 skill", _wk.get("skills") == ["data-steward-stage-proposal"],
     str(_wk.get("skills")))
 chk("提示词明说不要重算脚本给的数字",
     "不要重算" in (_wk.get("prompt") or ""))
 # skill 是引导层，**限制不许写在里面**（铁律 1）——
 # 写了也证明不了绕不过，真正的门是 gate 的 _silver_round_closed。
-_skill = (ROOT / ".hermes" / "skills" / "claw-stage-proposal"
+_skill = (ROOT / ".hermes" / "skills" / "data-steward-stage-proposal"
           / "SKILL.md").read_text(encoding="utf-8")
 chk("skill 文件在仓库里（跟着代码走，不写进用户的 ~/.hermes）", bool(_skill))
 chk("**skill 里没有写死限制**（那是门禁的事）",
@@ -74,7 +74,7 @@ chk("config 把仓库里的 skills 目录挂上了（否则静默扫不到）",
 
 # 恢复必须让 Agent 自己再调一次工具（M5 驱动反转），所以要点模型。
 # 但「每分钟点一次模型」显然不行 —— 靠 monitor_script 把它压回一次 SQL。
-_res = C.JOBS["claw-resume"]
+_res = C.JOBS["data-steward-resume"]
 chk("恢复要点模型（Agent 自己再调工具，不是脚本代劳）",
     not _res.get("no_agent") and bool(_res.get("prompt")))
 chk("**但靠 monitor 压住**：输出没变就整个跳过，不点模型",
@@ -143,7 +143,7 @@ for s in _ALL:
     chk(f"{s} 只是转发（没有 if/while）",
         "\nif " not in src and "while " not in src)
 
-_init = (ROOT / ".hermes" / "plugins" / "claw"
+_init = (ROOT / ".hermes" / "plugins" / "data-steward"
          / "__init__.py").read_text(encoding="utf-8")
 chk("插件里用的是相对导入（`from .cron`）—— 绝对导入会撞上 Hermes 的 cron 包",
     "from .cron import" in _init)
@@ -160,8 +160,8 @@ chk("但告诉了怎么手动跑一次", "--once" in r.stdout)
 
 print("\n=== 定义变了不能只按名字跳过 ===\n")
 
-# 造一个假的 Hermes cron 面：存量里躺着 claw-resume 的**老定义**
-# （M4 形态：no_agent 脚本 claw_resume.py），其余两个与表一致。
+# 造一个假的 Hermes cron 面：存量里躺着 data-steward-resume 的**老定义**
+# （M4 形态：no_agent 脚本 data_steward_resume.py），其余两个与表一致。
 # 只按名字判重的话，老作业会一直跑一个已经删掉的脚本，
 # 失败只记在 Hermes 侧日志里 —— 我们这边什么都看不见。
 import types as _types
@@ -179,13 +179,13 @@ def _consistent(name, job):
             "schedule": _fake.parse_schedule(job["schedule"])}
 
 
-_STALE = {"id": "id-claw-resume", "name": "claw-resume", "prompt": "",
-          "script": "claw_resume.py", "monitor_script": None, "no_agent": True,
+_STALE = {"id": "id-data-steward-resume", "name": "data-steward-resume", "prompt": "",
+          "script": "data_steward_resume.py", "monitor_script": None, "no_agent": True,
           "schedule": {"kind": "interval", "minutes": 1, "display": "every 1m"}}
 _fake.list_jobs = lambda include_disabled=False: [
     _STALE,
-    _consistent("claw-escalate", C.JOBS["claw-escalate"]),
-    _consistent("claw-weekly-report", C.JOBS["claw-weekly-report"])]
+    _consistent("data-steward-escalate", C.JOBS["data-steward-escalate"]),
+    _consistent("data-steward-weekly-report", C.JOBS["data-steward-weekly-report"])]
 _fake.create_job = lambda **kw: _calls["created"].append(kw)
 _fake.update_job = lambda job_id, updates: _calls["updated"].append(
     (job_id, updates)) or {"id": job_id}
@@ -205,39 +205,39 @@ finally:
             sys.modules[k] = v
 
 chk("老定义被发现并按表修正（不是按名字跳过）",
-    len(_calls["updated"]) == 1 and _calls["updated"][0][0] == "id-claw-resume",
+    len(_calls["updated"]) == 1 and _calls["updated"][0][0] == "id-data-steward-resume",
     str(res_d.get("updated")))
 _upd = _calls["updated"][0][1] if _calls["updated"] else {}
 chk("修正后的定义是 monitor 作业（老脚本被换掉，不是缝缝补补）",
-    _upd.get("monitor_script") == "claw_resumable.py"
+    _upd.get("monitor_script") == "data_steward_resumable.py"
     and _upd.get("no_agent") is False and _upd.get("script") is None
     and bool(_upd.get("prompt")))
 chk("修正**喊了出来**，且说清了哪些字段对不上",
-    any("claw-resume" in x and "script" in x for x in res_d.get("updated", [])),
+    any("data-steward-resume" in x and "script" in x for x in res_d.get("updated", [])),
     str(res_d.get("updated")))
 chk("与表一致的两个作业原样保留，没有被误改或重建",
-    sorted(res_d.get("existing", [])) == ["claw-escalate", "claw-weekly-report"]
+    sorted(res_d.get("existing", [])) == ["data-steward-escalate", "data-steward-weekly-report"]
     and not _calls["created"])
 
 # 老定义指向的壳脚本已无人引用，必须删掉 —— 留着它，
 # 「作业还在跑老脚本」这件事就永远查不出来。
-chk("老壳脚本 claw_resume.py 已删除",
-    not (HOME / "scripts" / "claw_resume.py").exists())
+chk("老壳脚本 data_steward_resume.py 已删除",
+    not (HOME / "scripts" / "data_steward_resume.py").exists())
 
 print("\n=== skills 也必须进 drift 比对 ===\n")
 
-# 第二个会写进 cron 的字段。漏比它的后果与 `claw-resume` 那次一模一样：
+# 第二个会写进 cron 的字段。漏比它的后果与 `data-steward-resume` 那次一模一样：
 # 存量作业带着旧的 skills 一直跑，而 `ensure_jobs` 看不出来。
 # **这一组是「加字段忘了加比对」的哨兵** —— 不是在测某个具体的 skill。
 _calls2 = {"created": [], "updated": []}
-_probe = dict(C.JOBS["claw-weekly-report"], skills=["claw-stage-proposal"])
-_stale_skills = _consistent("claw-weekly-report", _probe) | {"skills": ["旧的"]}
+_probe = dict(C.JOBS["data-steward-weekly-report"], skills=["data-steward-stage-proposal"])
+_stale_skills = _consistent("data-steward-weekly-report", _probe) | {"skills": ["旧的"]}
 _fake.list_jobs = lambda include_disabled=False: [_stale_skills]
 _fake.create_job = lambda **kw: _calls2["created"].append(kw)
 _fake.update_job = lambda job_id, updates: _calls2["updated"].append(
     (job_id, updates)) or {"id": job_id}
 _saved_jobs = C.JOBS
-C.JOBS = {"claw-weekly-report": _probe}
+C.JOBS = {"data-steward-weekly-report": _probe}
 sys.modules["cron"], sys.modules["cron.jobs"] = _pkg, _fake
 try:
     res_s = C.ensure_jobs(str(ROOT))
@@ -253,13 +253,13 @@ chk("**skills 对不上会被判 drift**（漏比的话存量带着旧 skill 一
     any("skills" in x for x in res_s.get("updated", [])), str(res_s))
 chk("修正时把 skills 也按表写回去",
     (_calls2["updated"][0][1].get("skills") if _calls2["updated"] else None)
-    == ["claw-stage-proposal"], str(_calls2["updated"])[:100])
+    == ["data-steward-stage-proposal"], str(_calls2["updated"])[:100])
 
 # 顺序不同不算 drift —— 否则每次注册都白 update 一遍。
 _fake.list_jobs = lambda include_disabled=False: [
-    _consistent("claw-weekly-report", dict(_probe, skills=["b", "a"]))]
+    _consistent("data-steward-weekly-report", dict(_probe, skills=["b", "a"]))]
 _calls2["updated"].clear()
-C.JOBS = {"claw-weekly-report": dict(_probe, skills=["a", "b"])}
+C.JOBS = {"data-steward-weekly-report": dict(_probe, skills=["a", "b"])}
 sys.modules["cron"], sys.modules["cron.jobs"] = _pkg, _fake
 try:
     res_o = C.ensure_jobs(str(ROOT))
@@ -271,7 +271,7 @@ finally:
         else:
             sys.modules[k] = v
 chk("**顺序不同不算 drift**（否则每次注册都白改一遍）",
-    not _calls2["updated"] and res_o.get("existing") == ["claw-weekly-report"],
+    not _calls2["updated"] and res_o.get("existing") == ["data-steward-weekly-report"],
     str(res_o))
 
 print("\n=== 模型也必须进 drift 比对（花费保护会静默跳过作业）===\n")
@@ -281,14 +281,14 @@ print("\n=== 模型也必须进 drift 比对（花费保护会静默跳过作业
 # 实测踩过：换掉一个欠费的模型之后整条恢复链停摆，日志里只有一行 ERROR。
 # 这是「名字相同不代表定义相同」的第三次（script → skills → model）。
 _calls3 = {"created": [], "updated": []}
-_probe3 = dict(C.JOBS["claw-escalate"])
-_stale3 = _consistent("claw-escalate", _probe3) | {"model": "老模型"}
+_probe3 = dict(C.JOBS["data-steward-escalate"])
+_stale3 = _consistent("data-steward-escalate", _probe3) | {"model": "老模型"}
 _fake.list_jobs = lambda include_disabled=False: [_stale3]
 _fake.create_job = lambda **kw: _calls3["created"].append(kw)
 _fake.update_job = lambda job_id, updates: _calls3["updated"].append(
     (job_id, updates)) or {"id": job_id}
 _saved_jobs3 = C.JOBS
-C.JOBS = {"claw-escalate": _probe3}
+C.JOBS = {"data-steward-escalate": _probe3}
 _saved_home = os.environ.get("HERMES_HOME")
 os.environ["HERMES_HOME"] = str(ROOT / ".hermes" / "home")
 sys.modules["cron"], sys.modules["cron.jobs"] = _pkg, _fake
@@ -313,6 +313,52 @@ chk("**pin 的模型与全局配置不符会被判 drift**（否则作业被静�
 chk("修正时把模型 pin 成当前配置",
     (_calls3["updated"][0][1].get("model") if _calls3["updated"] else None)
     == _cfg_model, str(_calls3["updated"])[:90])
+
+# 命名迁移必须保留作业身份、暂停状态，且重复注册不会重新创建。
+_records = [_consistent(name.replace("data-steward-", "claw-", 1), job)
+            | {"enabled": False} for name, job in C.JOBS.items()]
+_original_ids = {j["id"] for j in _records}
+_created_migration = []
+_fake.list_jobs = lambda include_disabled=False: _records
+_fake.create_job = lambda **kw: _created_migration.append(kw)
+def _update_migration(jid, updates):
+    rec = next(j for j in _records if j["id"] == jid)
+    rec.update(updates)
+    if isinstance(rec.get("schedule"), str):
+        rec["schedule"] = _fake.parse_schedule(rec["schedule"])
+    return rec
+_fake.update_job = _update_migration
+sys.modules["cron"], sys.modules["cron.jobs"] = _pkg, _fake
+try:
+    migrated = C.ensure_jobs(str(ROOT))
+    again = C.ensure_jobs(str(ROOT))
+    chk("旧名称原地迁移，保留 ID 与暂停状态",
+        {j["id"] for j in _records} == _original_ids
+        and {j["name"] for j in _records} == set(C.JOBS)
+        and all(j["enabled"] is False for j in _records)
+        and not migrated.get("errors"))
+    chk("重复注册不重建、不重复更新", not _created_migration
+        and not again["updated"] and len(again["existing"]) == len(C.JOBS))
+    old = _consistent("claw-resume", C.JOBS["data-steward-resume"]) | {"enabled": True}
+    old["id"] = "duplicate-legacy-id"
+    _records.append(old)
+    duplicate = C.ensure_jobs(str(ROOT))
+    chk("新旧同时存在时停用旧作业，保留历史", old["enabled"] is False
+        and old in _records and not _created_migration and not duplicate.get("errors"))
+    # 更新失败必须报告，不能另建一份旧任务的替代品。
+    _records[:] = [_consistent("claw-resume", C.JOBS["data-steward-resume"])]
+    saved_jobs = C.JOBS
+    C.JOBS = {"data-steward-resume": saved_jobs["data-steward-resume"]}
+    _fake.update_job = lambda *args: None
+    failed = C.ensure_jobs(str(ROOT))
+    C.JOBS = saved_jobs
+    chk("迁移失败不创建第二份作业", bool(failed.get("errors")) and not _created_migration)
+finally:
+    for k, v in _saved.items():
+        if v is None:
+            sys.modules.pop(k, None)
+        else:
+            sys.modules[k] = v
 
 print("\n=== 拿不到 Hermes 时不崩 ===\n")
 

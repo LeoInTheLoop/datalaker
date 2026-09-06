@@ -224,11 +224,90 @@ CREATE TABLE IF NOT EXISTS asset_provenance (
     ts          REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_prov_asset ON asset_provenance(asset, ts);
+
+-- 资产档案（R6 闭环 A）：**认知可复用 —— 不回源库也说得清一张表。**
+--
+-- 在这之前有两个毛病。一是每问一次结构就回源库三趟往返
+-- （`describe_asset`：列、外键、lake 清单），新会话等于从零开始。
+-- 二是推断与人工确认混在 `asset_semantics` 里，靠 `confirmed_by`
+-- 的字符串前缀（`system:fk_inference`）区分，而 `UNIQUE(asset,key)`
+-- 让人一确认就把推断**覆盖掉** —— 「系统曾经猜错过什么」查不出来，
+-- 而那正是下次少犯错的依据。
+--
+-- 三类内容按 `status` 分行存，**各自成行，互不覆盖**：
+--
+--   observed   源库里到底有什么。**只有采集路径写**（`services/catalog.py`），
+--              没有任何工具让模型写这一层 —— 模型能改事实的那一刻，
+--              整套档案就不可信了
+--   inferred   推断。必须带 `evidence`，默认待验证
+--   confirmed  人确认。记确认人与依据；确认**不删**推断，只 supersede
+--   refuted    被否定的假设。留着，免得下次再猜同一个错
+--
+-- append-only：改写等于伪造审计轨（与 `decisions`、`asset_provenance` 同一条原则）。
+-- 取代关系记在 `superseded_by`，旧行仍然查得到。
+--
+-- **旧档案是比较基线，不能证明源库没变。** 读档省的只是重复往返；
+-- 发现变化仍然需要新的观测（闭环 B）。
+CREATE TABLE IF NOT EXISTS asset_catalog (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset         TEXT NOT NULL,        -- acme.fin_invoice
+    kind          TEXT NOT NULL,        -- schema / foreign_keys / ownership / link
+    key           TEXT NOT NULL,        -- 同一 kind 下的条目名
+    value         TEXT NOT NULL,        -- JSON 或一句话
+    status        TEXT NOT NULL CHECK (status IN ('observed','inferred','confirmed','refuted')),
+    evidence      TEXT,                 -- 凭什么这么说（JSON）
+    actor         TEXT NOT NULL,        -- connector:acme / system:fk_inference / 人
+    observed_at   REAL NOT NULL,        -- 这条内容对应的观测或确认时刻
+    fingerprint   TEXT,                 -- 内容指纹：没变就不再写一行
+    superseded_by INTEGER               -- 被哪一行取代；NULL = 当前有效
+);
+CREATE INDEX IF NOT EXISTS ix_cat_cur ON asset_catalog(asset, kind, superseded_by);
 CREATE INDEX IF NOT EXISTS ix_appr_hash ON approvals(action_hash, run_id);
 CREATE INDEX IF NOT EXISTS ix_dec_appr  ON decisions(approval_id);
 """
 
 TTL = 72 * 3600
+
+# 谁取代谁（`asset_catalog`）。**确认不删推断，只把它标成被取代的。**
+#
+# observed 只取代 observed：源库多了一列，不代表人定过的口径就失效了 ——
+# 那是两码事，失效判断由巡检显式做（闭环 B），不在这里顺手替人决定。
+_SUPERSEDES = {
+    "observed":  ("observed",),
+    "inferred":  ("inferred",),
+    "confirmed": ("inferred", "confirmed", "refuted"),
+    "refuted":   ("inferred", "refuted"),
+}
+CATALOG_STATUS = tuple(_SUPERSEDES)
+
+
+def _catalog_norm(value, evidence, fingerprint):
+    """档案行的三处规范化，两个后端共用（值、依据、指纹）。"""
+    val = value if isinstance(value, str) else json.dumps(
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    ev = evidence if isinstance(evidence, (str, type(None))) else json.dumps(
+        evidence, sort_keys=True, ensure_ascii=False)
+    fp = fingerprint or hashlib.sha256(val.encode()).hexdigest()[:16]
+    return val, ev, fp
+
+
+def _catalog_row(r):
+    """档案行 → dict。**`value` 是 JSON 就解开**，调用方不必各自 loads。"""
+    v = r[4]
+    if isinstance(v, str) and v[:1] in "[{":
+        try:
+            v = json.loads(v)
+        except Exception:                                    # noqa: BLE001
+            pass
+    ev = r[6]
+    if isinstance(ev, str) and ev[:1] in "[{":
+        try:
+            ev = json.loads(ev)
+        except Exception:                                    # noqa: BLE001
+            pass
+    return {"id": r[0], "asset": r[1], "kind": r[2], "key": r[3], "value": v,
+            "status": r[5], "evidence": ev, "actor": r[7],
+            "observed_at": float(r[8]), "superseded_by": r[9]}
 
 
 # 凭证类字段：**不参与动作身份**。
@@ -458,6 +537,61 @@ class PgStore:
                         "approval_id": aid, "detail": d, "ts": float(ts)})
         return out
 
+    # ---------- 资产档案（R6 闭环 A）----------
+    def catalog_put(self, asset, kind, key, value, status, actor,
+                    evidence=None, fingerprint=None):
+        """写一行档案，返回行 id；**内容没变就不写**，返回 None。
+
+        幂等靠 fingerprint：巡检每天跑一遍，源库没变就不该多出 365 行。
+        """
+        if status not in _SUPERSEDES:
+            raise ValueError(f"未知的档案状态：{status}（只认 {CATALOG_STATUS}）")
+        val, ev, fp = _catalog_norm(value, evidence, fingerprint)
+        marks = _SUPERSEDES[status]
+        with self.db.cursor() as c:
+            c.execute("SELECT id FROM asset_catalog WHERE asset=%s AND kind=%s"
+                      " AND key=%s AND status=%s AND fingerprint=%s"
+                      " AND superseded_by IS NULL",
+                      (asset, kind, key, status, fp))
+            if c.fetchone():
+                return None
+            c.execute(
+                "INSERT INTO asset_catalog (asset,kind,key,value,status,evidence,"
+                " actor,observed_at,fingerprint) VALUES"
+                " (%s,%s,%s,%s,%s,%s,%s,extract(epoch from now()),%s) RETURNING id",
+                (asset, kind, key, val, status, ev, actor, fp))
+            new_id = c.fetchone()[0]
+            c.execute(
+                "UPDATE asset_catalog SET superseded_by=%s WHERE asset=%s"
+                " AND kind=%s AND key=%s AND status = ANY(%s)"
+                " AND superseded_by IS NULL AND id <> %s",
+                (new_id, asset, kind, key, list(marks), new_id))
+        return new_id
+
+    def catalog(self, asset=None, kind=None, status=None,
+                current_only=True, limit=500):
+        """读档案。**默认只给当前有效的行**；要看历史传 current_only=False。"""
+        sql = ("SELECT id, asset, kind, key, value, status, evidence, actor,"
+               " observed_at, superseded_by FROM asset_catalog WHERE 1=1")
+        args = []
+        if asset:
+            sql += " AND (asset = %s OR asset LIKE %s)"
+            args += [asset, asset + ".%"]
+        if kind:
+            sql += " AND kind = %s"
+            args.append(kind)
+        if status:
+            sql += " AND status = %s"
+            args.append(status)
+        if current_only:
+            sql += " AND superseded_by IS NULL"
+        sql += " ORDER BY observed_at, id LIMIT %s"
+        args.append(limit)
+        with self.db.cursor() as c:
+            c.execute(sql, args)
+            rows = c.fetchall()
+        return [_catalog_row(r) for r in rows]
+
     def round_closed_at(self):
         with self.db.cursor() as c:
             c.execute("SELECT MAX(ts) FROM events WHERE kind='ROUND_CLOSED'")
@@ -559,10 +693,21 @@ class PgStore:
 
     def remember(self, asset, key, value, confirmed_by, source_item=None):
         with self.db.cursor() as c:
-            c.execute("INSERT INTO asset_semantics (asset,key,value,confirmed_by,source_item)"
-                      " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (asset,key) DO UPDATE SET"
+            # **source_item 也要更新。** 原先 DO UPDATE 只覆盖 value 和
+            # confirmed_by，于是口径改了、出处还是上一次那份审批 ——
+            # 新口径配旧出处，追溯时指向一份**根本没提过这条口径**的记录。
+            # `confirmed_at` 是 DOUBLE PRECISION NOT NULL 且**无默认值**，
+            # 原先 INSERT 压根没给它（新行必然 NOT NULL 违例），UPDATE 又
+            # 把 timestamptz 的 now() 往 double 里塞 —— 两条都跑不通，
+            # 也就是说 PG 后端的口径沉淀一直是坏的。演练跑在 SQLite 上，
+            # 所以没暴露。统一用 epoch，与本文件其它 PG 方法一致。
+            c.execute("INSERT INTO asset_semantics (asset,key,value,confirmed_by,"
+                      " confirmed_at,source_item)"
+                      " VALUES (%s,%s,%s,%s,extract(epoch from now()),%s)"
+                      " ON CONFLICT (asset,key) DO UPDATE SET"
                       " value=excluded.value, confirmed_by=excluded.confirmed_by,"
-                      " confirmed_at=now()",
+                      " confirmed_at=excluded.confirmed_at,"
+                      " source_item=excluded.source_item",
                       (asset, key, value, confirmed_by, source_item))
 
     def approver_stats(self, role):
@@ -858,6 +1003,54 @@ class Store:
                         "approval_id": aid, "detail": d, "ts": ts})
         return out
 
+    # ---------- 资产档案（R6 闭环 A）----------
+    def catalog_put(self, asset, kind, key, value, status, actor,
+                    evidence=None, fingerprint=None):
+        """写一行档案，返回行 id；**内容没变就不写**，返回 None。"""
+        if status not in _SUPERSEDES:
+            raise ValueError(f"未知的档案状态：{status}（只认 {CATALOG_STATUS}）")
+        val, ev, fp = _catalog_norm(value, evidence, fingerprint)
+        marks = _SUPERSEDES[status]
+        dup = self.db.execute(
+            "SELECT id FROM asset_catalog WHERE asset=? AND kind=? AND key=?"
+            " AND status=? AND fingerprint=? AND superseded_by IS NULL",
+            (asset, kind, key, status, fp)).fetchone()
+        if dup:
+            return None
+        cur = self.db.execute(
+            "INSERT INTO asset_catalog (asset,kind,key,value,status,evidence,"
+            " actor,observed_at,fingerprint) VALUES (?,?,?,?,?,?,?,?,?)",
+            (asset, kind, key, val, status, ev, actor, time.time(), fp))
+        new_id = cur.lastrowid
+        self.db.execute(
+            "UPDATE asset_catalog SET superseded_by=? WHERE asset=? AND kind=?"
+            f" AND key=? AND status IN ({','.join('?' * len(marks))})"
+            " AND superseded_by IS NULL AND id <> ?",
+            (new_id, asset, kind, key, *marks, new_id))
+        self.db.commit()
+        return new_id
+
+    def catalog(self, asset=None, kind=None, status=None,
+                current_only=True, limit=500):
+        """读档案。**默认只给当前有效的行**；要看历史传 current_only=False。"""
+        sql = ("SELECT id, asset, kind, key, value, status, evidence, actor,"
+               " observed_at, superseded_by FROM asset_catalog WHERE 1=1")
+        args = []
+        if asset:
+            sql += " AND (asset = ? OR asset LIKE ?)"
+            args += [asset, asset + ".%"]
+        if kind:
+            sql += " AND kind = ?"
+            args.append(kind)
+        if status:
+            sql += " AND status = ?"
+            args.append(status)
+        if current_only:
+            sql += " AND superseded_by IS NULL"
+        sql += " ORDER BY observed_at, id LIMIT ?"
+        args.append(limit)
+        return [_catalog_row(r) for r in self.db.execute(sql, args)]
+
     def round_closed_at(self):
         """这一轮宣告结束的时刻。**没结束返回 None。**
 
@@ -951,12 +1144,16 @@ class Store:
         return {"value": row[0], "confirmed_by": row[1]} if row else None
 
     def remember(self, asset, key, value, confirmed_by, source_item=None):
-        """答案沉淀。重复问同一件事是最快失去信任的方式。"""
+        """答案沉淀。重复问同一件事是最快失去信任的方式。
+
+        `source_item` 一并更新 —— 见 PgStore 同名方法里那段。
+        """
         self.db.execute(
             "INSERT INTO asset_semantics (asset, key, value, confirmed_by,"
             " confirmed_at, source_item) VALUES (?,?,?,?,?,?)"
             " ON CONFLICT(asset, key) DO UPDATE SET value=excluded.value,"
-            " confirmed_by=excluded.confirmed_by, confirmed_at=excluded.confirmed_at",
+            " confirmed_by=excluded.confirmed_by, confirmed_at=excluded.confirmed_at,"
+            " source_item=excluded.source_item",
             (asset, key, value, confirmed_by, time.time(), source_item))
         self.db.commit()
 

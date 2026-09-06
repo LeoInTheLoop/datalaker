@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """定时驱动器（readme 5.4 / 5.5 / 20.5）。**已被 Hermes 的 cron 取代。**
 
-    默认入口是 `.hermes/plugins/claw/cron.py` 登记的三个 no_agent 作业。
+    默认入口是 `.hermes/plugins/data-steward/cron.py` 登记的三个 no_agent 作业。
     这里保留 `--once`（手动兜一次、CI 里跑一遍）；守护模式要显式
     `CLAW_STANDALONE_SCHEDULER=1` 才起，**免得和 Hermes 的 cron 双份点火**。
 
@@ -88,7 +88,7 @@ def main():
 if __name__ == "__main__":
     if "--once" not in sys.argv and os.environ.get(
             "CLAW_STANDALONE_SCHEDULER") != "1":
-        print("定时任务已交给 Hermes 的 cron（.hermes/plugins/claw/cron.py）。\n"
+        print("定时任务已交给 Hermes 的 cron（.hermes/plugins/data-steward/cron.py）。\n"
               "  手动跑一次：python3 ops/scheduler.py --once\n"
               "  仍要独立守护：CLAW_STANDALONE_SCHEDULER=1 python3 ops/scheduler.py\n"
               "  两边同时开会双份点火 —— 催办邮件会发两遍。")

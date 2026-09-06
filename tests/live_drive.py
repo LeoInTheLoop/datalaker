@@ -197,12 +197,12 @@ def cmd_wait(rounds: int = 1) -> int:
     """
     log = pathlib.Path(GW_LOG)
     for i in range(rounds):
-        n0 = log.read_text(errors="replace").count("Running job 'claw-resume'") \
+        n0 = log.read_text(errors="replace").count("Running job 'data-steward-resume'") \
             if log.exists() else 0
         t0 = time.time()
         while time.time() - t0 < 300:
             time.sleep(8)
-            n = log.read_text(errors="replace").count("Running job 'claw-resume'") \
+            n = log.read_text(errors="replace").count("Running job 'data-steward-resume'") \
                 if log.exists() else 0
             if n > n0:
                 break

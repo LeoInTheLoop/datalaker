@@ -42,7 +42,8 @@ def is_block(r):
 
 from datasteward_gate import gate                              # noqa: E402
 from datasteward_gate.policy import POLICY, Level              # noqa: E402
-import claw.tools as T                                         # noqa: E402
+import importlib
+T = importlib.import_module("data-steward.tools")                                         # noqa: E402
 
 
 def _lake_ok():
@@ -90,7 +91,7 @@ chk("两个都在 policy.py 里显式声明",
     and POLICY.get("describe_asset") == (Level.L0, None),
     f'{POLICY.get("sql_query")} / {POLICY.get("describe_asset")}')
 
-_man = (ROOT / ".hermes" / "plugins" / "claw"
+_man = (ROOT / ".hermes" / "plugins" / "data-steward"
         / "plugin.yaml").read_text(encoding="utf-8")
 chk("manifest 也列了（否则 Hermes 那侧对不上）",
     "sql_query" in _man and "describe_asset" in _man)

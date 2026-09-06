@@ -41,7 +41,7 @@ v1 的 `expect` 只有各维度指标，没有「这一轮怎么算结束」。�
 
 ## 3. 阶段推进要人拍板 —— 周报从播报改成提案
 
-v1 没有 silver 决策点；v2 的周报（cron `claw-weekly-report`）带**提案**：
+v1 没有 silver 决策点；v2 的周报（cron `data-steward-weekly-report`）带**提案**：
 
 > 「未完成的 3 条：继续催 / 放弃？bronze 已够 15 张表，
 > 是否开始清洗轮（silver）？我的建议是 X，理由是 …」

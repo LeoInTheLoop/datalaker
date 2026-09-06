@@ -92,7 +92,7 @@ user-rate limit`，整组红——而机制本身好好的。已经改走 outbox
 ### 等 cron 要认计数，不要傻等秒数
 
 ```python
-n0 = log.count("Running job 'claw-resume'")
+n0 = log.count("Running job 'data-steward-resume'")
 # 等到 n > n0，再多给 50 秒让模型跑完
 ```
 
@@ -148,6 +148,17 @@ Hermes 对没 pin 模型的 cron 作业有花费保护：全局模型一换就
 `rm -rf .hermes/live-home/sessions` 之后再问「这张表哪来的」。
 带着上下文问，它会用记忆答，测不出溯源能力——第一次问就是这么发现
 「查不到它就会猜」的（答成了 postgres 超级用户）。
+
+### `describe_asset` 现在默认读档案，不回源库
+
+R6 闭环 A 之后，它答的是 `asset_catalog` 里的快照，输出会写明「采于 X」。
+两个后果，演练时都会撞上：
+
+- **注入 schema 漂移（G1）之后，它不会自己发现。** 那正是闭环 B 要补的洞，
+  不是这次演练的 bug。要看新列，得让它带 `refresh=true` 再问一次。
+- **`reset_live.py` 把治理库整个删了，档案跟着没。** 所以重置后第一次
+  `describe_asset` 一定回源采集一次（输出会写「无档，刚刚采集了一次」）——
+  这是对的。第二次起才读档。
 
 ---
 

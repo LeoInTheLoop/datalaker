@@ -116,6 +116,11 @@ except Exception as e:                                        # noqa: BLE001
     print(f"  SKIP  读不到口径库（{type(e).__name__}）")
 
 checked = 0
+unparsed = []
+try:
+    import catalog
+except Exception:                                             # noqa: BLE001
+    catalog = None
 for asset, _k, value in sem:
     parts = asset.split(".")
     if len(parts) < 3:
@@ -123,10 +128,18 @@ for asset, _k, value in sem:
     tbl, col = f"{parts[0]}__{parts[1]}", parts[2]
     if tbl not in SILVER or col not in cols_of("silver", tbl):
         continue
-    # 从口径原文里抠出枚举 —— 人写的是「PAID / PENDING / UNPAID / VOID」
-    allowed = set(re.findall(r"\b[A-Z][A-Z_]{2,}\b", value))
-    if not allowed:
-        continue
+    # **先读人结构化登记的枚举**（define_semantics 的 allowed_values）。
+    structured = catalog.allowed_values(asset) if catalog else None
+    if structured:
+        allowed = set(structured)
+    else:
+        # 兜底：从口径原文里抠 —— 人写的是「PAID / PENDING / UNPAID / VOID」。
+        # 换个写法（小写枚举、中文值）就抠不出来，而**抠不出来必须报出来**：
+        # 原先这里直接 continue，那条断言于是静默消失，看着像通过了。
+        allowed = set(re.findall(r"\b[A-Z][A-Z_]{2,}\b", value))
+        if not allowed:
+            unparsed.append(f"{tbl}.{col}")
+            continue
     got = {r.split(",")[0] for r in q(
         f'SELECT DISTINCT "{col}" FROM iceberg.silver."{tbl}"'
         f' WHERE "{col}" IS NOT NULL')}
@@ -140,6 +153,13 @@ for asset, _k, value in sem:
                        f' WHERE "{col}" IS DISTINCT FROM "{col}_raw"'))
         chk(f"{tbl}.{col} 确实被洗过（与原值有差异）", diff > 0,
             f"{diff} 行不同")
+if unparsed:
+    # **不判失败，但必须看得见。** 「去掉首尾空格」这类口径本来就没有枚举，
+    # 判它失败是误报；可「限定了取值却写成机器读不懂的样子」也藏在这批里，
+    # 而两者从自然语言里分不开 —— 那正是要 allowed_values 的原因。
+    # 折中：如实报出未校验的条数，不让它悄悄消失。
+    print(f"  未校验  {len(unparsed)} 条 normalize_rule 没有结构化枚举："
+          f"{unparsed[:5]} —— 若其中有限定取值的，重定口径时补 allowed_values")
 if not checked:
     print("  SKIP  没有「已定枚举口径 且 已落 silver」的列可验")
 

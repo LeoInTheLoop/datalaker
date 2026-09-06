@@ -11,7 +11,7 @@
 import os
 import sys
 
-# datalaker 仓库根：.hermes/plugins/claw/__init__.py → 上溯四层
+# datalaker 仓库根：.hermes/plugins/data-steward/__init__.py → 上溯四层
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
@@ -81,7 +81,7 @@ def register(ctx):
     # 这一段告诉模型「什么时候该停下来问人」，它是**建议**：
     # 模型可以不听，而门禁照样拦得住（铁律 1）。
     # 反过来，不该把限制写进这里 —— 提示词层的东西证明不了绕不过。
-    ctx.register_system_prompt_section("claw-stop-points", _STOP_POINT_GUIDE)
+    ctx.register_system_prompt_section("data-steward-stop-points", _STOP_POINT_GUIDE)
 
     # 定时任务交给 Hermes 的 cron（M4 删重复）。**失败不能拖垮注册** ——
     # 门禁比定时催办重要得多；cron 起不来是运维问题，门禁挂不上是安全问题。
@@ -110,7 +110,7 @@ def _announce(msg, kind):
 
     观察者：写不进去也不能影响注册（门禁比记录重要得多）。
     """
-    print(f"[claw] {msg}")
+    print(f"[data-steward] {msg}")
     try:
         from datasteward_gate import store
         store().append_event("cron", kind, msg[:400])

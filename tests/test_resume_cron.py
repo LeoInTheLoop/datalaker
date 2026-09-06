@@ -127,12 +127,12 @@ print("\n=== 作业登记：名字相同不代表定义相同 ===\n")
 # cron 面上按表修正 —— 而不是按名字判重跳过。假 cron 面上测过（5.6 组），
 # 这里测真的：test-home 里躺过的那条老定义就是活证据。
 have = jobs()
-if have.get("claw-resume"):
+if have.get("data-steward-resume"):
     d = json.loads(JOBS_JSON.read_text(encoding="utf-8"))
     for j in (d["jobs"] if isinstance(d, dict) else d):
-        if j.get("name") == "claw-resume":
+        if j.get("name") == "data-steward-resume":
             j["monitor_script"] = None
-            j["script"] = "claw_resume.py"
+            j["script"] = "data_steward_resume.py"
             j["no_agent"] = True
     JOBS_JSON.write_text(json.dumps(d, ensure_ascii=False, indent=2),
                          encoding="utf-8")
@@ -140,14 +140,14 @@ if have.get("claw-resume"):
 with StubServer([{"text": "hi"}], port=STUB_PORT):
     reg = hermes("-z", "你好")
 
-j = jobs().get("claw-resume") or {}
+j = jobs().get("data-steward-resume") or {}
 chk("三个作业都登记进了真 cron", set(jobs()) >= {
-    "claw-resume", "claw-escalate", "claw-weekly-report"}, str(sorted(jobs())))
+    "data-steward-resume", "data-steward-escalate", "data-steward-weekly-report"}, str(sorted(jobs())))
 chk("**存量作业按定义表修正**（不是按名字跳过）",
-    j.get("monitor_script") == "claw_resumable.py"
+    j.get("monitor_script") == "data_steward_resumable.py"
     and not j.get("script") and not j.get("no_agent"),
     f'script={j.get("script")} monitor={j.get("monitor_script")}')
-if have.get("claw-resume"):
+if have.get("data-steward-resume"):
     # **不能只喊给流**：Hermes 在注册阶段把 stdout / stderr 都吞掉了
     # （实测两条流里都搜不到）。所以查那份留得下来的 —— 事件日志。
     import sqlite3
@@ -161,7 +161,7 @@ else:
 
 _shells = sorted(p.name for p in (HOME / "scripts").glob("*.py"))
 chk("壳脚本是 scripts/ 下的真文件（软链会被 Hermes 拒掉）",
-    {"claw_resumable.py", "claw_escalate.py"} <= set(_shells)
+    {"data_steward_resumable.py", "data_steward_escalate.py"} <= set(_shells)
     and not any((HOME / "scripts" / n).is_symlink() for n in _shells),
     str(_shells))
 
@@ -170,7 +170,7 @@ print("\n=== 会话 A：L3 被挂起，登记表记下这条线 ===\n")
 # 先打一次 baseline tick：monitor 第一次跑没有存量哈希，一律算「变了」。
 # 不先打的话，下面那条「没人批就不点模型」测的是 baseline，不是抑制。
 with StubServer([{"text": "无。"}], port=STUB_PORT):
-    base = hermes("cron", "run", "claw-resume")
+    base = hermes("cron", "run", "data-steward-resume")
 chk("baseline tick 跑通（monitor 源没崩）",
     base.returncode == 0 and "succeeded" in base.stdout, base.stdout.strip()[-80:])
 
@@ -194,7 +194,7 @@ RUN_A = waiting[0]["run_id"] if waiting else ""
 print("\n=== 没人批：monitor 输出没变 → 一次模型都不点 ===\n")
 
 with StubServer([{"text": "不该被叫到。"}], port=STUB_PORT) as s2:
-    tick = hermes("cron", "run", "claw-resume")
+    tick = hermes("cron", "run", "data-steward-resume")
     quiet = len(s2.requests)
 chk("tick 本身成功", tick.returncode == 0, tick.stdout.strip()[-80:])
 chk("**一次模型都没点**（一分钟一次的成本是一次 SQL）",
@@ -219,7 +219,7 @@ chk("monitor 源看得见这条线了（批准之后输出非空）",
 print("\n=== tick：唤醒 → Agent 自己再调一次工具 → 真写 bronze ===\n")
 
 with StubServer(SCRIPT, port=STUB_PORT) as s3:
-    wake = hermes("cron", "run", "claw-resume")
+    wake = hermes("cron", "run", "data-steward-resume")
     woke = len(s3.requests)
     blob3 = " ".join(c["content"] or "" for c in s3.tool_calls_made())
     prompts = " ".join(str(m.get("content") or "")
@@ -253,8 +253,8 @@ chk("没有开出第二条线（同一动作 = 同一条线）",
          ("running", "waiting_human", "done", "abandoned", "failed")}))
 
 with StubServer([{"text": "不该被叫到。"}], port=STUB_PORT) as s4:
-    hermes("cron", "run", "claw-resume")   # 收尾后输出变空 —— 这是一次变化
-    hermes("cron", "run", "claw-resume")   # 再一次：空对空，应当被抑制
+    hermes("cron", "run", "data-steward-resume")   # 收尾后输出变空 —— 这是一次变化
+    hermes("cron", "run", "data-steward-resume")   # 再一次：空对空，应当被抑制
     settle = len(s4.requests)
     after = len([r for r in s4.requests if r.get("tools")])
 chk("收尾后重新静默（不会每分钟为已走完的线白唤醒）", after <= 1,

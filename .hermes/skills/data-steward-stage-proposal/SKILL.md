@@ -1,5 +1,5 @@
 ---
-name: claw-stage-proposal
+name: data-steward-stage-proposal
 description: "周报写成提案：三选一、带建议和理由，等人拍板"
 version: 0.1.0
 license: MIT
@@ -16,7 +16,7 @@ metadata:
 
 ## 什么时候用
 
-`claw-weekly-report` 这个 cron 作业每次运行时。上面的 `## Script Output`
+`data-steward-weekly-report` 这个 cron 作业每次运行时。上面的 `## Script Output`
 里是已经算好的四段（本周完成 / 卡在谁那里 / 需要你决策 / 系统开销）——
 那些数字是脚本查库得来的，**不要重算，也不要改写**。
 

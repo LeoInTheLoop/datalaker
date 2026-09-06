@@ -1,35 +1,49 @@
 # 程序重排：Hermes 是主程序
 
-> 定稿于 2026-09-03。这份文件描述**目标形态**与**迁移顺序**，
-> 不是现状。现状见 `docs/handoff/R4.md`。
+> 初稿于 2026-09-03；第 0、1、7.5 节于 2026-09-06 更新为当前架构表述。
+> 其余迁移步骤与实测记录保留历史背景，不代表当前进度。
+> 产品与现状见 [README](../readme.md)，开发约定见 [CLAUDE.md](../CLAUDE.md)，
+> 最新阶段见 [R6](handoff/R6.md)。
 
 ## 0. 一句话
 
-**Hermes 就是 Data Steward Claw 本体。** 邮件、loop、会话持久化、记忆
-全都在它上面缝；体外只留一层管起停与限额的监控；再外面是能独立运行的 lakehouse。
+**使用 Hermes 原有 agent loop，通过 `data-steward` 扩展注册数据治理工具、
+接入执行前后的 hook，并使用 Hermes cron 推进长时任务。**
+产品名为 Data Steward Claw，运行时为 Hermes，扩展名为 `data-steward`。
+当前代码入口为 `.hermes/plugins/data-steward/`，插件与工具集标识均为 `data-steward`。
 
 ## 1. 四层
 
-```
-┌─────────────────────────────────────────────────┐
-│ ④ supervisor    起停 Hermes · token 限额 · 健康   │  体外，Hermes 挂了它还活着
-├─────────────────────────────────────────────────┤
-│ ③ Hermes（主程序）= Data Steward Claw            │
-│    loop / 工具分发 / 邮件收发 / 会话 / 记忆        │  ← 上游提供
-│    ┌───────────────────────────────────────┐    │
-│    │ claw/  我们缝上去的插件与工具           │    │  ← 我们写
-│    │  门禁(pre_tool_call) · 数据工具 ·        │    │
-│    │  Connector 护栏 · 台账 · Policy Sync    │    │
-│    └───────────────────────────────────────┘    │
-├─────────────────────────────────────────────────┤
-│ ② approval      独立进程 + 独立 DB 账号（铁律 2） │  故意不在 Hermes 里
-├─────────────────────────────────────────────────┤
-│ ① lakehouse     Trino / Iceberg / MinIO / 源库    │  Claw 挂了它仍是完整交付物
-└─────────────────────────────────────────────────┘
+这里的四层表示运行职责。`data-steward` 加载在 Hermes 进程内，
+工具分发、模型循环和定时调度都使用 Hermes 的机制。
+
+```text
+④ 体外监控（待补）
+   起停 Hermes、健康检查、进程级限额；已有只读状态面板
+
+③ Hermes 进程
+   agent loop：模型思考 → 选工具 → 读取结果 → 继续
+   data-steward 扩展接入同一运行流程：
+     tools              接入、查询、清洗、口径维护等业务操作
+     pre_tool_call      策略、审批票据、参数、预算与 WIP 校验
+     post_tool_call     执行记录、任务状态与资产来历
+     post_llm_call      模型用量记录
+     Hermes cron        恢复、催办、阶段提案
+     提示词与 Skill     工作说明
+
+② 审批 callback（独立进程、独立数据库账号）
+   接收签名审批并写入决定；Agent 无权自行写决定
+
+① 数据平台与治理数据库（独立服务）
+   Trino / Iceberg / MinIO：bronze → silver → gold
+   治理库：角色、口径、审批、任务、资产来历
+   外部源系统通过受控只读入口访问，不属于本项目交付的平台
 ```
 
-层与层之间只走**接口**，不走 import：supervisor 用进程信号与用量 API，
-Hermes 用工具签名，lakehouse 用 SQL。
+`.hermes/plugins/data-steward/` 负责注册扩展，具体实现还在
+`plugins/datasteward_gate/` 和 `services/` 中。工具可直接 import 业务模块，
+这些目录不是另一套框架，也不代表独立进程。
+已有 lake 数据和治理记录可独立查询；Hermes 停止后，其 cron、催办与自动推进会停止。
 
 ## 2. 现状与目标最大的一条差
 
@@ -42,7 +56,7 @@ Hermes 用工具签名，lakehouse 用 SQL。
 
 ```
 现在   脚本 ──调用──► services/*                     Hermes 在旁边看着
-目标   脚本 ──发消息──► Hermes ──调用工具──► claw/*    脚本扮演王姐、李哥
+目标   脚本 ──发消息──► Hermes ──调用工具──► data-steward 业务代码    脚本扮演王姐、李哥
 ```
 
 这不是重构，是**把被测对象换了**。在此之前测的是「我写的函数对不对」，
@@ -78,6 +92,9 @@ Hermes 用工具签名，lakehouse 用 SQL。
 
 ## 5. 目标目录
 
+逻辑名称统一为 `data-steward`；Python 包名使用 `data_steward`。
+下列目录仍是迁移方案，当前注册入口已改为 `.hermes/plugins/data-steward/`，其余业务模块的物理搬迁仍待实施。
+
 ```
 datalaker/
 ├── lakehouse/                ① 独立可交付的数据平台
@@ -92,7 +109,7 @@ datalaker/
 │   ├── tokens.py             HMAC 签名令牌
 │   └── store.py              两表 append-only（Agent 侧只读）
 │
-├── claw/                     ③ 缝在 Hermes 上的插件
+├── data_steward/             ③ data-steward 的 Python 实现包（目标目录）
 │   ├── plugin.yaml           照 plugins/platforms/email 的格式
 │   ├── gate/                 pre_tool_call 门禁 + policy 表
 │   ├── connector/            源系统唯一出入口 + 账本 + 画像取样入口
@@ -287,7 +304,7 @@ Hermes → tool_call("ingest_table") → gate（PENDING，工具 handler 根本�
 
 ### M1 实测记录（2026-09-03）
 
-Hermes 零改动，插件住在 `datalaker/.hermes/plugins/claw/`，
+Hermes 零改动，插件住在 `datalaker/.hermes/plugins/data-steward/`，
 靠 `HERMES_ENABLE_PROJECT_PLUGINS=1` 加载。途中摸清四件文档没写的事：
 
 | 发现 | 说明 |
@@ -357,7 +374,7 @@ Hermes 启动时导入它自己的 `plugins`（它就是从那儿加载插件的
 
 现在在插件的 `_ensure_path()` 里用别名桥过去。**这是 M7 必须改包名最硬的
 证据**：两个 `plugins` 撞车不是靠 sys.path 顺序能解决的，Hermes 先导入就先占名。
-M7 把 `plugins/datasteward_gate/` 搬成 `claw/gate/` 之后，那段桥接删掉。
+M7 把 `plugins/datasteward_gate/` 搬成 `data_steward/gate/` 之后，那段桥接删掉。
 
 ### M2 原始记录（2026-09-03）
 
@@ -390,19 +407,17 @@ M7 把 `plugins/datasteward_gate/` 搬成 `claw/gate/` 之后，那段桥接删�
 
 ## 7.5 关于改不改 Hermes 本体
 
-**可以改，但尽量不改** —— 因为这个 checkout 最终就是产品本身
-（Hermes → Data Steward Claw）。优先级：
+优先使用 Hermes 的扩展接口。`data-steward` 的业务工具、审批 hook、领域状态和
+定期作业接在 Hermes 现有机制上；当前未修改上游代码。
 
-```
-① 项目插件（./.hermes/plugins/）  零改动，Hermes 可随时 rebase 上游
-② 配置 / 环境变量                 零改动
-③ 改 Hermes 本体                  可以，但每处都要能说清「为什么插件做不到」
-```
+如果接口无法满足必要的执行、状态或上下文需求，允许对本体做最小修改。
+每处记录扩展接口为何不足、改动范围、上游升级的兼容影响和验证结果。
+不要为了“零改动”而依赖脆弱的内部函数替换或牺牲必要行为。
 
-M1 走的是 ①：`HERMES_ENABLE_PROJECT_PLUGINS=1` 时 Hermes 会扫
-`./.hermes/plugins/`，**插件住在 datalaker 仓库里**，Hermes 目录保持干净。
-等到需要改品牌、改默认 SOUL、或者某个钩子上游根本没有时，再动 ③ ——
-届时把每处改动记在这一节，rebase 上游时才知道要保住什么。
+命名迁移需同时处理目录、注册标识、工具集、cron、Skill、配置和测试引用，
+并迁移已有定时作业以避免重复运行。产品名 Data Steward Claw 与历史记录中的原名保留。
+注册目录、插件、工具集、cron 与 Skill 已按上述名称迁移；旧 cron 原地更新并保留作业 ID，
+新旧作业并存时停用旧作业。数据库身份、产品名和历史记录保持原名。
 
 ## 8. 已知的待定项
 

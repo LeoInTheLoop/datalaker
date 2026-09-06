@@ -640,20 +640,23 @@ def _trace_asset(args: dict, **_: Any) -> str:
     key = name.replace("__", ".", 1) if "__" in name and "." not in name else name
 
     try:
+        import catalog
         from datasteward_gate.approvals import open_store
         # **init_schema=True**：DDL 是幂等的，而存量库可能建于新表之前。
         # 加一张表之后老库里没有它 —— 读工具因此报「no such table」，
         # 看起来像「查不到这张表的来历」，实际是库没升级。两者差很远。
         with open_store(readonly=False, init_schema=True) as st:
             rows = st.provenance(key)
-            sem = st.db.execute(
-                "SELECT asset, key, value, confirmed_by, confirmed_at"
-                " FROM asset_semantics WHERE asset LIKE ? ORDER BY asset",
-                (f"{key}%",)).fetchall() if hasattr(st.db, "execute") else []
+            # 口径原先用 `hasattr(st.db, "execute")` 分支去读，而 psycopg3 的
+            # Connection **也有** `.execute` —— 于是 Postgres 走进了 SQLite
+            # 那条路，`?` 占位符直接抛错，被外层吞成「读不到治理库」：
+            # PG 上这个工具其实一直是全瘫的。改走 catalog 里按后端分派的读法。
+            sem = catalog.semantics(key)
+            cat = st.catalog(asset=key)
     except Exception as e:                                   # noqa: BLE001
         return f"读不到治理库：{type(e).__name__}: {str(e)[:120]}"
 
-    if not rows and not sem:
+    if not rows and not sem and not cat:
         return (f"# {key}\n\n**无档** —— 台账里没有这张表的任何记录。\n"
                 f"湖里若有数据而台账为空，那是缺口本身：没人授权过、"
                 f"也没人批准过。**如实报给审计，别猜「大概是示例数据」。**")
@@ -675,15 +678,35 @@ def _trace_asset(args: dict, **_: Any) -> str:
                  f"| `{(r['approval_id'] or '')[:8] or '—'}` |")
 
     if sem:
-        L += ["", "## 口径（谁定的）"]
-        for a, k, v, by, at in sem:
-            col = a[len(key) + 1:] if a.startswith(key + ".") else a
-            L.append(f"- `{col}` [{k}]：{v}\n  —— **{by}** 确认（{_ts(at)}）")
+        # **推断和人确认要分开。** 混着列出来，模型读到的就是一句同样
+        # 权威的话 —— 而 `system:` 开头的那些只是外键推断出来的。
+        L += ["", "## 口径"]
+        for s_ in sorted(sem, key=lambda x: x["key"]):
+            tag = catalog.LABEL.get(s_["status"], s_["status"])
+            verb = "确认" if s_["status"] == "confirmed" else "推断"
+            L.append(f"- `{s_['key']}`［{tag}］{str(s_['value'])[:120]}"
+                     f"\n  —— **{s_['by']}** {verb}（{_ts(s_['at'])}）")
     else:
         L += ["", "## 口径", "- **无档**：没有人定过这张表的口径"]
 
-    L += ["", "> 每一条都来自资产台账（append-only），"
-          "**查不到就写「无档」** —— 不猜、不补编。"]
+    obs = [r for r in cat if r["status"] == "observed"]
+    other = [r for r in cat if r["status"] != "observed"]
+    if obs:
+        at = max(r["observed_at"] for r in obs)
+        L += ["", f"## 结构档案［观测］采于 {_ts(at)}",
+              f"- {len(obs)} 条观测事实在档（列、主键、外键）。"
+              f"看内容用 `describe_asset`，它不回源库。"]
+    if other:
+        L += ["", "## 推断与否定（**留着是为了下次少猜同一个错**）"]
+        for r in other:
+            L.append(f"- [{r['kind']}/{r['key']}]"
+                     f"［{catalog.LABEL.get(r['status'], r['status'])}］"
+                     f"{json.dumps(r['value'], ensure_ascii=False)[:100]}"
+                     f" —— {r['actor']}（{_ts(r['observed_at'])}）")
+
+    L += ["", "> 台账（append-only）与档案都只报查得到的，"
+          "**查不到就写「无档」** —— 不猜、不补编。"
+          "［观测］源库读到的　［推断］待验证　［已确认］人拍过板。"]
     return "\n".join(L)
 
 
@@ -750,11 +773,29 @@ def _define_semantics(args: dict, **_: Any) -> str:
     if not by:
         return ("错误：需要 confirmed_by —— **口径必须记是谁定的**。"
                 "没有出处的口径下次没人认账，等于没定。")
+    # 枚举**要结构化地给**，不要只写在自然语言里。
+    # 原先只有 value 一段话（「统一成全大写，枚举只允许 PAID / PENDING /
+    # UNPAID / VOID」），下游验收得拿正则 `\b[A-Z][A-Z_]{2,}\b` 去抠 ——
+    # 换个写法（小写枚举、中文值）就抠不出来，而那时断言会**静默跳过**
+    # 而不是报错。让机器去解析自然语言，是这类「看着通过了」的来源。
+    allowed = args.get("allowed_values")
+    if isinstance(allowed, str):
+        allowed = [x.strip() for x in allowed.replace("、", ",").split(",")
+                   if x.strip()]
+    if allowed is not None and not isinstance(allowed, list):
+        return "错误：allowed_values 要给字符串数组，如 [\"PAID\", \"VOID\"]。"
+
     try:
         from datasteward_gate import store
         st = store()
         old = st.known(asset, key)
         st.remember(asset, key, value, by, source_item=args.get("source_item"))
+        if allowed:
+            import catalog
+            catalog.confirm(asset, "constraint", "allowed_values",
+                            [str(x) for x in allowed], actor=by,
+                            evidence={"from": key, "source_item":
+                                      args.get("source_item") or ""})
     except Exception as e:                                   # noqa: BLE001
         return f"沉淀 {asset}.{key} 失败：{type(e).__name__}: {str(e)[:200]}"
     if old and old.get("value") != value:
@@ -762,7 +803,9 @@ def _define_semantics(args: dict, **_: Any) -> str:
                 f"  原：{old['value'][:80]}（{old.get('confirmed_by')}）\n"
                 f"  新：{value[:80]}（{by}）\n"
                 f"**口径改了，之前按旧口径洗过的数据要重洗** —— 别忘了这件事。")
-    return (f"已记下 {asset}.{key} = {value[:100]}（{by} 确认）。"
+    tail = (f" 枚举已结构化登记：{'、'.join(map(str, allowed))}"
+            f"（下游按它校验，不再从这句话里抠）。" if allowed else "")
+    return (f"已记下 {asset}.{key} = {value[:100]}（{by} 确认）。{tail}"
             f"以后不会再就这一条问人。")
 
 
@@ -783,6 +826,11 @@ _SCHEMAS.update({
             "value": {"type": "string", "description": "口径本身，一句话说清"},
             "confirmed_by": {"type": "string",
                              "description": "谁确认的（邮箱或姓名）。必填"},
+            "allowed_values": {"type": "array", "items": {"type": "string"},
+                               "description": "口径限定了取值范围时**必须给**，"
+                                              "如 [\"PAID\",\"PENDING\",\"VOID\"]。"
+                                              "只写在 value 那句话里不算 —— "
+                                              "下游要靠它校验清洗结果"},
             "source_item": {"type": "string",
                             "description": "依据的那份审批/提问 id，可空"}},
             "required": ["asset", "key", "value", "confirmed_by"]},
@@ -841,11 +889,16 @@ def _sql_query(args: dict, **_: Any) -> str:
 
 
 def _describe_asset(args: dict, **_: Any) -> str:
-    """一张表的结构 + **怎么和别的表连**（L0，只读）。
+    """一张表的结构、负责人、口径 + **怎么和别的表连**（L0，只读）。
 
-    Agent 要 join，先得知道拿哪个字段连。以前只能一张张 `get_table_metadata`
-    去源库拉，既慢又拿不到外键 —— 关系全靠猜表名。这里把三样东西一次给全：
-    列与主键、外键指向、以及**已经落进 lake 的那些表之间**可用的 join 路径。
+    **先读档案，读不到才回源库。** 以前每调一次就是三趟源库往返
+    （列、外键、lake 清单），新会话等于从零开始 —— 而「这张表长什么样」
+    是上一次已经问过的事。现在 `services/catalog.py` 把观测事实存下来，
+    这里默认读它，并**报出快照采于什么时候**：省往返的代价是答案有延迟，
+    把延迟藏起来就变成了撒谎。要确认源库现在是不是这样，传 `refresh=true`。
+
+    每一条都标出是［观测］、［推断］还是［已确认］。R5 实测过一次
+    「查不到它就会猜」，猜出来的答案比不答更糟 —— 标注是这个工具的正事。
 
     join 路径只在 lake 侧给：源系统禁关系展开（铁律 3），
     在源库上提示「你可以这样 join」等于鼓励它去踩那条线。
@@ -856,41 +909,21 @@ def _describe_asset(args: dict, **_: Any) -> str:
     tbl = str(args.get("table") or "").strip()
     if not (src and tbl):
         return "错误：需要 source 与 table。"
+    refresh = str(args.get("refresh") or "").lower() in ("1", "true", "yes")
 
-    out = []
     try:
-        import connector
-        d = connector.describe_table(src, tbl)
-        cols = d.get("columns") or []
-        pk = d.get("primary_key") or []
-        out.append(f"{src}.{tbl}：{len(cols)} 列"
-                   + (f"，主键 {'、'.join(pk)}" if pk else "，**没有主键**"))
-        # `describe_table` 返回的是原始行元组 (name, type, is_nullable)，
-        # 不是 dict —— 按 dict 读会 TypeError，而那个错会被外面
-        # 包成一句「读结构失败」，看不出是自己写错了取值方式。
-        out.append("列：" + "、".join(
-            f"{c[0]}:{c[1]}" + ("" if str(c[2]).upper() == "YES" else "*")
-            for c in cols[:40]))
-        out.append("（`*` = NOT NULL）")
-        if len(cols) > 40:
-            out.append(f"（还有 {len(cols) - 40} 列没列出）")
+        import catalog
+        snap, hit_source = catalog.snapshot(src, tbl, refresh=refresh)
     except Exception as e:                                   # noqa: BLE001
         return f"读 {src}.{tbl} 的结构失败：{type(e).__name__}: {str(e)[:200]}"
+    if not snap:
+        return (f"读不到 {src}.{tbl} 的结构：档案里没有，源库也没采到。"
+                f"**别猜** —— 先确认这张表存在、且这个源已经接入。")
 
-    # 外键：源库自己声明的关系，比任何猜测都准。
-    try:
-        fks = [f for f in connector.list_foreign_keys(src)
-               if f[0].split(".")[-1] == tbl or f[2].split(".")[-1] == tbl]
-    except Exception:                                        # noqa: BLE001
-        fks = []
-    if fks:
-        out.append("外键关系：")
-        for t, c, rt, rc in fks[:12]:
-            out.append(f"  {t}.{c} → {rt}.{rc}")
-    else:
-        out.append("外键关系：源库没有声明（不代表没有关系，可能靠约定）")
+    out = [catalog.render(snap, hit_source=hit_source)]
 
     # join 路径：**只给已经落进 lake 的那些**。没落进来的先接进来再说。
+    # 这一段查的是 Trino（我们自己的湖），不是源库。
     try:
         import sync
         have = set(sync._trino(
@@ -900,20 +933,20 @@ def _describe_asset(args: dict, **_: Any) -> str:
         have = set()
     me = f"{src}__{tbl}"
     paths = []
-    for t, c, rt, rc in fks:
+    for t, c, rt, rc in (snap.get("foreign_keys") or []):
         a, b = f"{src}__{t.split('.')[-1]}", f"{src}__{rt.split('.')[-1]}"
         if a in have and b in have:
             paths.append(f'  iceberg.bronze."{a}" a JOIN iceberg.bronze."{b}" b'
                          f'  ON a.{c} = b.{rc}')
     if paths:
-        out.append(f"可用的 join（两边都已在 lake 里）：")
+        out.append("\n## 可用的 join（两边都已在 lake 里）")
         out += paths[:8]
         out.append("**在 lake 里 join，不要在源库上关联**（源系统禁关系展开）。")
     elif me not in have:
-        out.append(f"这张表还没接进 lake（bronze 里没有 {me}），"
+        out.append(f"\n这张表还没接进 lake（bronze 里没有 {me}），"
                    f"要连表得先 ingest_table。")
     else:
-        out.append("暂时没有两边都在 lake 里的 join 路径 —— "
+        out.append("\n暂时没有两边都在 lake 里的 join 路径 —— "
                    "对端表还没接进来。")
     return "\n".join(out)
 
@@ -940,12 +973,18 @@ _SCHEMAS.update({
     "describe_asset": {
         "name": "describe_asset",
         "description": (
-            "一张表的列、类型、主键、外键指向，以及**怎么和别的表连**。"
-            "要 join 之前先看这个 —— 关系是源库声明的，比猜表名准。"
+            "一张表的列、类型、主键、外键、负责人和已定的口径，以及"
+            "**怎么和别的表连**。要 join 或者要问人之前先看这个。"
+            "**默认读档案，不打扰源库**，返回里会写明快照采于何时；"
+            "每条都标了［观测］／［推断］／［已确认］—— 标着推断的别当结论。"
         ),
         "parameters": {"type": "object", "properties": {
             "source": {"type": "string", "description": "源系统 id"},
-            "table": {"type": "string", "description": "表名"}},
+            "table": {"type": "string", "description": "表名"},
+            "refresh": {"type": "boolean",
+                        "description": "重新回源库采一次。**只在怀疑源库结构"
+                                       "变了时才用** —— 平时读档就够，"
+                                       "每次都 refresh 等于没有档案"}},
             "required": ["source", "table"]},
     },
 })
@@ -1272,7 +1311,7 @@ def register_tools(ctx) -> None:
     for name, fn in _SCHEMAS.items():
         ctx.register_tool(
             name=name,
-            toolset="claw",
+            toolset="data-steward",
             schema=fn,
             handler=_HANDLERS[name],
             description=fn["description"],

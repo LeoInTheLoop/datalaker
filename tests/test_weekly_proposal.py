@@ -100,12 +100,12 @@ with StubServer([{"text": "hi"}], port=STUB_PORT):
     hermes("-z", "你好")                       # 触发插件注册 / 作业按表修正
 
 _jobs = json.loads((HOME / "cron" / "jobs.json").read_text(encoding="utf-8"))
-_wk = next((j for j in _jobs["jobs"] if j["name"] == "claw-weekly-report"), {})
-chk("周报作业带上了 skill", _wk.get("skills") == ["claw-stage-proposal"],
+_wk = next((j for j in _jobs["jobs"] if j["name"] == "data-steward-weekly-report"), {})
+chk("周报作业带上了 skill", _wk.get("skills") == ["data-steward-stage-proposal"],
     str(_wk.get("skills")))
 chk("周报点模型（要给建议和理由，不是播报）", not _wk.get("no_agent"))
 chk("四段数字仍由脚本供（事实不让模型编）",
-    _wk.get("script") == "claw_weekly_report.py")
+    _wk.get("script") == "data_steward_weekly_report.py")
 
 print("\n=== cron 唤醒：skill 真的被注入了 ===\n")
 
@@ -117,7 +117,7 @@ SCRIPT = [CALL("propose_stage_decision",
           {"text": "提案已发，等回复。"}]
 
 with StubServer(SCRIPT, port=STUB_PORT) as s1:
-    run = hermes("cron", "run", "claw-weekly-report")
+    run = hermes("cron", "run", "data-steward-weekly-report")
     prompts = " ".join(str(m.get("content") or "")
                        for r in s1.requests for m in (r.get("messages") or []))
     blob = " ".join(c["content"] or "" for c in s1.tool_calls_made())

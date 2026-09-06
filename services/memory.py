@@ -8,7 +8,9 @@
    让交互从「一个模板发所有人」变成「按人调整」
 
 **两类都不需要新采集**：关联从源库元数据推断，偏好从已有的
-approvals / decisions 统计。存储复用 `asset_semantics`，不加表。
+approvals / decisions 统计。偏好与尝试计数复用 `asset_semantics`；
+关联从 R6 起落 `asset_catalog` 的 inferred 层 —— 推断和人确认必须
+分行存，否则人一确认就把推断覆盖掉。
 
 > 记忆的价值不在存，在**取回时机**：在 Agent 准备提问之前先查一次，
 > 命中就不问。否则沉淀了也等于没有。
@@ -28,7 +30,7 @@ def _store(readonly=False):
 
 # ---------------------------------------------------------------- 资产关联
 def infer_asset_links(source_id: str) -> dict:
-    """从源库元数据推断表间关系，落 `asset_semantics`。
+    """从源库元数据推断表间关系，落档案的 **inferred** 层。
 
     只用**确定性信号**（外键约束），不猜。命名相似之类的启发式
     留给模型判断——那是需要业务语义的部分（4.5）。
@@ -42,18 +44,34 @@ def infer_asset_links(source_id: str) -> dict:
         links.setdefault(ref_tbl, []).append(
             {"to": tbl, "via": f"{ref_col} <- {col}", "type": "referenced_by"})
 
-    st = _store()
+    # **落 inferred 层，不落 `asset_semantics`。**
+    #
+    # 原先靠 `confirmed_by="system:fk_inference"` 这个字符串前缀跟人工确认
+    # 区分，而 `UNIQUE(asset, key)` 意味着人一确认就把推断**覆盖掉** ——
+    # 之后再也看不出「系统曾经推断过什么、人为什么改了它」，而那正是
+    # 下次少犯错的依据（R6 闭环 A）。现在两者各自成行。
+    import catalog
     for tbl, ls in links.items():
-        st.remember(f"{source_id}.{tbl}", "links",
-                    json.dumps(ls, ensure_ascii=False), "system:fk_inference")
+        catalog.record_inference(
+            f"{source_id}.{tbl}", "link", "fk_derived", ls,
+            evidence={"via": "pg_constraint 声明的外键", "source": source_id},
+            actor="system:fk_inference")
     return {"source": source_id, "tables_with_links": len(links),
             "total_links": sum(len(v) for v in links.values())}
 
 
 def related(source_id: str, table: str) -> list:
-    """取回关联。**Agent 推断多表关系前先调这个**——命中就不用推断。"""
-    st = _store(readonly=True)
-    k = st.known(f"{source_id}.{table}", "links")
+    """取回关联。**Agent 推断多表关系前先调这个**——命中就不用推断。
+
+    先读档案的 inferred 层；读不到再回 `asset_semantics` —— R6 之前的
+    存量库把它写在那里，升级不该让旧库的关联凭空消失。
+    """
+    import catalog
+    asset = f"{source_id}.{table}"
+    for r in catalog._store(readonly=True).catalog(asset=asset, kind="link"):
+        if r["key"] == "fk_derived" and isinstance(r["value"], list):
+            return r["value"]
+    k = _store(readonly=True).known(asset, "links")
     if not k:
         return []
     try:
