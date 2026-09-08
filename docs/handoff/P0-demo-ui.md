@@ -84,9 +84,9 @@ tool calling、GreenMail、Agent 无 decisions 写权限、源库无写权限、
 `demo_order_status=24`；silver 已出现脏状态的 `_raw` 与洗后值。模型同时识别出
 `order_details` 不能只按 `order_id` 去重（真实键是复合键），因此没有继续发布
 gold，也没有补造跨表九行答案。这是模型在真实数据证据下停下，不是页面脚本的
-预置失败。全量 `tests/run_all.sh` 已执行但未全绿：首次 Trino 启动/联邦查询与
-一条 Pipeline 接入在回归窗口内失败；新增 PostgreSQL 授权合同单独实测 3/3，
-`test_grants.sh` 12/12。
+预置失败。随后等待 Trino 完全就绪后重跑 `tests/run_all.sh`，最终退出码为 0；
+其中未设置 Hermes、未启动 Phoenix 等项按脚本契约标记为 `SKIP`。新增 PostgreSQL
+授权合同实测 3/3，`test_grants.sh` 12/12。
 
 Hermes source-build 镜像没有官方 s6 入口，demo overlay 显式设
 `HERMES_ALLOW_ROOT_GATEWAY=1`。它仅可用于隔离的 `hermes_demo_state` named volume，
