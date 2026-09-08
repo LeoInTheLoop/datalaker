@@ -45,3 +45,9 @@ spike/
 .hermes/gw-home/
 # 手工演练的临时 home（含 api_key 与会话）
 .hermes/live-home/
+# 行为 eval 的 live 档 home（从 .hermes/home 复制配置，同样带 api_key）
+.hermes/behavior-home/
+
+# ---- 个人求职材料：不是项目的一部分，不入库 ----
+简历项目版.md
+面试展示故事-不用参考.md
