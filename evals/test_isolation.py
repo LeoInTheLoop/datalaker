@@ -22,7 +22,10 @@ SUBJECT = {"connector", "data_tools", "datasteward_gate", "approvals", "policy",
            "plugins", "pipelines"}
 # 判分与汇总更严：只许标准库 —— 它们产出的数字要能当证据，
 # 依赖越少，「谁给谁打分」越无从含糊
-STDLIB_ONLY = {"score.py", "aggregate.py"}
+# **判分器**才是必须纯标准库的那一份：它产出的数字要能当证据，而且
+# 要能离线跑。取证不在此列 —— 它得够得着事实实际存放的地方
+# （`query_ledger` 只在 Postgres 那一侧有人写），psycopg 与 snapshot.py 同待遇。
+STDLIB_ONLY = {"score.py", "aggregate.py", "score_behavior.py"}
 ALLOWED_THIRD_PARTY = {"psycopg"}
 
 fails, checked = [], 0
@@ -44,11 +47,16 @@ for f in sorted(HERE.glob("*.py")):
             fails.append(f"{f.name} 必须只依赖标准库，却 import 了 {sorted(extra)}")
 
 # runner 属于体内，必须在 tests/ 而不是 evals/
-runner = ROOT / "tests" / "run_eval_case.py"
-if not runner.exists():
-    fails.append("体内 runner 应在 tests/run_eval_case.py —— 它 import 被测代码，不能放 evals/")
-if (HERE / "run_eval_case.py").exists():
-    fails.append("run_eval_case.py 出现在 evals/ —— 体内代码越界")
+for name, why in (("run_eval_case.py", "它 import 被测代码"),
+                  # 行为 eval 的驱动与状态注入同理。**注入必须体内**：
+                  # 造一张「有效票」要用被测系统自己那份 action_hash，
+                  # 在体外重写一份，注出来的票跟门禁认的就不是同一张。
+                  ("run_behavior_case.py", "它起 Hermes 并调被测 handler"),
+                  ("behavior_fixture.py", "算动作指纹必须用被测系统那份函数")):
+    if not (ROOT / "tests" / name).exists():
+        fails.append(f"体内代码应在 tests/{name} —— {why}，不能放 evals/")
+    if (HERE / name).exists():
+        fails.append(f"{name} 出现在 evals/ —— 体内代码越界")
 
 for m in fails:
     print(f"  ❌ {m}")

@@ -18,12 +18,18 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _env():
-    d = {}
-    for line in (ROOT / ".env").read_text().splitlines():
+    # Docker deliberately does not mount the developer's .env into the Agent
+    # container.  Process environment is the runtime contract; the local file
+    # remains a convenience fallback for scripts launched from the repository.
+    d = dict(os.environ)
+    path = ROOT / ".env"
+    if not path.exists():
+        return d
+    for line in path.read_text().splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
-            d[k] = v
+            d.setdefault(k, v)
     return d
 
 
@@ -95,7 +101,12 @@ def _persist_source(source_id, dsn, approval_id, kind, by):
     import sys as _s
     _s.path.insert(0, str(ROOT / "plugins"))
     from datasteward_gate.approvals import open_store
-    with open_store(readonly=False, init_schema=True) as st:
+    approval_id = str(approval_id or "")
+    # The steward schema is provisioned by the database owner in the demo/
+    # deployment.  Running DDL here under agent_role makes an otherwise valid
+    # approved registration fail with "permission denied for table" before the
+    # connector ever tests the supplied account.
+    with open_store(readonly=False, init_schema=False) as st:
         st.put_source_secret(source_id, dsn, approval_id, by or "connect_source",
                              kind=kind)
         st.grant_source(source_id, by or "connect_source",
@@ -110,19 +121,20 @@ def _load_registered(source_id: str) -> str:
     try:
         import sys as _s
         _s.path.insert(0, str(ROOT / "plugins"))
-        from datasteward_gate.approvals import open_store
+        from datasteward_gate.approvals import open_store, rows_of
         with open_store(readonly=False, init_schema=False) as st:
-            row = st.db.execute(
-                "SELECT dsn FROM source_secrets WHERE source_id=?",
-                (source_id,)).fetchone() if hasattr(st.db, "execute") else None
-            if row:
-                return row[0]
-            if not hasattr(st.db, "execute"):
-                with st.db.cursor() as c:
-                    c.execute("SELECT dsn FROM source_secrets WHERE source_id=%s",
-                              (source_id,))
-                    r = c.fetchone()
-                    return r[0] if r else ""
+            if os.environ.get("DATASTEWARD_DSN") and hasattr(st.db, "cursor"):
+                # The Agent role has no SELECT on source_secrets.  The
+                # owner-controlled function returns only the approved secret
+                # for this source to the Connector path.
+                with st.db.cursor() as cur:
+                    cur.execute("SELECT dsn FROM datasteward_get_source_secret(%s)",
+                                (source_id,))
+                    rows = cur.fetchall()
+            else:
+                rows = rows_of(st, "SELECT dsn FROM source_secrets WHERE source_id = {0}",
+                               (source_id,))
+            return rows[0][0] if rows else ""
     except Exception:                                        # noqa: BLE001
         pass
     return ""
@@ -224,6 +236,56 @@ def _has_implicit_multi_from(tree, exp) -> bool:
         if n > 1:
             return True
     return False
+
+
+def _outer_from(tree):
+    """外层 SELECT 自己的 FROM。sqlglot 30 把键名从 `from` 改成了 `from_`，
+    两个都试 —— 只试一个的后果是这条判断在某个版本上静默失效。"""
+    return tree.args.get("from") or tree.args.get("from_")
+
+
+def _scan_bounded(tree, exp, cap: int) -> bool:
+    """外层聚合的**每一个输入关系**都被字面量 LIMIT 限死了吗。
+
+    为什么要有这条：`review_sql` 的「无过滤聚合可能触发全表扫描」看的是
+    外层有没有 WHERE。但下面这种写法扫描量其实已经封顶了 ——
+
+        SELECT status, COUNT(*)
+        FROM (SELECT status FROM fin_invoice LIMIT 200) t
+        GROUP BY status
+
+    内层 `LIMIT 200` 把输入基数钉死在 200 行，外层聚合最多也就看这 200 行。
+    live eval 实测撞到：模型写出了这种**正确的有界查询**，照样被要求审批
+    （R6 §13）。误判方向是安全的，但它教模型「写对了也要等人」。
+
+    **只认这一种形状，不做基数估算。** 每个 source 必须是带字面量 LIMIT
+    的子查询，且那个 LIMIT 不超过「要审批的扫描量」阈值。任何一个拿不准
+    —— 表达式 LIMIT、裸表、CTE、集合运算 —— 一律返回 False 走原路。
+    宁可多问一次，不可放过一次全表扫。
+    """
+    f = _outer_from(tree)
+    if f is None:
+        return False
+    sources = []
+    if getattr(f, "this", None) is not None:
+        sources.append(f.this)
+    sources += list(getattr(f, "expressions", None) or [])
+    for j in tree.args.get("joins") or []:
+        if getattr(j, "this", None) is None:
+            return False
+        sources.append(j.this)
+    if not sources:
+        return False
+    for src in sources:
+        if not isinstance(src, exp.Subquery):
+            return False
+        inner = src.this
+        if not isinstance(inner, exp.Select):
+            return False
+        n = _limit_value(inner)
+        if n is None or n > cap:
+            return False
+    return True
 
 
 def _parse_read_sql(sql: str, dialect: str = "postgres"):
@@ -331,11 +393,18 @@ def review_sql(sql: str, *, approved: bool = False,
             reasons.append(
                 f"请求返回 {limit_value:,} 行，超过默认安全上限 {SAFE_RESULT_ROWS:,}")
 
+        # 排序与聚合是同一条判断的两个兄弟：担心的都是「输入有多大」。
+        # 输入已经被字面量 LIMIT 钉死时两条一起放过 —— 同一个 AST 事实，
+        # 同一个 helper，不是新机制。live 实测模型写的正是
+        # `... FROM (SELECT ... LIMIT 2000) t GROUP BY ... ORDER BY n DESC`：
+        # 聚合那条放过了，排序这条照样拦，于是它还是等审批。
         if (plane == "source" and model_generated and tree.args.get("order")
-                and not tree.args.get("where")):
+                and not tree.args.get("where")
+                and not _scan_bounded(tree, exp, APPROVAL_SCAN_ROWS)):
             reasons.append("无过滤排序可能触发大表排序")
         if (plane == "source" and model_generated and not tree.args.get("where")
-                and (tree.args.get("group") or list(tree.find_all(exp.AggFunc)))):
+                and (tree.args.get("group") or list(tree.find_all(exp.AggFunc)))
+                and not _scan_bounded(tree, exp, APPROVAL_SCAN_ROWS)):
             reasons.append("无过滤聚合可能触发全表扫描")
 
     rewritten = tree.sql(dialect=dialect)

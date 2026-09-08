@@ -3,7 +3,7 @@
 验证的核心：**gate 返回 PENDING 时 Pipeline 正常结束，不阻塞等待**——
 这是它与 LangGraph `interrupt` 的根本区别。
 """
-import os, sys, uuid
+import os, sys, time, uuid
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB = "/tmp/dl_pipe_t.db"
 for suf in ("", "-wal", "-shm"):
@@ -51,7 +51,16 @@ out2 = P.run("northwind", "orders", run_id=RUN, checkpointer=saver)
 chk("批准后 → 执行", out2.get("status") == "ingested", out2.get("status"))
 chk("执行结果含行数", "830" in (out2.get("message") or ""))
 
-# 第三次：票据一次性，重新挂起
+# 第三次：票据一次性，重新挂起。
+#
+# **先把同步时间调老。** 门禁有一道 `_already_done`：刚接过的表不再发审批
+# （人白点链接）。它排在票据检查之前，会把这条断言遮成 ALREADY_DONE ——
+# 那样测的就不是「票用过一次还能不能再用」了。
+# 调老之后走的是原来那条路，安全断言一个字都没松。
+_admin = Store(DB, readonly=False)
+_admin.db.execute("UPDATE sync_state SET last_synced_at=? WHERE asset=?",
+                  (time.time() - 48 * 3600, "northwind.orders"))
+_admin.db.commit()
 out3 = P.run("northwind", "orders", run_id=RUN, checkpointer=saver)
 chk("票据一次性 → 重新挂起", out3.get("status") == "pending_approval", out3.get("status"))
 

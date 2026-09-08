@@ -214,3 +214,45 @@ for aid, tool, aj in q("SELECT id, tool_name, args_json FROM approvals"
 真模型模式**只能走网关**：`hermes -z` 每次是新会话，`--resume latest` 对
 oneshot 无效（实测第二拍答「我没有上下文」）。而 Agent 会问澄清问题，
 没有会话就永远停在问问题。
+
+---
+
+## 八、2026-09-06 northwind 那轮补的（都在**失败路径**上）
+
+接入成功那条路早就测过了。这一轮全部的问题都出在**接入失败之后**。
+
+### 演练要故意给一次错账号
+
+`postgresql://crm_reader:Crmro88@127.0.0.1:5432/northwind` —— 能登录，
+在 northwind 上零权限。这一步暴露了三件事：失败通知发错人、
+拿坏账号反复重试、人发来的新账号被静默丢掉。**别跳过它。**
+
+正确账号是 `ops_reader:Opsread7`（northwind 上 14 张表 SELECT）。
+
+### 起环境前先清僵尸 callback
+
+```bash
+ps aux | grep approval_callback | grep -v grep      # 有就 kill
+lsof -nP -iTCP:8787 -sTCP:LISTEN
+```
+
+端口上残留的上一次实例拿的是**另一个库**，`/health` 照样回 ok。
+表现是第 9 组红在「点击批准成功 http 0」，看起来像审批链路坏了。
+`/health` 现在会回 `ok pid=<pid> db=<db>`，`run_all.sh` 的探活比对 pid。
+
+### 别在 `run_all.sh` 跑着的时候改它
+
+`sh` 是边读边执行的，改动会让它在半路报
+`syntax error near unexpected token` —— 那不是脚本的问题，是改的时机。
+
+### 演练会往 bronze 里留东西，测试别依赖「某张表不存在」
+
+`test_join` 原先硬编码「employees 不在湖里」，这轮真接了 employees 就红了。
+改成按湖里实际有什么验规则。**测试依赖某张表不存在，迟早被一次正常接入推翻。**
+
+### 门禁新加了两道，写新测试时要知道
+
+- `_already_done`：刚接过（6 小时内）的表不再发审批。要验「票据一次性」
+  得先把 `sync_state.last_synced_at` 调老，否则拿到的是 `ALREADY_DONE`。
+- `_connect_without_dsn`：没有可用连接串的 `connect_source` 直接拒，不建票。
+  测审批链路时要带上 dsn。

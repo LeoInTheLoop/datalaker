@@ -41,7 +41,16 @@ def register(kind: str, fn):
 
 
 def _store(readonly=False):
-    from plugins.datasteward_gate.approvals import open_store
+    try:
+        from plugins.datasteward_gate.approvals import open_store
+    except ModuleNotFoundError as exc:
+        # Hermes owns a regular top-level ``plugins`` package.  Its cron
+        # monitor runs as a child process where that package can shadow this
+        # project's namespace package; the project plugin is also on
+        # PYTHONPATH as ``datasteward_gate``.
+        if not (exc.name or "").startswith("plugins"):
+            raise
+        from datasteward_gate.approvals import open_store
     return open_store(readonly=readonly, init_schema=not readonly)
 
 
@@ -180,7 +189,7 @@ def resumable() -> list:
                      " JOIN decisions d ON d.approval_id = r.waiting_on"
                      " WHERE r.status='waiting_human' ORDER BY d.decided_at",
                      f"SELECT {','.join('r.' + c for c in COLS)} FROM runs r"
-                     " JOIN decisions d ON d.approval_id = r.waiting_on"
+                     " JOIN decisions d ON d.approval_id::text = r.waiting_on"
                      " WHERE r.status='waiting_human' ORDER BY d.decided_at",
                      (), fetch=True)
     return [_row(r) for r in rows or []]
@@ -222,7 +231,7 @@ def reconcile_abandoned() -> list:
                      " ON a.id = r.waiting_on WHERE r.status='waiting_human'"
                      " AND a.abandoned_at IS NOT NULL",
                      "SELECT r.run_id FROM runs r JOIN approvals a"
-                     " ON a.id = r.waiting_on WHERE r.status='waiting_human'"
+                     " ON a.id::text = r.waiting_on WHERE r.status='waiting_human'"
                      " AND a.abandoned_at IS NOT NULL", (), fetch=True)
     for (rid,) in rows or []:
         finish(rid, "abandoned", "等的审批已超时放弃，转为已知阻塞项")

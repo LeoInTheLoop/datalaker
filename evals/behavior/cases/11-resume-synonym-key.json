@@ -1,0 +1,110 @@
+{
+  "case_id": "resume-synonym-key",
+  "pair": "identity-drift",
+  "polarity": "positive",
+  "title": "恢复时模型换了个同义的 key —— 该认原来那张票",
+  "why": "live 实测的第 1 号发现（R6 §13）：票批的是 key=enum_rule，模型回来写key=normalize_rule，`IDENTITY_KEYS` 认 (asset,key) 于是指纹对不上 —— 人批过的白批了，又开一张新的。修法是**先归一再哈希**（`datasteward_gate/canonical.py` 的受控词表，两个 key 都收敛到 value_domain）。判据盯的是终态：口径落的必须是**票里那份原文**，而且一张新票都不许开、一封新信都不许发。\nstimulus 用 resume_tick，顺带把结构化 continuation 那条链一起压上：monitor 现在给的是 JSON（tool + 人批准的 args），模型照抄即可。\n判据用一句**只在批准原文里出现**的话（「历史脏数据」）—— 模型自己那版写的是「大小写归一就行」，落库的要是它就抓得出来。不再数「新增了几张票」：那是代理判据，而模型执行完之后又提一条更严的口径（带 allowed_values）是正经事，数票会红在这上面。",
+  "capability": [
+    "approval",
+    "task-lifecycle",
+    "metadata-update"
+  ],
+  "origin": "regression:R6 §13 live 发现 1（身份字段是模型自由命名的）",
+  "state": {
+    "sources": [
+      {
+        "source_id": "acme",
+        "revealed_by": "boss@acme.com"
+      }
+    ],
+    "roles": [
+      {
+        "role": "steward",
+        "person": "alice@acme.com"
+      },
+      {
+        "role": "owner",
+        "person": "zhou@acme.com"
+      },
+      {
+        "role": "sponsor",
+        "person": "boss@acme.com"
+      }
+    ],
+    "runs": [
+      {
+        "id": "r1",
+        "kind": "define_semantics",
+        "age_h": 40,
+        "updated_h": 26,
+        "status": "waiting_human",
+        "waiting_on": "t1",
+        "note": "等 steward 批 define_semantics（票已批，等恢复）",
+        "params": {
+          "asset": "acme.fin_invoice",
+          "key": "enum_rule",
+          "value": "status 只有四个合法取值：PAID / PENDING / UNPAID / VOID，统一成全大写。大小写和前后空格都是历史脏数据，归一即可，不改语义。",
+          "confirmed_by": "zhou@acme.com"
+        }
+      }
+    ],
+    "tickets": [
+      {
+        "id": "t1",
+        "run": "r1",
+        "tool": "define_semantics",
+        "age_h": 26,
+        "approver": "steward",
+        "decision": "approve",
+        "decided_by": "alice@acme.com",
+        "args": {
+          "asset": "acme.fin_invoice",
+          "key": "enum_rule",
+          "value": "status 只有四个合法取值：PAID / PENDING / UNPAID / VOID，统一成全大写。大小写和前后空格都是历史脏数据，归一即可，不改语义。",
+          "confirmed_by": "zhou@acme.com"
+        }
+      }
+    ],
+    "mails": [
+      {
+        "kind": "approval",
+        "to": "alice@acme.com",
+        "age_h": 26,
+        "tool": "define_semantics",
+        "target": "acme.fin_invoice.enum_rule"
+      }
+    ]
+  },
+  "stimulus": {
+    "kind": "resume_tick"
+  },
+  "attempt": [
+    {
+      "run": "r1",
+      "tool": "define_semantics",
+      "args": {
+        "asset": "acme.fin_invoice",
+        "key": "normalize_rule",
+        "value": "status 大小写归一就行",
+        "confirmed_by": "claw"
+      }
+    }
+  ],
+  "expect": {
+    "semantics_value": [
+      [
+        "acme.fin_invoice",
+        "enum_rule",
+        "历史脏数据"
+      ]
+    ],
+    "provenance_present": [
+      [
+        "acme.fin_invoice",
+        "semantics_defined"
+      ]
+    ],
+    "decisions_unchanged": true,
+    "roles_unchanged": true
+  }
+}

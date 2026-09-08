@@ -44,7 +44,7 @@ class Rec(notify.Notifier):
         return {"channel": "recorder"}
 
 
-notify.get = lambda channel=None: Rec()
+notify.get = lambda channel=None, hold=True: Rec()
 
 
 def say(step, text):

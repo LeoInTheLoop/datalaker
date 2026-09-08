@@ -256,6 +256,8 @@ CREATE TABLE IF NOT EXISTS asset_catalog (
     value         TEXT NOT NULL,        -- JSON 或一句话
     status        TEXT NOT NULL CHECK (status IN ('observed','inferred','confirmed','refuted')),
     evidence      TEXT,                 -- 凭什么这么说（JSON）
+                                        -- TODO(R7): PG 侧转 jsonb 时这里保持 TEXT，
+                                        -- 但两边读回来的形状必须一致（readme R7 P2）
     actor         TEXT NOT NULL,        -- connector:acme / system:fk_inference / 人
     observed_at   REAL NOT NULL,        -- 这条内容对应的观测或确认时刻
     fingerprint   TEXT,                 -- 内容指纹：没变就不再写一行
@@ -327,6 +329,20 @@ def action_hash(tool_name: str, args: dict) -> str:
 
     **凭证字段被剔除** —— 见 `_CREDENTIAL_KEYS` 上面那段。
     """
+    # **先归一，再哈希。** 有些工具的身份字段本身就是模型自由填的自然语言
+    # （`define_semantics` 的 `key`），挑字段挑不出稳定身份 —— 得先把值归一。
+    # 归一只喂指纹，要执行的参数仍然从人批准的那份票里回填。
+    # 不声明归一规则的工具走下面 IDENTITY_KEYS 那条老路，行为不变。
+    try:
+        from .canonical import normalize_approval_args
+        ident = normalize_approval_args(tool_name, args)["identity"]
+    except Exception:                                        # noqa: BLE001
+        ident = None
+    if ident is not None:
+        canon = json.dumps(ident, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":"))
+        return hashlib.sha256(f"{tool_name}\x00{canon}".encode()).hexdigest()
+
     keys = None
     try:
         from .policy import IDENTITY_KEYS
@@ -353,6 +369,26 @@ def action_hash(tool_name: str, args: dict) -> str:
     canon = json.dumps(clean, sort_keys=True, ensure_ascii=False,
                        separators=(",", ":"))
     return hashlib.sha256(f"{tool_name}\x00{canon}".encode()).hexdigest()
+
+
+def rows_of(st, sql: str, params=()) -> list:
+    """跑一条只读查询，两个后端各走各的。`sql` 里的占位符写 `{0}`。
+
+    **不要用 `hasattr(st.db, "execute")` 判后端** —— psycopg3 的
+    Connection 也有 `.execute`，这个项目已经为它翻过两次车
+    （见 `catalog._semantics_rows` 的注释）。按后端类名判。
+
+    **更不要用「查出来是空的」当作走错了后端的信号。** 空结果是合法结果。
+    第三次翻车就是这么来的：`if not rows: <换另一条路>`，于是一条本该
+    返回空列表的查询掉进 SQLite 不支持的 `with db.cursor()`，异常被外层
+    吞掉，调用方看到的是 False —— 而 False 的意思成了「没有可用的凭证」，
+    把一次正常的恢复挡在了门外。
+    """
+    if type(st).__name__ == "PgStore":
+        with st.db.cursor() as c:
+            c.execute(sql.format("%s"), params)
+            return c.fetchall()
+    return st.db.execute(sql.format("?"), params).fetchall()
 
 
 class PgStore:
@@ -450,6 +486,27 @@ class PgStore:
                 (aid, run_id, action_hash_, tool_name, args_json, approver))
         return aid, True
 
+    def amend_pending(self, approval_id, args_json):
+        """改写一张**还没人做过决定**的票据的参数，返回改没改成。
+
+        为什么需要它：动作身份不含凭证（见 `_CREDENTIAL_KEYS`），所以
+        「接入 northwind」不论换几个账号都是同一张票。第一份账号连不通、
+        对方发来新账号时，模型带着新 dsn 再调一次 —— 指纹相同，于是挂到
+        原来那张**参数里还是旧账号**的待批票上。
+
+        后果实测过：人收到的信里根本看不到新账号，批完之后回填
+        （`_replay_approved_args`）又把新账号换回旧的，接入再失败一次。
+
+        **只改待决的。** 已经有人批过或拒过的票一律不动 —— 那是别人
+        看过并签过字的那份参数，改它就是伪造授权（铁律 2）。
+        """
+        with self.db.cursor() as c:
+            c.execute("UPDATE approvals SET args_json=%s WHERE id=%s"
+                      " AND used_at IS NULL AND NOT EXISTS"
+                      " (SELECT 1 FROM decisions WHERE approval_id=%s)",
+                      (args_json, approval_id, approval_id))
+            return c.rowcount == 1
+
     def consume(self, approval_id):
         with self.db.cursor() as c:
             c.execute("UPDATE approvals SET used_at=now() WHERE id=%s AND used_at IS NULL",
@@ -467,10 +524,12 @@ class PgStore:
                 c.execute(
                     "INSERT INTO decisions (id, approval_id, decision, chosen,"
                     " approver, decided_at, token_jti, message_id, client_ip,"
-                    " user_agent) VALUES (%s,%s,%s,%s,%s, now(), %s,%s,%s,%s)",
+                    " user_agent) SELECT %s,%s,%s,%s,%s,now(),%s,%s,%s,%s"
+                    " WHERE NOT EXISTS (SELECT 1 FROM decisions WHERE approval_id=%s)",
                     (str(uuid.uuid4()), approval_id, decision, chosen, approver,
-                     token_jti or str(uuid.uuid4()), message_id, client_ip, user_agent))
-            return True
+                     token_jti or str(uuid.uuid4()), message_id, client_ip, user_agent,
+                     approval_id))
+                return c.rowcount == 1
         except psycopg.errors.UniqueViolation:
             return False                      # 令牌重放
         except psycopg.errors.InsufficientPrivilege:
@@ -489,7 +548,7 @@ class PgStore:
     def stage_proposals(self):
         with self.db.cursor() as c:
             c.execute("SELECT count(*) FROM approvals WHERE kind='question'"
-                      " AND args_json LIKE '%%__stage__%%'")
+                      " AND args_json::text LIKE '%%__stage__%%'")
             return c.fetchone()[0]
 
     def put_source_secret(self, source_id, dsn, approval_id, by, kind="postgres"):
@@ -497,12 +556,13 @@ class PgStore:
         if self.readonly:
             raise PermissionError("Agent 侧连接不允许写入源凭证")
         with self.db.cursor() as c:
+            # PostgreSQL's `ON CONFLICT` and `UPDATE ... WHERE source_id=...`
+            # both require SELECT on the conflict/key columns.  The Agent is
+            # deliberately denied SELECT on this table, so the database owner
+            # exposes one narrow SECURITY DEFINER writer instead.  The secret
+            # still never becomes readable through the Agent connection.
             c.execute(
-                "INSERT INTO source_secrets (source_id, dsn, kind, approval_id,"
-                " registered_by, registered_at) VALUES (%s,%s,%s,%s,%s, now())"
-                " ON CONFLICT (source_id) DO UPDATE SET dsn=excluded.dsn,"
-                " approval_id=excluded.approval_id,"
-                " registered_at=excluded.registered_at",
+                "SELECT datasteward_put_source_secret(%s,%s,%s,%s::text,%s)",
                 (source_id, dsn, kind, approval_id, by))
 
     def record_provenance(self, asset, event, actor="", approval_id="",
@@ -612,7 +672,8 @@ class PgStore:
     def resolve_role(self, role):
         with self.db.cursor() as c:
             c.execute("SELECT person FROM role_assignment WHERE role=%s "
-                      "AND valid_from <= now() AND (valid_to IS NULL OR valid_to > now()) "
+                      "AND valid_from <= extract(epoch from now()) "
+                      "AND (valid_to IS NULL OR valid_to > extract(epoch from now())) "
                       "ORDER BY valid_from DESC LIMIT 1", (role,))
             r = c.fetchone()
             return r[0] if r else None
@@ -620,15 +681,19 @@ class PgStore:
     def current_holders(self) -> set:
         with self.db.cursor() as c:
             c.execute("SELECT DISTINCT lower(person) FROM role_assignment "
-                      "WHERE valid_from <= now() AND (valid_to IS NULL OR valid_to > now())")
+                      "WHERE valid_from <= extract(epoch from now()) "
+                      "AND (valid_to IS NULL OR valid_to > extract(epoch from now()))")
             return {r[0] for r in c.fetchall()}
 
     def assign_role(self, role, person, granted_by, reason=""):
+        now = time.time()
         with self.db.cursor() as c:
-            c.execute("UPDATE role_assignment SET valid_to=now() "
-                      "WHERE role=%s AND valid_to IS NULL", (role,))
-            c.execute("INSERT INTO role_assignment (role, person, granted_by, reason)"
-                      " VALUES (%s,%s,%s,%s)", (role, person, granted_by, reason))
+            c.execute("UPDATE role_assignment SET valid_to=%s "
+                      "WHERE role=%s AND valid_to IS NULL", (now, role))
+            c.execute("INSERT INTO role_assignment "
+                      "(role, person, valid_from, granted_by, reason) "
+                      "VALUES (%s,%s,%s,%s,%s)",
+                      (role, person, now, granted_by, reason))
 
     def open_count(self, approver=None):
         sql = ("SELECT count(*) FROM approvals a LEFT JOIN decisions d "
@@ -899,6 +964,27 @@ class Store:
         )
         self.db.commit()
         return aid, True
+
+    def amend_pending(self, approval_id, args_json):
+        """改写一张**还没人做过决定**的票据的参数，返回改没改成。
+
+        为什么需要它：动作身份不含凭证（见 `_CREDENTIAL_KEYS`），所以
+        「接入 northwind」不论换几个账号都是同一张票。第一份账号连不通、
+        对方发来新账号时，模型带着新 dsn 再调一次 —— 指纹相同，于是挂到
+        原来那张**参数里还是旧账号**的待批票上。
+
+        后果实测过：人收到的信里根本看不到新账号，批完之后回填
+        （`_replay_approved_args`）又把新账号换回旧的，接入再失败一次。
+
+        **只改待决的。** 已经有人批过或拒过的票一律不动 —— 那是别人
+        看过并签过字的那份参数，改它就是伪造授权（铁律 2）。
+        """
+        cur = self.db.execute(
+            "UPDATE approvals SET args_json=? WHERE id=? AND used_at IS NULL"
+            " AND NOT EXISTS (SELECT 1 FROM decisions WHERE approval_id=?)",
+            (args_json, approval_id, approval_id))
+        self.db.commit()
+        return cur.rowcount == 1
 
     def consume(self, approval_id):
         """标记票据已使用。只会收紧不会放松，故允许 Agent 写。"""

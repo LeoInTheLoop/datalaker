@@ -165,8 +165,8 @@ def main(argv=None) -> int:
             import notify
             n = notify.get()
             to = notify.cfg("MAIL_SPONSOR") or notify.cfg("MAIL_OWNER") or ""
-            n.send_notice(to, "[数据管家] 阶段报告：bronze 轮结束", body)
-            print(f"\n已通过 {n.name} 发送至 {to}")
+            res = n.send_notice(to, "[数据管家] 阶段报告：bronze 轮结束", body)
+            print(f"\n通道 {n.name}：{notify.sent_line(res, to)}")
         return 0
     line = monitor_line(st)
     if line:

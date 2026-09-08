@@ -156,9 +156,23 @@ if JOIN_DATA:
     chk("给出了可用的 join 路径，且写成 iceberg 的形式",
         'iceberg.bronze."northwind__orders"' in d and "ON a.customer_id" in d)
     # **只给两边都在 lake 里的**。对端没接进来就提示先接，不是给一条跑不通的。
-    chk("对端没接进来的关系不出现在 join 路径里",
-        "northwind__employees" not in d,
-        "employees 没接进 lake，却出现在了路径里")
+    #
+    # 这里**按湖里实际有什么来验规则**，不写死「employees 不在湖里」。
+    # 原先那条硬编码：一次真演练把 northwind__employees 接进来之后就红了 ——
+    # 而红的不是规则，是测试自己的前提。测试依赖「某张表不存在」，
+    # 迟早会被一次正常的接入推翻。
+    import sync as _sync
+    in_lake = {t.strip() for t in _sync._trino(
+        "SELECT table_name FROM iceberg.information_schema.tables"
+        " WHERE table_schema='bronze'")}
+    fk_targets = {"customers": "northwind__customers",
+                  "employees": "northwind__employees",
+                  "shippers": "northwind__shippers"}
+    wrong = [t for t, bt in fk_targets.items()
+             if (bt in in_lake) != (bt in d)]
+    chk("**join 路径里出现的对端，正好是湖里有的那些**",
+        not wrong,
+        f"对不上：{wrong}；湖里有 {sorted(x for x in fk_targets.values() if x in in_lake)}")
     chk("明说了「在 lake 里 join，不要在源库上关联」",
         "不要在源库上关联" in d)
 else:

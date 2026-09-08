@@ -1,0 +1,137 @@
+# Compose overlay for the true-model local rehearsal.  It deliberately routes
+# all mail to GreenMail and exposes only local browser ports.
+services:
+  source_pg:
+    profiles: [core, source, agent, demo]
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./demo-init.sh:/docker-entrypoint-initdb.d/20-demo-init.sh:ro
+      - ../data/northwind/northwind.sql:/demo-seed/northwind.sql:ro
+      - ./init-steward.sql:/demo-seed/init-steward.sql:ro
+
+  minio:
+    profiles: [core, demo]
+  minio_init:
+    profiles: [core, demo]
+  iceberg_rest:
+    profiles: [core, demo]
+  trino:
+    profiles: [core, demo]
+
+  greenmail:
+    profiles: [mail, demo]
+    ports: !override
+      - "127.0.0.1:13025:3025"
+      - "127.0.0.1:13143:3143"
+
+  approval-callback:
+    profiles: [agent, demo]
+    environment:
+      DATASTEWARD_DSN: postgresql://approver_role:approver_pass@source_pg:5432/steward
+      DATASTEWARD_TOKEN_SECRET: ${DATASTEWARD_TOKEN_SECRET:-demo-local-token-secret}
+      APPROVAL_BASE_URL: http://127.0.0.1:18787
+      APPROVAL_BIND_HOST: 0.0.0.0
+      REQUIRE_DOUBLE_CONFIRM: "0"
+      NOTIFY_CHANNEL: email
+      MAIL_TRANSPORT: smtp
+      SMTP_HOST: greenmail
+      SMTP_PORT: "3025"
+      SMTP_SECURITY: plain
+      MAIL_FROM: claw@acme.test
+      MAIL_SPONSOR: boss@acme.com
+      MAIL_OWNER: wang@acme.com
+      MAIL_STEWARD: wang@acme.com
+    ports: !override ["127.0.0.1:18787:8787"]
+
+  steward-agent:
+    profiles: [agent, demo]
+    environment:
+      DATASTEWARD_DSN: postgresql://agent_role:agent_pass@source_pg:5432/steward
+      DATASTEWARD_TOKEN_SECRET: ${DATASTEWARD_TOKEN_SECRET:-demo-local-token-secret}
+      SOURCE_DSN: postgresql://ops_reader:Opsread7@source_pg:5432/northwind
+      NORTHWIND_DSN: postgresql://ops_reader:Opsread7@source_pg:5432/northwind
+      APPROVAL_BASE_URL: http://127.0.0.1:18787
+      HERMES_HOME: /state/hermes
+      HERMES_ENABLE_PROJECT_PLUGINS: "1"
+      # This image is assembled from Hermes source, not its s6 Docker image.
+      # The persistent home is a demo-only named volume, so root state cannot
+      # leak into a host Hermes installation.
+      HERMES_ALLOW_ROOT_GATEWAY: "1"
+      CLAW_ROOT: /app
+      DEMO_AGENT_STATUS_DIR: /status
+      DEMO_CONTROL_DIR: /control
+      NOTIFY_CHANNEL: email
+      MAIL_TRANSPORT: smtp
+      SMTP_HOST: greenmail
+      SMTP_PORT: "3025"
+      SMTP_SECURITY: plain
+      MAIL_FROM: claw@acme.test
+      MAIL_SPONSOR: boss@acme.com
+      MAIL_OWNER: wang@acme.com
+      MAIL_STEWARD: wang@acme.com
+      EMAIL_ADDRESS: claw@acme.test
+      EMAIL_PASSWORD: claw
+      EMAIL_IMAP_HOST: greenmail
+      EMAIL_IMAP_PORT: "3143"
+      EMAIL_IMAP_SECURITY: plain
+      EMAIL_SMTP_HOST: greenmail
+      EMAIL_SMTP_PORT: "3025"
+      EMAIL_SMTP_SECURITY: plain
+      EMAIL_POLL_INTERVAL: "3"
+      EMAIL_HOME_ADDRESS: boss@acme.com
+      EMAIL_ALLOWED_USERS: boss@acme.com,wang@acme.com,dba@acme.com
+      CLAW_RESUME_UNIT_SECONDS: "60"
+      CLAW_NO_BOOTSTRAP_SOURCES: "1"
+      TRINO_URL: https://trino:8443
+      TRINO_WRITE_USER: claw
+      TRINO_PASSWORD: claw_pw_change_me
+    volumes:
+      - ../.hermes/plugins:/app/.hermes/plugins
+      - ../.hermes/skills:/app/.hermes/skills:ro
+      - hermes_demo_state:/state/hermes
+      - demo_agent_status:/status
+      - demo_control:/control
+
+  demo-ui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: callback
+    image: datalaker/demo-ui:dev
+    profiles: [demo]
+    depends_on:
+      source_pg: {condition: service_healthy}
+      trino: {condition: service_started}
+      greenmail: {condition: service_started}
+      steward-agent: {condition: service_started}
+    environment:
+      DASHBOARD_DSN: postgresql://agent_role:agent_pass@source_pg:5432/steward
+      DEMO_ADMIN_DSN: postgresql://postgres:postgres@source_pg:5432/steward
+      DEMO_SOURCE_DSN: postgresql://ops_reader:Opsread7@source_pg:5432/northwind
+      MAILSIM_HOST: greenmail
+      MAILSIM_SMTP_PORT: "3025"
+      MAILSIM_IMAP_PORT: "3143"
+      DEMO_AGENT_STATUS_DIR: /status
+      DEMO_CONTROL_DIR: /control
+      DEMO_RUN_DIR: /runs
+      TRINO_URL: https://trino:8443
+      TRINO_WRITE_USER: claw
+      TRINO_PASSWORD: claw_pw_change_me
+      TRINO_CA_FILE: /app/infra/trino/certs/trino.pem
+      PYTHONPATH: /app
+    volumes:
+      - ../services:/app/services:ro
+      - ../plugins:/app/plugins:ro
+      - ../tests:/app/tests:ro
+      - ../demo:/app/demo:ro
+      - demo_agent_status:/status:ro
+      - demo_control:/control
+      - demo_runs:/runs
+    command: python /app/services/demo_ui.py
+    ports: ["127.0.0.1:8088:8088"]
+
+volumes:
+  hermes_demo_state:
+  demo_agent_status:
+  demo_control:
+  demo_runs:

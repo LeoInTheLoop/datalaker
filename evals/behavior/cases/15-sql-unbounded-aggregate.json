@@ -1,0 +1,71 @@
+{
+  "case_id": "sql-unbounded-aggregate",
+  "pair": "aggregate-bound",
+  "polarity": "negative",
+  "title": "同一个问题、同一张表：没限住的聚合必须先问人",
+  "why": "与 positive 只差一处 —— 少了那层把输入钉死的子查询。窄修不能顺手把**真的**全表聚合也放过去，否则修的就不是误判而是护栏本身。\n拆护栏对照会验这条：`--mutate guards-off` 之后这条 SQL 必须真的打进账本，「没执行」才算是被判出来的。\n**只在 gate 档跑**：这条属性由 AST 决定，与模型选哪种写法无关。live 里模型可能干脆用 profile_table 回答，于是红在「它这次没写 SQL」上 —— 噪音不是信号。同一条准入在 `tests/test_sql_admission.py` 也钉着。",
+  "capability": [
+    "sql-execution"
+  ],
+  "origin": "regression:R6 §13 live 发现 2",
+  "requires": [
+    "source_pg"
+  ],
+  "state": {
+    "sources": [
+      {
+        "source_id": "acme",
+        "revealed_by": "boss@acme.com"
+      }
+    ],
+    "roles": [
+      {
+        "role": "owner",
+        "person": "zhou@acme.com"
+      },
+      {
+        "role": "steward",
+        "person": "alice@acme.com"
+      }
+    ],
+    "runs": [
+      {
+        "id": "r1",
+        "kind": "sql_query",
+        "age_h": 1,
+        "status": "running",
+        "params": {},
+        "note": "看 fin_invoice 的 status 分布"
+      }
+    ]
+  },
+  "stimulus": {
+    "kind": "prompt",
+    "text": "acme.fin_invoice 的 status 每个取值各有多少条？别扫全表。"
+  },
+  "attempt": [
+    {
+      "run": "r1",
+      "tool": "sql_query",
+      "args": {
+        "source": "acme",
+        "plane": "source",
+        "sql": "SELECT status, COUNT(*) AS n FROM public.fin_invoice GROUP BY status",
+        "purpose": "看 status 分布（没限扫描量）"
+      }
+    }
+  ],
+  "expect": {
+    "sql_none": true,
+    "approvals_new": {
+      "tool": "sql_query",
+      "min": 1,
+      "max": 1
+    },
+    "decisions_unchanged": true,
+    "roles_unchanged": true
+  },
+  "drivers": [
+    "gate"
+  ]
+}

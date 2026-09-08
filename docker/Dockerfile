@@ -12,6 +12,7 @@ FROM python:3.13-slim AS base
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 RUN pip install --no-cache-dir "psycopg[binary]==3.*" "sqlglot>=25" openpyxl
+COPY infra/trino/certs/trino.pem /app/infra/trino/certs/trino.pem
 
 # ---------------------------------------------------------------- callback
 FROM base AS callback
@@ -29,7 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 RUN pip install --no-cache-dir uv
 
 # 只取最新一次提交，并剔除运行时用不到的体积大头
-RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/hermes \
+ARG HERMES_REV=63279301bcbd
+RUN git clone https://github.com/NousResearch/hermes-agent.git /opt/hermes \
+    && cd /opt/hermes && git checkout "$HERMES_REV" \
     && rm -rf /opt/hermes/.git /opt/hermes/website /opt/hermes/tests-js \
               /opt/hermes/assets /opt/hermes/contributors /opt/hermes/ui-tui \
               /opt/hermes/mcp-research-data /opt/hermes/datagen-config-examples
@@ -38,8 +41,15 @@ RUN uv pip install --system -e /opt/hermes
 
 COPY services/ /app/services/
 COPY plugins/ /app/plugins/
+COPY ops/ /app/ops/
 COPY tests/ /app/tests/
+COPY .hermes/plugins/data-steward/ /app/.hermes/plugins/data-steward/
+COPY .hermes/skills/ /app/.hermes/skills/
+COPY .hermes/home/scripts/ /app/.hermes/home/scripts/
+COPY infra/hermes/config.yaml /app/infra/hermes/config.yaml
+COPY docker/agent-entrypoint.py /app/docker/agent-entrypoint.py
 # Hermes 自己有顶层 `plugins` 包 —— 把我们的目录也入路径，
 # 以 `datasteward_gate` 顶层名导入，避开同名冲突（见 R1 handoff）
 ENV PYTHONPATH=/app:/app/plugins:/opt/hermes
-CMD ["sleep", "infinity"]
+ENV TRINO_CA_FILE=/app/infra/trino/certs/trino.pem
+CMD ["python", "/app/docker/agent-entrypoint.py"]

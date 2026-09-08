@@ -29,10 +29,7 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT), str(ROOT / "services"), str(ROOT / "plugins")]
 
-VERB = {"source_registered": "源接入", "ingested": "入湖",
-        "ingested_from_file": "从文件入湖", "cleaned": "清洗",
-        "published": "发布 gold", "granted": "开读权限",
-        "semantics_defined": "定口径", "refreshed": "全量刷新"}
+from datasteward_gate.policy import PROVENANCE_VERBS as VERB
 
 
 def _store(write=False):

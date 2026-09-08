@@ -663,10 +663,7 @@ def _trace_asset(args: dict, **_: Any) -> str:
 
     L = [f"# {key} 的来历", "", "| 时间 | 发生了什么 | 谁 | 依据 |",
          "|---|---|---|---|"]
-    VERB = {"source_registered": "源接入", "ingested": "入湖",
-            "ingested_from_file": "从文件入湖", "cleaned": "清洗",
-            "published": "发布 gold", "granted": "开读权限",
-            "semantics_defined": "定口径", "refreshed": "全量刷新"}
+    from datasteward_gate.policy import PROVENANCE_VERBS as VERB
     for r in rows:
         d = r["detail"] or {}
         extra = (d.get("connection_identity") or d.get("path")
@@ -809,6 +806,20 @@ def _define_semantics(args: dict, **_: Any) -> str:
             f"以后不会再就这一条问人。")
 
 
+# 受控词表从门禁那一份读，**一处定义两处用** —— 分成两份必然漂移，
+# 而漂移的表现是「schema 让模型写 A，门禁按 B 归一」，静默得很。
+def _canon_vocab():
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        from datasteward_gate.canonical import CANONICAL_KEYS, vocabulary_hint
+        return tuple(CANONICAL_KEYS), vocabulary_hint()
+    except Exception:                                        # noqa: BLE001
+        return (), "null_meaning、value_domain、unit、derivation"
+
+
+_CANON_KEYS, _CANON_HINT = _canon_vocab()
+
 _SCHEMAS.update({
     "define_semantics": {
         "name": "define_semantics",
@@ -819,10 +830,17 @@ _SCHEMAS.update({
         "parameters": {"type": "object", "properties": {
             "asset": {"type": "string",
                       "description": "口径针对什么，如 acme.fin_monthly.region"},
-            "key": {"type": "string",
-                    "description": "这条口径叫什么，**必填**：如 null_meaning"
-                                   "（空值什么意思）、normalize_rule（怎么归一）、"
-                                   "deprecated（废弃列）"},
+            # **受控词表，不是自由文本。** 审批身份里有这个 key
+            # （`canonical.py` 先归一再哈希），模型每次换个说法写就等于
+            # 换了一件事 —— 人批过的票对不上，又开一张新的。实测撞过：
+            # 票批的是 enum_rule，模型回来写 normalize_rule / enum_values /
+            # status_values。同义词表能追认几个，但追不完；
+            # 直接把可选值列出来才是收敛的地方。
+            "key": {"type": "string", "enum": list(_CANON_KEYS),
+                    "description": "这条口径属于哪一类，**必填，从下面这几个里挑**："
+                                   + _CANON_HINT +
+                                   "。列名写在 asset 里（如 acme.fin_invoice.status），"
+                                   "不要编进 key。"},
             "value": {"type": "string", "description": "口径本身，一句话说清"},
             "confirmed_by": {"type": "string",
                              "description": "谁确认的（邮箱或姓名）。必填"},
@@ -1008,18 +1026,45 @@ def _dsn_from_approval(source_id: str) -> str:
     try:
         from datasteward_gate import store
         st = store()
-        rows = st.db.execute(
-            "SELECT a.args_json FROM approvals a JOIN decisions d"
-            " ON d.approval_id = a.id WHERE a.tool_name='connect_source'"
-            " AND d.decision='approve' ORDER BY d.decided_at DESC LIMIT 20"
-        ).fetchall() if hasattr(st.db, "execute") else []
+        from datasteward_gate.approvals import rows_of
+        rows = rows_of(st, "SELECT a.args_json FROM approvals a JOIN decisions d"
+                           " ON d.approval_id = a.id WHERE a.tool_name='connect_source'"
+                           " AND d.decision='approve' ORDER BY d.decided_at DESC LIMIT 20")
+        bad = _failed_dsns(st, source_id)
         for (aj,) in rows:
-            d = json.loads(aj)
+            d = json.loads(aj) if isinstance(aj, str) else aj
             if d.get("source_id") == source_id and d.get("dsn"):
+                # **试过连不通的那个不要再拿出来。** 否则模型一句
+                # 「再试一次接入」就会用同一份坏账号重连，而它刚跟人说过
+                # 「在收到新连接信息之前我不会反复重试」。
+                if _dsn_identity(str(d["dsn"])) in bad:
+                    continue
                 return str(d["dsn"])
     except Exception:                                        # noqa: BLE001
         pass
     return ""
+
+
+def _failed_dsns(st, source_id: str) -> set:
+    """这个源上已经试过、连不通的连接身份。
+
+    只存**身份**（user@host:port/db），不存口令 —— 台账和事件都是给人看的。
+    """
+    from datasteward_gate.approvals import rows_of
+    out = set()
+    try:
+        rows = rows_of(st, "SELECT payload FROM events WHERE"
+                           " kind='SOURCE_CONNECT_FAILED' ORDER BY seq DESC LIMIT 50")
+    except Exception:                                        # noqa: BLE001
+        return out
+    for (pl,) in rows:
+        try:
+            d = json.loads(pl or "{}")
+        except Exception:                                    # noqa: BLE001
+            continue
+        if d.get("source_id") == source_id and d.get("identity"):
+            out.add(d["identity"])
+    return out
 
 
 def _connect_source(args: dict, **_: Any) -> str:
@@ -1050,12 +1095,14 @@ def _connect_source(args: dict, **_: Any) -> str:
     try:
         from datasteward_gate import store
         st = store()
-        row = st.db.execute(
-            "SELECT a.id FROM approvals a JOIN decisions d ON d.approval_id=a.id"
-            " WHERE a.tool_name='connect_source' AND d.decision='approve'"
-            " ORDER BY d.decided_at DESC LIMIT 1").fetchone() \
-            if hasattr(st.db, "execute") else None
-        aid = row[0] if row else ""
+        from datasteward_gate.approvals import rows_of
+        rows = rows_of(st,
+                       "SELECT a.id FROM approvals a JOIN decisions d "
+                       "ON d.approval_id = a.id "
+                       "WHERE a.tool_name='connect_source' "
+                       "AND d.decision='approve' "
+                       "ORDER BY d.decided_at DESC LIMIT 1")
+        aid = rows[0][0] if rows else ""
     except Exception:                                        # noqa: BLE001
         aid = ""
     if not aid:
@@ -1069,7 +1116,9 @@ def _connect_source(args: dict, **_: Any) -> str:
             description=str(args.get("description") or ""),
             by=str(args.get("given_by") or "邮件"))
     except Exception as e:                                   # noqa: BLE001
-        return f"注册 {sid} 失败：{type(e).__name__}: {str(e)[:200]}"
+        err = f"注册 {sid} 失败：{type(e).__name__}: {str(e)[:200]}"
+        _notify_connect(sid, args.get("given_by"), [], err)
+        return f"{err}。已把情况回给提供连接信息的人。"
 
     # **不要把连接串回显给模型。** 它已经在上下文里出现过一次（是参数），
     # 但没有理由再出现第二次 —— 每多一次就多一次被写进日志、被带进
@@ -1078,7 +1127,25 @@ def _connect_source(args: dict, **_: Any) -> str:
     try:
         tables = connector.list_tables(sid)
     except Exception as e:                                   # noqa: BLE001
-        err = f"{type(e).__name__}: {str(e)[:120]}"
+        # **带上用的是哪个账号，别只给一句报错。** 收信的人手里通常有好几个
+        # 账号，「连不上」他没法判断是哪一个。截断也放宽到 240 ——
+        # 120 字刚好把 `permission denied for database "northwind"` 砍在
+        # 库名中间，而那正是唯一有用的那半句。
+        err = (f"用 {_dsn_identity(dsn)} 连：{type(e).__name__}: {str(e)[:240]}")
+
+    if err:
+        # **把「这份连接信息试过、不通」记下来。**
+        # 不记的话，模型下次一句「再试一次接入」就会从审批里把同一份坏账号
+        # 取回来重连 —— 而它刚跟人说过「在收到新连接信息之前不会反复重试」。
+        # 只记身份（user@host:port/db），口令不进事件表。
+        try:
+            from datasteward_gate import store
+            store().append_event(
+                "connect", "SOURCE_CONNECT_FAILED",
+                json.dumps({"source_id": sid, "identity": _dsn_identity(dsn),
+                            "error": err[:200]}, ensure_ascii=False))
+        except Exception:                                    # noqa: BLE001
+            pass                 # 记不上不该改变已经发生的事实
 
     # **接成功或失败，都要给人一个交代 + 下一步。**
     # 只把结果 return 给模型的话，人那边什么都看不到 —— 而这条线是他批的，
@@ -1086,16 +1153,30 @@ def _connect_source(args: dict, **_: Any) -> str:
     # 连接信息不对，而只有他能给新的。
     _notify_connect(sid, args.get("given_by"), tables, err)
 
+    approval_short = str(aid)[:8]
     if err:
-        return (f"源 {sid} 注册了（依据审批 {aid[:8]}），**但连不上**：{err}。"
+        return (f"源 {sid} 注册了（依据审批 {approval_short}），**但连不上**：{err}。"
                 f"已把情况回给对方，等新的连接信息。不要反复重试。")
-    return (f"已接入源 {sid}（依据审批 {aid[:8]}），能看到 {len(tables)} 张表。"
+    return (f"已接入源 {sid}（依据审批 {approval_short}），能看到 {len(tables)} 张表。"
             f"凭证已存放，之后我只用 source_id 提交查询，不再持有连接串。"
             f"已把结果和下一步回给对方。")
 
 
+def _mail_of(text: str) -> str:
+    """从自由文本里抠出邮箱。
+
+    `given_by` 是模型转述的，实测长这样：`dba@acme.com（sun 转交）`。
+    直接当收件人用会发不出去 —— 而发不出去这件事是**静默**的
+    （`_notify_connect` 整个包在 try 里）。
+    """
+    import re as _re
+    m = _re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", str(text or ""))
+    return m.group(0) if m else ""
+
+
 def _notify_connect(sid, given_by, tables, err):
     """把接入结果回给人。**发不出去要说出来**，不吞。"""
+    to, subj = "", ""
     try:
         import notify
         st_ = None
@@ -1104,7 +1185,12 @@ def _notify_connect(sid, given_by, tables, err):
             st_ = store()
         except Exception:                                    # noqa: BLE001
             pass
-        to = _resolve_to(st_, "owner") or given_by or ""
+        # **连不上时该找谁**：给连接串的那个人，不是数据 owner。
+        # 实测撞过 —— dba 给了个在这个库上没权限的账号，失败通知却发给了
+        # wang（owner），而 wang 手里没有账号。能修的人一直不知道出了事。
+        # 成功时反过来：先接哪几张表是业务判断，那是 owner 的事。
+        to = (_mail_of(given_by) or _resolve_to(st_, "owner") or "") if err \
+            else (_resolve_to(st_, "owner") or _mail_of(given_by) or "")
         if err:
             body = (f"{sid} 的接入审批已经通过，但按这份连接信息**连不上**：\n\n"
                     f"  {err}\n\n"
@@ -1126,9 +1212,24 @@ def _notify_connect(sid, given_by, tables, err):
                     f"下一步：告诉我先接哪几张（接哪张表优先是业务判断，"
                     f"不是技术判断）。每张表的接入我会单独发审批给负责人。")
             subj = f"[数据管家] {sid} 已接入，共 {len(tables)} 张表"
-        notify.get().send_notice(to, subj, body)
+        result = notify.get().send_notice(to, subj, body)
+        if st_ is not None:
+            st_.append_event(
+                "connect", "SOURCE_CONNECT_NOTICE_SENT",
+                json.dumps({"source_id": sid, "to": to, "subject": subj,
+                            "failed": bool(err),
+                            "delivery": (result or {}).get("kind", "sent")
+                                        if isinstance(result, dict) else "sent"},
+                           ensure_ascii=False))
     except Exception:                                        # noqa: BLE001
-        pass                     # 通知失败不改变已经完成的注册
+        if st_ is not None:
+            try:
+                st_.append_event(
+                    "connect", "SOURCE_CONNECT_NOTICE_FAILED",
+                    json.dumps({"source_id": sid, "to": to,
+                                "subject": subj}, ensure_ascii=False))
+            except Exception:                                # noqa: BLE001
+                pass
 
 
 _SCHEMAS.update({
@@ -1305,6 +1406,226 @@ _HANDLERS = {
     "record_finding": _record_finding,
     "ingest_table": _ingest_table,
 }
+
+
+
+_SCHEMAS.update({
+    "propose_link": {
+        "name": "propose_link",
+        "description": (
+            "找出两张表之间**可能**的连接列，每条都带证据："
+            "值域重叠率、两侧去重基数、连接形状（1:1 / 1:N / N:N）、"
+            "以及有多少值连不上对面（孤儿值）。"
+            "**只产证据不下结论** —— 重叠率 1.0 的候选可能有两条，"
+            "其中一条是错的，得人来判。找候选只在 lake 里扫，不碰源库。"
+            "工具做的是类型兼容粗筛 + 探查预算，**不按名字像不像替你筛掉**；"
+            "超预算没探的对会列出来，你觉得该探就用 probe_pairs 指名再来。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "asset_a": {"type": "string", "description": "左表，如 acme.crm_customer"},
+            "asset_b": {"type": "string", "description": "右表，如 acme.crm_contact"},
+            "probe_pairs": {"type": "array", "items": {"type": "string"},
+                            "description": "只探这几对列，每项写成 左列=右列。"
+                                           "**名字不像但你判断可能指同一实体时用它**"
+                                           "（如 buyer_id=cust_no）。给了就忽略预算"},
+            "record": {"type": "boolean",
+                       "description": "把候选记进档案的 inferred 层，默认 true"}},
+            "required": ["asset_a", "asset_b"]},
+    },
+    "confirm_link": {
+        "name": "confirm_link",
+        "description": (
+            "请人确认一条连接：这两列确实指同一个东西。"
+            "确认之后才能用它回答问题。**需要 steward 批准**。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "asset": {"type": "string", "description": "左表资产名"},
+            "link_key": {"type": "string",
+                         "description": "候选的 key，形如 acme.crm_contact:customer_id=customer_id"},
+            "note": {"type": "string", "description": "确认时的说明，可空"}},
+            "required": ["asset", "link_key"]},
+    },
+    "answer_with_link": {
+        "name": "answer_with_link",
+        "description": (
+            "用一条**已确认**的连接回答一个单表答不了的问题。"
+            "会记下答案依赖了哪一份数据（同步时刻、行数、结构指纹），"
+            "并用 verify_sql 换一条路径复核一次 —— "
+            "SQL 跑通不等于答对，连错了照样有结果。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "question": {"type": "string", "description": "要回答的问题（人话）"},
+            "sql": {"type": "string", "description": "lake 侧的查询，查 iceberg.*"},
+            "asset": {"type": "string", "description": "连接挂在哪张表上"},
+            "link_key": {"type": "string", "description": "用的是哪条连接"},
+            "assets": {"type": "array", "items": {"type": "string"},
+                       "description": "这个答案用到的资产，用来记数据版本"},
+            "verify_sql": {"type": "string",
+                           "description": "换一条路径算同一个数，用于复核"},
+            "expect": {"type": "string", "description": "复核期望值，可空"}},
+            "required": ["question", "sql", "asset", "link_key"]},
+    },
+})
+
+
+def _propose_link(args: dict, **_: Any) -> str:
+    """找候选（L1）。**只提出证据，不下结论 —— 判断是你的事。**
+
+    这个工具跑的是确定性粗筛（类型兼容 + 探查预算），产出的是值域证据。
+    **哪两列指同一个实体，由你看着证据判**：名字不像但值域对得上的情况
+    很常见（`买家编号` / `buyer_id`），粗筛不会替你把它排除掉 ——
+    超预算没探的对会原样列出来，你觉得该探就用 `probe_pairs` 指名再来一次。
+    """
+    a = str(args.get("asset_a") or "").strip()
+    b = str(args.get("asset_b") or "").strip()
+    if not (a and b) or "." not in a or "." not in b:
+        return "错误：需要 asset_a 与 asset_b，格式为 源.表。"
+    from . import _ensure_path
+    _ensure_path()
+
+    only = args.get("probe_pairs") or None
+    if isinstance(only, str):
+        only = [x.strip() for x in only.split(",") if x.strip()]
+    if only:
+        try:
+            only = [tuple(str(x).split("=", 1)) for x in only]
+            only = [(l.strip(), r.strip()) for l, r in only]
+        except ValueError:
+            return "错误：probe_pairs 每项写成 左列=右列，如 buyer_id=cust_no。"
+
+    try:
+        import linkage
+        got = linkage.candidates(a, b, pairs_only=only)
+    except Exception as e:                                    # noqa: BLE001
+        return f"查找 {a} × {b} 的连接候选失败：{type(e).__name__}: {str(e)[:200]}"
+    cands, unprobed = got["pairs"], got["unprobed"]
+
+    if not cands and not unprobed:
+        # **找不到候选是结论，不是失败。** 跨系统的两个 customer_id
+        # 值域毫不重叠时就该是这个结果 —— 硬连出来的才是问题。
+        return (f"{a} × {b}：类型兼容的列探了 {got['probed']} 对，"
+                f"{got['dropped']} 对值域几乎不重叠，没有一条对得上。\n"
+                f"它们可能本来就不该连；要连的话得有人给出对应规则"
+                f"（比如靠邮箱或手机号匹配），**我猜不出来**。")
+
+    keep = cands if str(args.get("record", "true")).lower() != "false" else []
+    lines = [f"{a} × {b} 的连接候选（按证据排序，**都还只是假设**）：", ""]
+    for c in cands[:5]:
+        lines.append(f"· {c['a']} = {c['b']}")
+        if c.get("error"):
+            # **算不出证据要说算不出**，不能当成「没这条候选」——
+            # 后者会让一次临时的查询失败看起来像一个结论。
+            lines.append(f"    ⚠️ 证据算不出来（{c['error']}），这条没法判，重试一次")
+            continue
+        lines.append(f"    重叠 {c['shared']}/{min(c['a_distinct'], c['b_distinct'])}"
+                     f" = {c['rate']:.0%}，{c['note']}")
+        if c in keep:
+            try:
+                r = linkage.propose(a, b, c["a"], c["b"],
+                                    {k: v for k, v in c.items() if k != "note"})
+                lines.append(f"    已记为候选：{r['key']}")
+            except Exception as e:                            # noqa: BLE001
+                lines.append(f"    ⚠️ 记录失败：{type(e).__name__}")
+
+    if not cands:
+        lines.append(f"（探过的 {got['probed']} 对里，"
+                     f"{got['dropped']} 对值域几乎不重叠，没有一条留下）")
+
+    if unprobed:
+        # **这一段是这个工具最要紧的部分。** 没探不等于不像 ——
+        # 预算是钱的上限，不是判断。名字不像但确实对得上的那条就藏在这里。
+        lines += ["",
+                  f"⚠️ 类型兼容的共 {got['planned']} 对，预算内只探了 "
+                  f"{got['probed']} 对。**下面这些没探过，不是「不像」**："]
+        for u in unprobed[:20]:
+            lines.append(f"    {u['a']} = {u['b']}")
+        if len(unprobed) > 20:
+            lines.append(f"    …… 还有 {len(unprobed) - 20} 对")
+        lines.append("**名字不像但可能指同一个实体的（买家编号 / buyer_id 这类），"
+                     "由你判断** —— 用 `probe_pairs=[\"左列=右列\"]` 指名再探。")
+
+    lines += ["", "**要用它回答问题，得先有人确认**（confirm_link）。",
+              "证据分不出对错的情况是常态：重叠率一样高的候选可能有两条。"]
+    return "\n".join(lines)
+
+
+def _confirm_link(args: dict, **_: Any) -> str:
+    """人确认一条连接（L2，门禁已经拿到票才会走到这）。"""
+    asset = str(args.get("asset") or "").strip()
+    key = str(args.get("link_key") or "").strip()
+    if not (asset and key):
+        return "错误：需要 asset 与 link_key。"
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        import linkage
+        r = linkage.confirm(asset, key, actor=str(args.get("_approved_by") or "steward"),
+                            note=str(args.get("note") or ""))
+    except Exception as e:                                    # noqa: BLE001
+        return f"确认连接失败：{type(e).__name__}: {str(e)[:200]}"
+    if r.get("error"):
+        return f"确认连接失败：{r['error']}"
+    return (f"已确认：{asset} · {key}。"
+            f"现在可以用 answer_with_link 拿它回答跨表的问题了。")
+
+
+def _answer_with_link(args: dict, **_: Any) -> str:
+    """用已确认的连接回答问题（L1；门禁已验过连接与 SQL）。"""
+    q = str(args.get("question") or "").strip()
+    sql = str(args.get("sql") or "").strip()
+    if not (q and sql):
+        return "错误：需要 question 与 sql。"
+    from . import _ensure_path
+    _ensure_path()
+    assets = args.get("assets") or []
+    if isinstance(assets, str):
+        assets = [x.strip() for x in assets.split(",") if x.strip()]
+    if not assets:
+        assets = [str(args.get("asset") or "")]
+    try:
+        import linkage
+        r = linkage.answer(q, sql, assets,
+                           actor=str(args.get("_approved_by") or "model"),
+                           verify_sql=str(args.get("verify_sql") or "") or None,
+                           expect=args.get("expect"))
+    except Exception as e:                                    # noqa: BLE001
+        return f"回答失败：{type(e).__name__}: {str(e)[:200]}"
+    if r.get("error"):
+        return f"回答失败：{r['error']}"
+    lines = [f"问题：{q}", f"答案（{r['rows']} 行）："]
+    lines += ["  " + str(x) for x in r["result"][:20]]
+    v = r["verification"]
+    if not v.get("checked"):
+        # **没核验就说没核验。** 把「跑通了」讲成「验过了」，
+        # 正是这个工具存在的原因。
+        lines.append("⚠️ 没有复核：没给 verify_sql，这个答案只说明 SQL 跑通了。")
+    elif v.get("ok") is False:
+        lines.append(f"❌ **复核对不上**：另一条路径算出 {v.get('value')}，"
+                     f"期望 {v.get('expect')}。这个答案不能用。")
+    elif v.get("ok"):
+        lines.append(f"✅ 复核通过：另一条路径算出同一个数（{v.get('value')}）。")
+    else:
+        lines.append(f"复核路径算出 {v.get('value')}（没给 expect，只做对照）。")
+    lines.append("依赖的数据：")
+    for k, vv in r["depends_on"].items():
+        # 行数优先报**湖里现查的那个** —— 被查的就是那一份。
+        # 台账的行数只在两者对不上时才有意义，那时两个都摆出来。
+        n = vv.get("lake_rows")
+        n = f"{n} 行" if n is not None else "行数未知"
+        when = f"，同步于 {_ts(vv['synced_at'])}" if vv.get("synced_at") else ""
+        warn = f"　⚠️ {vv['mismatch']}" if vv.get("mismatch") else ""
+        note = f"（{vv['note']}）" if vv.get("note") else ""
+        lines.append(f"  · {k}：{n}{when}{note}{warn}")
+    return "\n".join(lines)
+
+
+# **放在函数定义之后**：`_HANDLERS` 是字面量，写在上面那个 dict 里会在
+# 导入时就解析函数名，而它们还没定义 —— NameError，整个 plugin 加载失败。
+_HANDLERS.update({
+    "propose_link": _propose_link,
+    "confirm_link": _confirm_link,
+    "answer_with_link": _answer_with_link,
+})
 
 
 def register_tools(ctx) -> None:

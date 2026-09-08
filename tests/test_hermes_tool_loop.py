@@ -216,7 +216,22 @@ chk("恢复不依赖我的脚本推动 —— 是 Hermes 自己再调一次工�
     any("ingest_table" in (c["name"] or "") for c in called5),
     str([c["name"] for c in called5]))
 
-# 票据一次性：再跑一次应当重新挂起
+# 票据一次性：再跑一次应当重新挂起。
+#
+# **先把同步时间调老。** 门禁的 `_already_done` 排在票据检查之前
+# （刚接过的表不再发审批，免得人白点链接），会把这条断言遮成
+# ALREADY_DONE —— 那样测的就不是「票用过一次还能不能再用」。
+# 调老之后走回原来那条路，安全断言一个字没松。
+import sqlite3 as _sq                                          # noqa: E402
+import time as _t                                              # noqa: E402
+# **直接改子进程用的那个库**（`DB`），不是本进程默认的那个 ——
+# Hermes 起在单独进程里，env_extra 把 DATASTEWARD_DB 指向 DB。
+_c = _sq.connect(DB)
+_c.execute("UPDATE sync_state SET last_synced_at=? WHERE asset=?",
+           (_t.time() - 48 * 3600, "northwind.shippers"))
+_c.commit()
+_c.close()
+
 with StubServer(script3, port=STUB_PORT) as s6:
     saved = dict(os.environ)
     os.environ.update(env_extra)

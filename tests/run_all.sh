@@ -12,6 +12,17 @@ export DATASTEWARD_DB=${DATASTEWARD_DB:-/tmp/dl_test.db}
 # open_store 全局走 Postgres——包括那些只想用 SQLite 的隔离测试
 PG_DSN="${DATASTEWARD_DSN:-}"
 export DATASTEWARD_TOKEN_SECRET=${DATASTEWARD_TOKEN_SECRET:-test-secret}
+# **整场回归默认不往外发信。**
+# `.env` 里是 `MAIL_TRANSPORT=gmail_api` 加真实收件人（那是给真演练用的），
+# 而 63 个测试文件里只有 14 个自己设了 outbox —— 其余靠 `.env` 默认值。
+# 任何一条走到 notify 的新测试都会往公网发真信，而这个项目已经撞过一次。
+# 要真发的那几组自己覆盖这两个变量（GreenMail 那条路本来就显式设 SMTP）。
+#
+# **只钉 CHANNEL，不钉 OUTBOX。** 安全属性是「不往公网发」；
+# 写到哪个文件是各组自己的事 —— 全局钉死路径会踩到「一处写、另一处读」：
+# 第 9 组的服务进程显式写 /tmp/cb_outbox.jsonl，测试进程却继承了全局路径，
+# 于是去空文件里找确认信，整组红在「点击批准 http 0」。我自己踩了一次。
+export NOTIFY_CHANNEL=${NOTIFY_CHANNEL:-outbox}
 export APPROVAL_PORT=${APPROVAL_PORT:-8787}
 rc=0
 PY=./.venv/bin/python; [ -x "$PY" ] || PY=python3
@@ -41,6 +52,10 @@ echo "########## 1. 治理 Plugin 拦截 ##########"
 
 echo ""
 PY=./.venv/bin/python; [ -x "$PY" ] || PY=python3
+echo "########## 1.1 手动模式（每个动作与每封信都要人点头） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_manual_mode.py ) || rc=1
+
+echo ""
 echo "########## 1.2 数据工具 + Pipeline ##########"
 if docker ps --format '{{.Names}}' | grep -q datalaker-source_pg-1; then
   $PY tests/test_data_tools.py || rc=1
@@ -150,6 +165,20 @@ echo "########## 4.42 资产档案：不回源库也说得清一张表（R6 闭�
 ( unset DATASTEWARD_DSN; $PY tests/test_catalog.py ) || rc=1
 
 echo ""
+echo "########## 4.43 闭环 B：认知会更新（真改源库结构，巡检要发现） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_metadata_watch.py ) || rc=1
+
+echo ""
+echo "########## 4.435 接入失败之后：通知谁 · 会不会拿坏账号重试 · 做完的事还发不发审批 ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_connect_retry.py ) || rc=1
+
+echo ""
+echo "########## 4.44 闭环 C：关联产生价值（跨表答一个单表答不了的问题） ##########"
+# 两张**没有外键**的表：候选带证据 → 人确认 → 回答 → 抽样回源库核验。
+# bronze 里没有这两张表时自己 SKIP。
+( unset DATASTEWARD_DSN; $PY tests/test_linkage.py ) || rc=1
+
+echo ""
 echo "########## 4.45 silver 生成之后：下游拿来就能用吗 ##########"
 # 只查 lake 与治理库，不经过 Agent 的说法。silver 为空时自己 SKIP
 ( unset DATASTEWARD_DSN; DATASTEWARD_DB=${LIVE_DB:-/tmp/live.db}   $PY tests/test_silver_usable.py ) || rc=1
@@ -226,13 +255,26 @@ rm -f "$DATASTEWARD_DB" "$DATASTEWARD_DB-wal" "$DATASTEWARD_DB-shm"
 NOTIFY_CHANNEL=outbox NOTIFY_OUTBOX=/tmp/cb_outbox.jsonl \
   python3 services/approval_callback.py > /tmp/cb_test.log 2>&1 &
 CB=$!
-python3 - <<'PY'
-import urllib.request, time, os
-port = os.environ.get("APPROVAL_PORT", "8787")
+# **确认应答的是我们刚起的这个实例**，不是端口上残留的上一次。
+# 残留实例拿的是另一个库，探活照样过，然后整组红在「点击批准失败」——
+# 看起来像审批链路坏了，其实是个僵尸进程。实测查了半天。
+python3 - "$CB" <<'PY' || { echo "  FAIL  callback 没起来（端口被占？见 /tmp/cb_test.log）"; rc=1; }
+import os, sys, time, urllib.request
+port, want = os.environ.get("APPROVAL_PORT", "8787"), f"pid={sys.argv[1]}"
 for _ in range(50):
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=.5); break
-    except Exception: time.sleep(.1)
+        body = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/health", timeout=.5).read().decode()
+        if want in body:
+            sys.exit(0)
+        print(f"  ⚠️ 8787 上应答的不是本次起的实例：{body[:60]}（期望 {want}）")
+        sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception:
+        time.sleep(.1)
+print("  ⚠️ callback 起不来（50 次探活都失败）")
+sys.exit(1)
 PY
 ( unset DATASTEWARD_DSN; python3 tests/test_callback_e2e.py ) || rc=1
 kill $CB 2>/dev/null
@@ -285,6 +327,23 @@ json.dump(snapshot.take(m, dsn=os.environ['EVAL_SOURCE_DSN']),
 else
   echo "  SKIP  Trino 未启动或未设置 HERMES"
 fi
+
+echo ""
+echo "########## 9.8 行为 eval：给它一个乱局面，看它下一步干什么 ##########"
+# 不跑流程，直接注入状态（挂两天的线 / 过期票 / 换过的负责人）再判终态。
+# 机制档不点模型也不要 docker；缺源库或 lake 的 case 自己 SKIP。
+# **两趟都要跑**：第二趟拆掉护栏（门禁 + Connector 的 SQL 准入），
+# negative 必须全红 —— 否则那条判据是摆设，而摆设永远绿。
+# 判分器自己的回归：它判错时没人会替它报警。纯离线，不连库不点模型。
+( unset DATASTEWARD_DSN; $PY tests/test_behavior_eval.py ) || rc=1
+( unset DATASTEWARD_DSN BEHAVIOR_WORK
+  $PY tests/run_behavior_case.py --driver gate ) || rc=1
+# **不要 `| tail`**：管道之后 `$?` 是 tail 的，拆护栏那趟就永远不会让回归变红。
+# 落日志再 tail，退出码从命令本身取。（这个坑当场踩过一次。）
+( unset DATASTEWARD_DSN BEHAVIOR_WORK
+  $PY tests/run_behavior_case.py --driver gate --mutate guards-off \
+    > /tmp/dl_beh_mut.log 2>&1 ) || rc=1
+tail -13 /tmp/dl_beh_mut.log
 
 echo ""
 echo "########## 10. Eval 体外隔离（判分器不许 import 被测代码） ##########"

@@ -44,18 +44,50 @@ JOBS = {
     "data-steward-resume": {
         "schedule": "every 1 minute",
         "monitor_script": "data_steward_resumable.py",
+        # **prompt 里不再要求模型解析人话。** monitor 每行是一个 JSON
+        # continuation：`tool` 是要调的工具，`args` 是**人批准的那一份参数**。
+        # 模型的活是照抄再调一次，不是从 `acme.orders customer_type` 里
+        # 猜哪段是 asset、哪段是 key —— 后者实测跑了 201 秒也没调对（R6 §13）。
         "prompt": (
-            "有任务线的审批已经有决定了 —— 上面 MONITOR CHANGE DETECTED 里"
-            "列出的就是。\n"
-            "逐条把它们往下推：对每一行的 run_id，重新执行它当初被拦下的那个动作"
-            "（第二列是工具名，第三列是对象）。**票据是一次性的**，"
-            "所以直接调用即可，不要再问一遍人。\n"
-            "标了 WIP 的那些是被别人的待办挤回来的，不是等谁拍板 —— "
-            "同样直接重试。\n"
-            "如果某一条又被拦下，那说明它还需要新的审批，跳过它继续下一条。\n"
-            "标了 SILVER 的那些不是等人的线，是**清洗轮已经开了、这张表还没洗**："
-            "先 `propose_cleaning` 看提案，再用提案里给出的规则名"
-            "（原样抄，别改写）调 `apply_cleaning_rule`。"
+            "上面 MONITOR CHANGE DETECTED 里每一行是一个 JSON，"
+            "描述一条可以往下推的任务线。逐条处理，别跳过。\n"
+            "`kind=\"approved\"`：审批已经批下来了。**照着 `args` 原样调用 "
+            "`tool` 指定的那个工具** —— 参数一个字都不要改写、不要补充、"
+            "不要换同义的说法。票据是一次性的，直接调，不要再问一遍人。\n"
+            "`kind=\"blocked_by_wip\"`：被别人的待办挤回来的，不是等谁拍板，"
+            "同样照 `args` 直接重试。\n"
+            "`kind=\"silver_ready\"`：不是等人的线，是**清洗轮已经开了、"
+            "这张表还没洗**。先 `propose_cleaning` 看提案，"
+            "再用提案里给出的规则名（原样抄，别改写）调 `apply_cleaning_rule`。\n"
+            "如果某一条又被拦下，那说明它还需要新的审批，跳过它继续下一条。"
+        ),
+    },
+    # 元数据巡检（闭环 B）。**两个作业，因为便宜和贵要分开**：
+    #
+    #   sweep    每天一次，去源库采集。这是「新的外部观测」——
+    #            档案能省重复访问，但发现变化只能靠去看。no_agent：
+    #            比对是确定性的，不需要模型。
+    #   monitor  每 10 分钟看一次「有没有待复核的结论」，只读治理库。
+    #            有了才点模型去推动，没有就整个跳过。
+    #
+    # 分开的理由和 resume 一样：巡检本身该便宜，点模型才贵。
+    "data-steward-metadata-sweep": {
+        "schedule": "every day at 05:00",
+        "script": "data_steward_metadata_sweep.py",
+        "no_agent": True,
+    },
+    "data-steward-metadata-review": {
+        "schedule": "every 10 minutes",
+        "monitor_script": "data_steward_metadata_monitor.py",
+        "prompt": (
+            "上面 MONITOR CHANGE DETECTED 里列出的，是**源库结构变了、"
+            "因此需要复核的结论**（每行是 资产 + 条目）。\n"
+            "巡检已经把变化和受影响的条目记进档案，也已经把复核请求发给了"
+            "负责人。**你不要自己改这些结论** —— 改不改是业务判断，等人回话。\n"
+            "你要做的是：用 `trace_asset` 看清楚那张表现在是什么样、"
+            "原来的结论是什么，然后把「这条结论现在还成不成立」问清楚 —— "
+            "问题要具体到列和口径，别只转发一句「结构变了」。\n"
+            "人已经回过的条目不会再出现在这个列表里，不用惦记。"
         ),
     },
     "data-steward-escalate": {

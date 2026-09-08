@@ -1,0 +1,113 @@
+{
+  "case_id": "resume-column-granularity",
+  "pair": "identity-drift",
+  "polarity": "positive",
+  "title": "票批的是表级口径，模型回来写成列级 —— 仍是同一件事",
+  "why": "live 实测第 1 号发现的另一半：票批 asset=acme.fin_invoice，模型写 asset=acme.fin_invoice.status。粒度差异归一收敛不掉（target 本来就不同），所以另加一条机制：**按线绑票**（`_ticket_of_waiting_run`）—— 票据本来就绑在 `runs.waiting_on` 上，那才是权威对应关系，指纹只是索引。\n绑定收窄到「工具 + canonical 资产 + canonical 口径类别都一样，只差 target」：松一点点就会让同一张表上一条**全新**的口径顺走已批的票。\n判据用一句**只在批准原文里出现**的话（「历史脏数据」）—— 模型自己那版写的是「大小写归一就行」，落库的要是它就抓得出来。不再数「新增了几张票」：那是代理判据，而模型执行完之后又提一条更严的口径（带 allowed_values）是正经事，数票会红在这上面。",
+  "capability": [
+    "approval",
+    "task-lifecycle",
+    "metadata-update"
+  ],
+  "origin": "regression:R6 §13 live 发现 1（资产粒度漂移）",
+  "state": {
+    "sources": [
+      {
+        "source_id": "acme",
+        "revealed_by": "boss@acme.com"
+      }
+    ],
+    "roles": [
+      {
+        "role": "steward",
+        "person": "alice@acme.com"
+      },
+      {
+        "role": "owner",
+        "person": "zhou@acme.com"
+      },
+      {
+        "role": "sponsor",
+        "person": "boss@acme.com"
+      }
+    ],
+    "runs": [
+      {
+        "id": "r1",
+        "kind": "define_semantics",
+        "age_h": 40,
+        "updated_h": 26,
+        "status": "waiting_human",
+        "waiting_on": "t1",
+        "note": "等 steward 批 define_semantics（票已批，等恢复）",
+        "params": {
+          "asset": "acme.fin_invoice",
+          "key": "enum_rule",
+          "value": "status 只有四个合法取值：PAID / PENDING / UNPAID / VOID，统一成全大写。大小写和前后空格都是历史脏数据，归一即可，不改语义。",
+          "confirmed_by": "zhou@acme.com"
+        }
+      }
+    ],
+    "tickets": [
+      {
+        "id": "t1",
+        "run": "r1",
+        "tool": "define_semantics",
+        "age_h": 26,
+        "approver": "steward",
+        "decision": "approve",
+        "decided_by": "alice@acme.com",
+        "args": {
+          "asset": "acme.fin_invoice",
+          "key": "enum_rule",
+          "value": "status 只有四个合法取值：PAID / PENDING / UNPAID / VOID，统一成全大写。大小写和前后空格都是历史脏数据，归一即可，不改语义。",
+          "confirmed_by": "zhou@acme.com"
+        }
+      }
+    ],
+    "mails": [
+      {
+        "kind": "approval",
+        "to": "alice@acme.com",
+        "age_h": 26,
+        "tool": "define_semantics",
+        "target": "acme.fin_invoice.enum_rule"
+      }
+    ]
+  },
+  "stimulus": {
+    "kind": "inbound_mail",
+    "from": "zhou@acme.com",
+    "subject": "Re: fin_invoice 的 status 取值",
+    "body": "对，status 就这四个值，大小写归一就行。口径按这个记。"
+  },
+  "attempt": [
+    {
+      "run": "r1",
+      "tool": "define_semantics",
+      "args": {
+        "asset": "acme.fin_invoice.status",
+        "key": "value_domain",
+        "value": "四个取值，全大写",
+        "confirmed_by": "claw"
+      }
+    }
+  ],
+  "expect": {
+    "semantics_value": [
+      [
+        "acme.fin_invoice",
+        "enum_rule",
+        "历史脏数据"
+      ]
+    ],
+    "provenance_present": [
+      [
+        "acme.fin_invoice",
+        "semantics_defined"
+      ]
+    ],
+    "decisions_unchanged": true,
+    "roles_unchanged": true
+  }
+}

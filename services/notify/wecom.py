@@ -57,7 +57,7 @@ class WecomNotifier(Notifier):
             "main_title": {"title": f"已{'批准' if approved else '拒绝'}",
                            "desc": f"{tool} · {target}"},
             "horizontal_content_list": [
-                {"keyname": "审计号", "value": approval_id[:8]}],
+                {"keyname": "审计号", "value": str(approval_id)[:8]}],
             "sub_title_text": "该动作将开始执行。" if approved else
                               "该动作不会执行，也不会重复打扰你。"}})
         return {"channel": "wecom", "to": to}

@@ -20,7 +20,7 @@ import json
 
 import notify
 import tokens
-from plugins.datasteward_gate.approvals import Store, open_store
+from plugins.datasteward_gate.approvals import Store, open_store, rows_of
 
 DB = os.environ.get("DATASTEWARD_DB", os.path.expanduser("~/.datalaker/approvals.db"))
 PORT = int(os.environ.get("APPROVAL_PORT", "8787"))
@@ -66,7 +66,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/health":
-            return self._send(200, "ok")
+            # **报出自己是谁在应答。** 只回 "ok" 的话，端口上残留的
+            # 上一次实例也能让探活通过 —— 而它拿的是另一个库，
+            # 于是令牌全对不上，整组测试红在「点击批准失败」，
+            # 看起来像审批链路坏了。实测撞过一次，查了半天是残留进程。
+            import os as _os
+            return self._send(200, f"ok pid={_os.getpid()} db={DB}")
         # 资产台账的只读接口 —— 审计、BI、别的系统从这里拉血缘。
         # **只读、无副作用**，所以不需要令牌；但它也只吐台账里的东西，
         # 口令从来不进台账（见 `_record_provenance` 的 `_SECRET_ARGS`）。
@@ -157,6 +162,7 @@ class Handler(BaseHTTPRequestHandler):
                                             "已处理", "#fef3c7", "#92400e"))
             store.append_event(payload["aid"], f"DECIDED_{payload['d'].upper()}",
                                payload["who"])
+            _release_notice(store, payload)
             _receipt(payload)
         if _is_choice:
             _label = {o["key"]: o["label"] for o in _stage_options()}.get(
@@ -211,7 +217,9 @@ def _send_confirm(payload) -> bool:
         path = "approve" if payload["d"] == "approve" else "deny"
         verb = "批准" if payload["d"] == "approve" else "拒绝"
     try:
-        notify.get().send_notice(
+        # `hold=False`：确认信是**人自己刚点的那一下**的回声。走手动模式那道闸
+        # 的话，人点了批准反而被自己的闸门扣住，链路直接死在这里。
+        notify.get(hold=False).send_notice(
             payload["who"], f"[数据管家] 请确认你的{verb}操作",
             f"有人点击了{verb}链接。若确实是你本人操作，请点击下面的链接确认：\n\n"
             f"{base}/{path}?t={t2}\n\n"
@@ -224,6 +232,43 @@ def _send_confirm(payload) -> bool:
         except Exception:                                     # noqa: BLE001
             pass
         return False
+
+
+def _release_notice(store, payload):
+    """手动模式下被扣住的那封信：**批了才真发，由这个进程发。**
+
+    Agent 侧只能把信写进 approvals 等着（`notify.HoldNotifier`）；
+    真正送出去的动作放在这里，与「Agent 不能批准自己」同一条线 ——
+    放行的判断和发出的动作都在人这一侧的进程里。
+
+    拒绝就什么也不发。信留在库里，是一条查得到的记录，不是丢失。
+    """
+    try:
+        rows = rows_of(store, "SELECT tool_name, args_json FROM approvals"
+                              " WHERE id = {0}", (payload["aid"],))
+        if not rows or rows[0][0] != "send_notice":
+            return
+        letter = json.loads(rows[0][1] or "{}")
+    except Exception as e:                                    # noqa: BLE001
+        try:
+            store.append_event(payload["aid"], "NOTICE_UNREADABLE", str(e)[:180])
+        except Exception:                                     # noqa: BLE001
+            pass
+        return
+    if payload["d"] != "approve":
+        store.append_event(payload["aid"], "NOTICE_DROPPED",
+                           f'{letter.get("to", "")} · {letter.get("subject", "")}'[:180])
+        return
+    try:
+        # 同样 `hold=False`：这封信已经被人看过并放行了，不能再扣一次。
+        notify.get(hold=False).send_notice(letter.get("to", ""),
+                                           letter.get("subject", ""),
+                                           letter.get("body", ""))
+        store.append_event(payload["aid"], "NOTICE_SENT", letter.get("to", "")[:180])
+    except Exception as e:                                    # noqa: BLE001
+        # **发不出去要留痕。** 人已经点了批准，若这里静默失败，
+        # 双方都以为信发出去了 —— 本项目第 1 号坑的又一次变形。
+        store.append_event(payload["aid"], "NOTICE_SEND_FAILED", str(e)[:180])
 
 
 def _receipt(payload):
@@ -246,9 +291,9 @@ def _receipt(payload):
         try:
             import notify
             st = open_store(readonly=False, init_schema=False)
-            row = st.db.execute(
-                "SELECT tool_name, args_json FROM approvals WHERE id=?",
-                (payload["aid"],)).fetchone() if hasattr(st.db, "execute") else None
+            rows = rows_of(st, "SELECT tool_name, args_json FROM approvals "
+                                "WHERE id = {0}", (payload["aid"],))
+            row = rows[0] if rows else None
             tool = row[0] if row else "(未知动作)"
             target = ""
             if row:
@@ -257,8 +302,9 @@ def _receipt(payload):
                     target = a.get("table") or a.get("source") or row[1]
                 except Exception:
                     target = row[1]
-            notify.get().send_receipt(payload["who"], payload["aid"],
-                                      payload["d"], tool, target, payload["who"])
+            notify.get(hold=False).send_receipt(
+                payload["who"], payload["aid"], payload["d"], tool, target,
+                payload["who"])
             st.append_event(payload["aid"], "RECEIPT_SENT", payload["who"])
         except Exception as e:                               # noqa: BLE001
             try:
@@ -280,5 +326,6 @@ if __name__ == "__main__":
     if not os.environ.get("DATASTEWARD_DSN"):
         os.makedirs(os.path.dirname(DB), exist_ok=True)
         Store(DB, readonly=False)               # SQLite 模式下确保表已建
-    print(f"审批 callback 服务 → http://127.0.0.1:{PORT}  (db={DB})")
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    bind_host = os.environ.get("APPROVAL_BIND_HOST", "127.0.0.1")
+    print(f"审批 callback 服务 → http://{bind_host}:{PORT}  (db={DB})")
+    ThreadingHTTPServer((bind_host, PORT), Handler).serve_forever()

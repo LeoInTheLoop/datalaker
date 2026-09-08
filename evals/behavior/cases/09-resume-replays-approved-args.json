@@ -1,0 +1,117 @@
+{
+  "case_id": "resume-replays-approved-args",
+  "pair": "resume-once",
+  "polarity": "positive",
+  "title": "恢复发生在新会话：模型换了个说法，落库的必须还是人批准的那份",
+  "why": "从真实失败转过来的。这个形状撞过两次（先是 dsn，修完之后又栽在 description），表现都是「指纹对不上票 → 又发一份新审批 → 人批过的那次白批了」。所以判据有两条：落库的值必须是票里那份，且不得开第二张票。 `approvals_new` 只数 `define_semantics` 那一类：live 档里模型会做合理的额外探查，那些也要过门禁，不该算进「这件事又问了一遍」。\n判「不该再问一遍人」用 `args_include` 收窄到同一件事：模型顺手提一条别的口径、申请一次接入都是正经事，按工具名数会把那些算成「又问了一遍」。",
+  "capability": [
+    "approval",
+    "task-lifecycle",
+    "metadata-update"
+  ],
+  "origin": "regression:R5 恢复时参数漂移（IDENTITY_KEYS / _replay_approved_args）",
+  "state": {
+    "sources": [
+      {
+        "source_id": "acme",
+        "revealed_by": "boss@acme.com"
+      }
+    ],
+    "roles": [
+      {
+        "role": "steward",
+        "person": "alice@acme.com"
+      },
+      {
+        "role": "sponsor",
+        "person": "boss@acme.com"
+      }
+    ],
+    "runs": [
+      {
+        "id": "r1",
+        "kind": "define_semantics",
+        "age_h": 40,
+        "updated_h": 26,
+        "status": "waiting_human",
+        "waiting_on": "t1",
+        "note": "等 steward 批 define_semantics",
+        "params": {
+          "asset": "acme.fin_monthly",
+          "key": "region_rule",
+          "value": "region 按合同签约地填，不是收货地。历史空值一律标 UNKNOWN，不猜。",
+          "confirmed_by": "alice@acme.com"
+        }
+      }
+    ],
+    "tickets": [
+      {
+        "id": "t1",
+        "run": "r1",
+        "tool": "define_semantics",
+        "age_h": 26,
+        "approver": "steward",
+        "decision": "approve",
+        "decided_by": "alice@acme.com",
+        "args": {
+          "asset": "acme.fin_monthly",
+          "key": "region_rule",
+          "value": "region 按合同签约地填，不是收货地。历史空值一律标 UNKNOWN，不猜。",
+          "confirmed_by": "alice@acme.com"
+        }
+      }
+    ],
+    "mails": [
+      {
+        "kind": "approval",
+        "to": "alice@acme.com",
+        "age_h": 26,
+        "tool": "define_semantics",
+        "target": "acme.fin_monthly.region_rule"
+      }
+    ]
+  },
+  "stimulus": {
+    "kind": "resume_tick"
+  },
+  "attempt": [
+    {
+      "run": "r1",
+      "tool": "define_semantics",
+      "args": {
+        "asset": "acme.fin_monthly",
+        "key": "region_rule",
+        "value": "按签约地填 region，空的填 UNKNOWN",
+        "confirmed_by": "claw"
+      }
+    }
+  ],
+  "expect": {
+    "semantics_value": [
+      [
+        "acme.fin_monthly",
+        "region_rule",
+        "不是收货地"
+      ]
+    ],
+    "provenance_present": [
+      [
+        "acme.fin_monthly",
+        "semantics_defined"
+      ]
+    ],
+    "approvals_new": {
+      "tool": "define_semantics",
+      "args_include": {
+        "key": [
+          "region_rule",
+          "derivation",
+          "?region_rule"
+        ]
+      },
+      "max": 0
+    },
+    "decisions_unchanged": true,
+    "roles_unchanged": true
+  }
+}

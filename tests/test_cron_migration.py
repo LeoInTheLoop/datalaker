@@ -32,8 +32,20 @@ def chk(n, c, d=""):
 
 print("\n=== 作业表 ===\n")
 
-chk("三件事都有作业：恢复 / 升级 / 周报", set(C.JOBS) == {
-    "data-steward-resume", "data-steward-escalate", "data-steward-weekly-report"}, str(sorted(C.JOBS)))
+chk("五件事都有作业：恢复 / 升级 / 周报 / 巡检采集 / 巡检复核", set(C.JOBS) == {
+    "data-steward-resume", "data-steward-escalate", "data-steward-weekly-report",
+    "data-steward-metadata-sweep", "data-steward-metadata-review"},
+    str(sorted(C.JOBS)))
+
+# 巡检拆成两个作业：采集贵（连源库）、看待办便宜（只读治理库）。
+# 合成一个的话，要么每 10 分钟去源库扫一遍，要么一天才发现一次待复核。
+_sw, _rv = C.JOBS["data-steward-metadata-sweep"], C.JOBS["data-steward-metadata-review"]
+chk("采集是 no_agent（比对是确定性的，不必点模型）", _sw.get("no_agent") is True)
+chk("采集按天跑（连源库的事不该每分钟做）", "day" in _sw["schedule"], _sw["schedule"])
+chk("复核走 monitor（没有待复核就整个跳过）",
+    bool(_rv.get("monitor_script")) and not _rv.get("no_agent"))
+chk("**复核的提示词明说不要自己改结论**（改不改是业务判断）",
+    "不要自己改" in (_rv.get("prompt") or ""))
 
 # 恢复要「等的人回了就往下走」，一小时太慢；升级阶梯按天算，一分钟太密。
 chk("恢复是分钟级、升级是小时级（节奏对得上各自的语义）",
@@ -90,12 +102,24 @@ _mon = (ROOT / "ops" / "resumable.py").read_text(encoding="utf-8")
 chk("monitor 源不打时间戳（否则哈希每次都变，等于没有 monitor）",
     "strftime" not in _mon and "datetime" not in _mon
     and "// unit" in _mon)
-# monitor 输出必须把**身份字段给全** —— 门禁按 IDENTITY_KEYS 认「同一个动作」，
-# 模型得照着填才对得上票据。只给一半的后果实测过：define_semantics 的身份是
-# (asset, key)，输出里只有 asset，模型每次自己编个 key，每次都是新动作、
-# 都要新审批，把 steward 队列占满，那条线永远推不动。
-chk("monitor 按 IDENTITY_KEYS 给全身份字段（给一半 = 恢复永远对不上票）",
-    "IDENTITY_KEYS" in _mon)
+# monitor 输出必须让模型**不用猜**就能把动作重放一遍。
+#
+# 原来这里断言的是 `"IDENTITY_KEYS" in _mon` —— 那是当时实现的**代号**，
+# 不是要保的属性。当时给的是 `<run_id>\t<tool>\t<对象>\t<等了多久>`，
+# 模型得自己拆哪段是 asset、哪段是 key；live eval 实测：给了这样一行，
+# 模型跑了 201 秒、12 次工具调用，一次都没调对（R6 §13）。
+#
+# 现在每行是 JSON，`args` 直接是**人批准的那一份参数**（比 IDENTITY_KEYS
+# 更全）。所以断言改成验真实属性：结构化、带工具名、带参数、不带凭证。
+chk("monitor 输出是结构化 continuation（不是让模型解析的人话日志）",
+    "json.dumps" in _mon and '"tool"' not in _mon.split("def _line")[0]
+    and "_line(" in _mon)
+chk("每行带工具名与参数（模型照抄即可，不用猜身份字段）",
+    "tool=" in _mon and "args=" in _mon)
+chk("参数取自**人批准的那份票**，不是线上记的那份",
+    "_approved_args" in _mon and "args_json FROM approvals" in _mon)
+chk("**凭证不进 prompt**（这行会原样喂给模型）",
+    "_CREDENTIAL_KEYS" in _mon and "_public_args" in _mon)
 
 chk("**但有一个按格子的慢变量**（否则唤醒失败就再也醒不过来）",
     "_waited" in _mon and "RETRY_UNIT_S" in _mon)
@@ -215,9 +239,15 @@ chk("修正后的定义是 monitor 作业（老脚本被换掉，不是缝缝补
 chk("修正**喊了出来**，且说清了哪些字段对不上",
     any("data-steward-resume" in x and "script" in x for x in res_d.get("updated", [])),
     str(res_d.get("updated")))
-chk("与表一致的两个作业原样保留，没有被误改或重建",
-    sorted(res_d.get("existing", [])) == ["data-steward-escalate", "data-steward-weekly-report"]
-    and not _calls["created"])
+# 与表一致的原样保留；表里新增的作业**应当被创建**（这正是 ensure_jobs
+# 的职责：加一行定义 = 下次启动自动登记）。
+chk("与表一致的作业原样保留，没有被误改或重建",
+    set(res_d.get("existing", [])) >= {"data-steward-escalate",
+                                       "data-steward-weekly-report"})
+chk("表里新增的作业被创建出来",
+    {c["name"] for c in _calls["created"]} == {"data-steward-metadata-sweep",
+                                               "data-steward-metadata-review"},
+    str([c.get("name") for c in _calls["created"]]))
 
 # 老定义指向的壳脚本已无人引用，必须删掉 —— 留着它，
 # 「作业还在跑老脚本」这件事就永远查不出来。

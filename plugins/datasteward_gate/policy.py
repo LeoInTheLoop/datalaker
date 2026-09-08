@@ -2,6 +2,7 @@
 
 新增一条限制 = 在这里加一行，不改 hook 代码。
 """
+import os
 from enum import IntEnum
 
 
@@ -69,6 +70,14 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     # 设成 L2 的话，「发问」这件事自己也要先被批一次，套娃。
     # 真正的门是下面那条轮级规则：没批 start_silver 就洗不了。
     "propose_stage_decision": (Level.L1, None),
+    # 跨表连接：**候选 → 确认 → 用它回答**，三段分开，级别也分开。
+    # 找候选只在 lake 侧扫（铁律 3：源库禁关系展开），且只产出带证据的
+    # 假设，不下结论 —— 所以是 L1。
+    "propose_link":         (Level.L1, None),
+    # 用已确认的连接回答问题。SQL 走 `_sql_guard` 同一条准入，
+    # 另外门禁会查这条连接是不是真的 confirmed —— 拿推断当事实是这里
+    # 最容易犯的错，而它长得像「答出来了」。
+    "answer_with_link":     (Level.L1, None),
     # 权限扫描只读 information_schema / pg_roles，且明确不改任何权限（铁律 4）
     "scan_permissions":     (Level.L1, None),
     # 在自己的地盘上全量扫，扫爆了也不影响别人（readme 5.3）
@@ -81,6 +90,11 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     # 导出的列名是**标签不是 API 名**（8.2）：业务方改个显示名列名就变，
     # 映射只能由人确认一次再沉淀，机器猜不了。
     "confirm_column_mapping": (Level.L2, "steward"),
+    # 「这两张表的这两列指同一个东西」是业务判断，模型给不了。
+    # 实测过一次为什么不能自动：`crm_customer.customer_id` 连
+    # `crm_contact.customer_id`（对）和连 `crm_contact.id`（错），
+    # **值域重叠率都是 1.0** —— 证据本身分不出来。
+    "confirm_link":         (Level.L2, "steward"),
     # --- L3 需 Owner 审批 ---
     "connect_source":       (Level.L3, "sponsor"),   # 起步阶段还没有 owner
     # SaaS 数据面：定时报表 → 邮件附件 → 暂存 → bronze（8.2）
@@ -181,6 +195,9 @@ IDENTITY_KEYS: dict[str, tuple] = {
     "ingest_export": ("saas_source", "table"),   # 注意不是 source
     "full_refresh": ("source", "table"),
     "confirm_column_mapping": ("asset",),
+    # 连接的身份是「哪张表上的哪条候选」。`note` 是人写的备注，
+    # 不进指纹 —— 否则恢复时模型换个措辞就对不上票。
+    "confirm_link": ("asset", "link_key"),
     "connect_saas_control_plane": ("source_id",),
     "dump_saas_permissions": ("source_id",),
 }
@@ -194,6 +211,34 @@ IDENTITY_KEYS: dict[str, tuple] = {
 # 漂移的表现是「人点了链接但决定落不进去」，又一次静默。
 # 放在 policy.py 是因为这里本来就是「流程配置」那一层。
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 台账事件的人话说法。
+#
+# **一处定义，两处读**：`trace_asset`（给模型看）和 `ops/provenance.py`
+# （给人看）原先各有一份一模一样的表 —— 加一个事件就得记得改两处，
+# 而漏掉那一处的表现是「台账里冒出个英文事件名」，没人会当回事，
+# 于是它会一直在。与 STAGE_OPTIONS 同一条理由。
+#
+# 读的时候一律 `PROVENANCE_VERBS.get(event, event)`：**没登记就显示原名**，
+# 不要显示空字符串 —— 那会让一步真实发生过的事在台账里看起来不存在。
+# ---------------------------------------------------------------------------
+PROVENANCE_VERBS = {
+    "source_registered": "源接入",
+    "ingested": "入湖",
+    "ingested_from_file": "从文件入湖",
+    "cleaned": "清洗",
+    "published": "发布 gold",
+    "granted": "开读权限",
+    "semantics_defined": "定口径",
+    "refreshed": "全量刷新",
+    "column_mapping_confirmed": "确认列映射",
+    "control_plane_connected": "接入控制面",
+    "permissions_dumped": "导出权限现状",
+    "link_confirmed": "确认跨表连接",
+    "answered": "回答跨表问题",
+}
+
+
 STAGE_OPTIONS = [
     {"key": "push_unfinished", "label": "先把没批下来的追完，清洗下周再说"},
     {"key": "start_silver", "label": "接得差不多了，开始清洗轮（silver）"},
@@ -232,6 +277,55 @@ HERMES_DANGEROUS = {
 
 def lookup(tool_name: str) -> tuple[Level, str | None]:
     return POLICY.get(tool_name, UNDECLARED)
+
+
+# ---------------------------------------------------------------------------
+# 手动模式：假设有个人坐在那儿，每一步都要他点头。
+#
+#     MANUAL_MODE=steward      # 1 / true 等价于 steward
+#
+# **值就是审批人角色**，不需要第二个变量说「发给谁」——一个旋钮，
+# 和 NOTIFY_CHANNEL 同一个形状。
+#
+# 生效范围只有一档：**L0/L1 提到 L2**。三个边界都是刻意的：
+#
+#   · L0 不动 —— 否则死锁。tool_search / memory / 读元数据是模型
+#     走到「发出审批」这一步的必经路；把它们也扣住，人连要批什么
+#     都收不到，看起来像 Agent 死了。
+#   · L2/L3 保持**原审批人** —— 它们本来就要人批。改成一律发 steward
+#     等于把 owner:fin 的业务判断挪给别人（readme 10.4 绑角色不绑人）。
+#     手动模式要的是「多一道人工闸」，不是「换个人拍板」。
+#   · L4 不受影响 —— 永不自动，手动模式也不给它开口子。
+#
+# 出站通知那一半在 `services/notify`（HoldNotifier）读同一个函数：
+# **一处定义，两处读**，否则「工具要批、信不用批」这种半截状态没人发现。
+#
+# 每次调用都读环境变量（不缓存）：演练与测试要能在进程内开关它，
+# 而这是配置不是安全边界——真正的限制仍然只在 hook 里（铁律 1）。
+# ---------------------------------------------------------------------------
+_MANUAL_OFF = {"", "0", "false", "no", "off"}
+_MANUAL_DEFAULT_ROLE = "steward"
+
+
+def manual_approver() -> str:
+    """手动模式的审批人角色；没开就返回空串。"""
+    v = os.environ.get("MANUAL_MODE", "").strip()
+    if v.lower() in _MANUAL_OFF:
+        return ""
+    return _MANUAL_DEFAULT_ROLE if v.lower() in ("1", "true", "yes", "on") else v
+
+
+def effective(tool_name: str) -> tuple[Level, str | None]:
+    """门禁真正用的级别 = 策略表 + 手动模式提级。
+
+    `lookup` 保持「策略表里写了什么」的语义不变——判分、测试和
+    `ops/policy` 那边读的是策略本身，不该被运行时开关改写。
+    """
+    level, role = lookup(tool_name)
+    who = manual_approver()
+    if who and Level.L1 <= level < Level.L2:
+        return Level.L2, who
+    return level, role
 
 
 def is_declared(tool_name: str) -> bool:

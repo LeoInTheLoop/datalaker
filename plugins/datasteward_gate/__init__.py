@@ -12,11 +12,13 @@ Hermes 契约要点：
   - 回调超时或异常 → Hermes fail closed（阻断而非放行）
 """
 import json
+import time
 import threading
 import os
 
-from .approvals import Store, open_store
-from .policy import HERMES_DANGEROUS, Level, arg_denied, is_declared, lookup
+from .approvals import Store, open_store, rows_of
+from .policy import (HERMES_DANGEROUS, Level, arg_denied, effective,
+                     is_declared, lookup, manual_approver)
 
 DB_PATH = os.environ.get("DATASTEWARD_DB", os.path.expanduser("~/.datalaker/approvals.db"))
 # 每个线程一个句柄：Hermes 在线程池里跑工具，SQLite 连接不许跨线程用
@@ -124,10 +126,21 @@ def _budget_exceeded():
 
 
 def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
-    level, approver_role = lookup(tool_name)
+    # `effective` = 策略表 + 手动模式提级（MANUAL_MODE）。
+    # 提级发生在这一行，不是散在下面每个分支里——散着写必然漏一个，
+    # 而漏掉的那个就是手动模式下唯一一条没人看就执行了的路。
+    level, approver_role = effective(tool_name)
+    # **两个级别不是一回事，别混用。**
+    #   level    = 提级后的，决定「要不要票」
+    #   declared = 策略表里写的，决定「这是哪一类动作」
+    # 预算与静默期问的是后者。用提级后的那个去判静默期会死锁：
+    # `propose_stage_decision` 本是 L1、正是打破静默的**唯一**那条路，
+    # 手动模式把它抬成 L2 之后，静默期连它一起挡住，于是这一轮永远
+    # 出不去 —— 而表面上看只是「Agent 什么都不做了」。
+    declared = lookup(tool_name)[0]
 
     # 预算兜底：只挡消耗型动作，不挡纯读元数据（否则连状态都查不了）
-    if level >= Level.L1:
+    if declared >= Level.L1:
         over = _budget_exceeded()
         if over:
             return {"action": "block",
@@ -161,6 +174,10 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     why = _source_not_granted(st, args, tool_name)
     if why:
         return {"action": "block", "message": why}
+    # The model may use a case title (for example `Northwind`) instead of the
+    # stable source id (`northwind`).  Hash the effective, canonical arguments
+    # after the allow-list check so approval replay remains idempotent.
+    h = st.action_hash(tool_name, args)
 
     # 轮级的门：没人拍板开清洗轮，就不许洗（acme_full_v2.md §3）
     why = _silver_round_closed(st, tool_name)
@@ -168,7 +185,7 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
         return {"action": "block", "message": why}
 
     # 出了阶段报告就该安静下来 —— 停得下来也是能力
-    why = _quiet_period(st, tool_name, level)
+    why = _quiet_period(st, tool_name, declared)
     if why:
         return {"action": "block", "message": why}
 
@@ -176,6 +193,28 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     # SELECT 10 行和 JOIN 大表不是同一类动作。因此 SQL 走内容级动态准入。
     if tool_name == "sql_query":
         return _sql_guard(args, task_id=task_id, st=st)
+
+    # 已经做完的事不要再发一次审批 —— 人白点链接（见下）。
+    why = _already_done(st, tool_name, args)
+    if why:
+        return {"action": "block", "message": why}
+
+    # 没有连接串就不要开审批票 —— 人收到也没法处理（见下）。
+    why = _connect_without_dsn(st, tool_name, args)
+    if why:
+        return {"action": "block", "message": why}
+
+    # 用连接回答问题：**先查这条连接人确认过没有**，再走 SQL 那条准入。
+    if tool_name == "answer_with_link":
+        why = _link_not_confirmed(st, args)
+        if why:
+            return {"action": "block", "message": why}
+        # plane 由门禁钉死成 lake，不由模型给 —— 否则「拿连接回答问题」
+        # 就成了绕过 `plane=source` 那些护栏的旁路（铁律 3）。
+        guard = _sql_guard({**args, "plane": "lake"}, task_id=task_id, st=st)
+        if guard is not None:
+            return guard
+        return {"action": "modify", "args": {**args, "plane": "lake"}}
 
     # deny list：拒绝过的动作不再重复发起审批
     if st.is_denied(h):
@@ -198,7 +237,13 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     # 顺序反了会死锁：待办堆到上限时，恢复也被 WIP 拒，而堆着的那些
     # 待办**正是这些线自己**，谁也推不动。实测撞上：6 张票已批准未用，
     # 全被「steward 当前已有 3 件待办」挡在门外。
-    held = st.find_valid(h, task_id) if level >= Level.L2 else None
+    #
+    # 两条路找票，**指纹之外还要认线**：指纹解决同义词漂移，
+    # 认线解决粒度漂移（票批的是表级口径、模型回来写列级）。
+    # 见 `_ticket_of_waiting_run`。
+    held = None
+    if level >= Level.L2:
+        held = st.find_valid(h, task_id) or _ticket_of_waiting_run(st, tool_name, args)
 
     # WIP 限制（readme 10.7）：不要淹没任何人
     if level >= Level.L2 and not held:
@@ -216,9 +261,39 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     if level >= Level.L2:
         tok = held
         if not tok:
-            aid, created = st.request(task_id, h, tool_name,
-                                      json.dumps(args, ensure_ascii=False),
+            had_decision = False
+            try:
+                rows = rows_of(
+                    st, "SELECT a.id FROM approvals a JOIN decisions d "
+                    "ON d.approval_id = a.id WHERE a.action_hash = {0} "
+                    "AND d.decision IS NOT NULL LIMIT 1", (h,))
+                had_decision = bool(rows)
+            except Exception:                                # noqa: BLE001
+                pass
+            payload = json.dumps(args, ensure_ascii=False)
+            aid, created = st.request(task_id, h, tool_name, payload,
                                       approver_role or "owner")
+            if not created and _args_changed(st, aid, args) \
+                    and st.amend_pending(aid, payload):
+                # 同一个动作、参数变了、而且**还没人做过决定** ——
+                # 把票改成新参数并重新发信。不改的话，人批的是旧参数那份，
+                # 而回填会拿它把模型这次给的新参数换掉，静默地回到老路上。
+                created = True
+                try:
+                    st.append_event(
+                        task_id or "gate", "AMEND_PENDING",
+                        json.dumps({"approval_id": aid, "tool": tool_name},
+                                   ensure_ascii=False))
+                except Exception:                            # noqa: BLE001
+                    pass
+            elif created and had_decision:
+                try:
+                    st.append_event(
+                        task_id or "gate", "NEW_TICKET_AFTER_DECISION",
+                        json.dumps({"approval_id": aid, "tool": tool_name},
+                                   ensure_ascii=False))
+                except Exception:                            # noqa: BLE001
+                    pass
             if created:
                 _notify_async(aid, tool_name, args, approver_role or "owner")
             try:
@@ -228,7 +303,7 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
                 pass                     # 记账失败不该改变门禁的判断
             return {"action": "block",
                     "message": f"[PENDING_APPROVAL] 已就 {tool_name} 向 {approver_role} 发起审批"
-                               f"（id={aid[:8]}）。审批通过后本任务会被重新唤醒，"
+                               f"（id={str(aid)[:8]}）。审批通过后本任务会被重新唤醒，"
                                f"当前不要重试，请继续处理其他不受阻塞的任务线。"}
         st.consume(tok[0])
         # **恢复时把人批准的那份参数回填。**
@@ -252,24 +327,96 @@ def _replay_approved_args(st, tool_name, approval_id, args):
 
     返回 None = 不回填（模型给的参数就是全部，或者取不到）。
     """
+    from .canonical import RULES
     from .policy import IDENTITY_KEYS
-    if tool_name not in IDENTITY_KEYS:
+    if tool_name not in IDENTITY_KEYS and tool_name not in RULES:
         return None
     try:
-        row = st.db.execute("SELECT args_json FROM approvals WHERE id=?",
-                            (approval_id,)).fetchone() \
-            if hasattr(st.db, "execute") else None
-        if not row:
+        rows = rows_of(st, "SELECT args_json FROM approvals WHERE id = {0}",
+                       (approval_id,))
+        if not rows:
             return None
-        approved = json.loads(row[0])
+        approved = (json.loads(rows[0][0]) if isinstance(rows[0][0], str)
+                    else rows[0][0])
     except Exception:                                        # noqa: BLE001
         return None
     if not isinstance(approved, dict) or approved == dict(args or {}):
         return None
-    # 身份字段以模型这次给的为准（它们本来就相同，指纹已经保证了）；
-    # 其余一律用批准的那份。
+    # **声明了归一规则的工具：整份照抄批准的那一份。**
+    #
+    # 原来这里保留模型这次给的身份字段，理由是「它们本来就相同，
+    # 指纹已经保证了」。归一之后这句话不再成立 —— `enum_rule` 与
+    # `normalize_rule` 现在算同一个指纹，但它们**不是同一个字符串**；
+    # 保留模型那份就等于人批了 A、系统记下 B。
+    if tool_name in RULES:
+        return approved
+    # 其余工具行为不变：身份字段以模型这次给的为准，其余用批准的那份。
     return {**approved, **{k: v for k, v in (args or {}).items()
                            if k in IDENTITY_KEYS[tool_name]}}
+
+
+def _ticket_of_waiting_run(st, tool_name: str, args: dict):
+    """这条线在等的那张票批下来没有 —— **按线找，不按指纹找。**
+
+    为什么需要它：指纹能把同义词收敛（`enum_rule` / `normalize_rule`），
+    但收敛不了**粒度**。live 实测撞到的就是这个：票批的是
+    `asset="acme.fin_invoice"`，模型回来写 `asset="acme.fin_invoice.status"`
+    —— 对象确实更细了一层，指纹当然不同，于是人批过的票白批，又开一张新的。
+
+    票据本来就绑在线上（`runs.waiting_on`），那才是权威的对应关系；
+    指纹是给去重和索引用的。所以恢复时先问「这条线在等的票批了吗」。
+
+    **只放过粒度这一处差异**：工具、canonical 资产、canonical 口径类别
+    三样都要一样，**只允许 target（列）不同**。
+
+    松一点点都不行 —— 第一版写成「同一张表就绑」，结果同一张表上一条
+    **全新**的口径（`key="brand_new"`）会把已批的票顺走：人批的动作照常
+    执行（参数被回填），但模型真正想做的那件事被静默吞掉，而且它绕过了
+    WIP 限制。`tests/test_gate.py` 第 28 组当场把这个抓出来了。
+    """
+    import time as _t
+
+    from .approvals import rows_of
+    from .canonical import RULES, normalize_approval_args
+    if tool_name not in RULES:
+        return None                      # 没声明归一规则的工具行为不变
+
+    def _sig(a):
+        """身份去掉 target —— 剩下的必须逐字相同。"""
+        i = normalize_approval_args(tool_name, a)["identity"] or {}
+        return (i.get("asset"), i.get("key"))
+
+    want = _sig(args)
+    if not all(want):
+        return None
+    try:
+        runs = _runs()
+        for r in runs.by_status("waiting_human"):
+            if r["kind"] != tool_name or not r.get("waiting_on"):
+                continue
+            if not isinstance(r.get("params"), dict):
+                continue
+            if _sig(r["params"]) != want:
+                continue
+            row = rows_of(st,
+                          "SELECT a.id FROM approvals a"
+                          " JOIN decisions d ON d.approval_id = a.id"
+                          " WHERE a.id = {0} AND d.decision = 'approve'"
+                          " AND a.used_at IS NULL AND a.expires_at > {0} LIMIT 1",
+                          (r["waiting_on"], _t.time()))
+            if row:
+                try:
+                    st.append_event(r["run_id"], "TICKET_BOUND_BY_RUN",
+                                    json.dumps({"tool": tool_name,
+                                                "asset": want[0], "key": want[1],
+                                                "approval": str(row[0][0])[:8]},
+                                               ensure_ascii=False))
+                except Exception:                            # noqa: BLE001
+                    pass
+                return (row[0][0],)
+    except Exception:                                        # noqa: BLE001
+        return None                      # 找不到就走原路：发一张新票（吵，不松）
+    return None
 
 
 # 把源**加进**清单的那个动作。它不能被清单挡住 —— 否则第一个源之后
@@ -299,11 +446,22 @@ def _source_not_granted(st, args: dict, tool_name: str = ""):
     # 表现是发现覆盖率永远停在第一个源。
     if tool_name in SOURCE_ADMITTING_TOOLS:
         return None
-    src = str(args.get("source") or args.get("source_id") or "").strip()
+    source_value = str(args.get("source") or "").strip()
+    source_key = "source" if source_value else "source_id"
+    src = source_value or str(args.get("source_id") or "").strip()
     if not src:
         return None
     granted = st.granted_sources()
-    if not granted or src in granted:
+    # Case titles are presentation text; source ids are stable identifiers.
+    # Accept a case-insensitive display spelling only when it maps to an
+    # already human-granted id, and pass the canonical id to the tool.
+    canonical = next((item for item in granted
+                      if str(item).casefold() == src.casefold()), None)
+    if canonical:
+        if canonical != src:
+            args[source_key] = canonical
+        return None
+    if not granted:
         return None
     try:
         st.append_event("sources", "UNGRANTED_SOURCE_ATTEMPT",
@@ -390,6 +548,229 @@ def _public_sql_args(args: dict) -> dict:
             if not str(k).startswith("_sql_gate_")}
 
 
+# 「这件事已经做过了」的时间窗。与 `tools._recently_synced` 同一个数 ——
+# 两处不同的话，会出现门禁放行、工具却说「刚接过没有重接」的组合，
+# 那时人已经点过链接了。
+RECENT_H = 6.0
+
+
+def _already_done(st, tool_name: str, args: dict):
+    """做完的事不要再发审批。**拦在建票之前，不是拦在执行之前。**
+
+    实测撞到的：一轮演练里 `customers` / `orders` / `order_details`
+    各被申请了 **3 次** —— 每次 cron 唤醒模型都重新规划一遍，
+    把接过的表再报一遍。工具自己是幂等的（「6 分钟前刚接过，没有重接」），
+    但那句话是**人点完链接之后**才出现的：人已经白点了 9 次。
+
+    工具侧那份幂等判断留着（它挡住的是别的入口），这里挡的是**打扰**。
+    照铁律 1：限制写在 hook 里，不写在 prompt 里 —— 已经试过在
+    `list_source_tables` 的输出里标「已接入」提醒它，它照样重报。
+    """
+    if tool_name in ("ingest_table", "full_refresh"):
+        if tool_name == "full_refresh":
+            return None                  # 刷新的语义就是「明知有也要重来」
+        src = str((args or {}).get("source") or "").strip()
+        tbl = str((args or {}).get("table") or "").strip()
+        if not (src and tbl):
+            return None
+        said = _recent_sync(st, f"{src}.{tbl}")
+        if said:
+            return (f"[ALREADY_DONE] {said} 没有发审批 —— "
+                    f"人点一次链接是一次打扰，而这件事已经做完了。")
+        return None
+    if tool_name == "connect_source":
+        sid = str((args or {}).get("source_id") or "").strip()
+        dsn = str((args or {}).get("dsn") or "").strip()
+        if not sid or not _source_live(st, sid):
+            return None
+        if dsn and _identity_of(dsn) not in _registered_identity(st, sid):
+            return None              # 换了账号：那是新动作，照常走审批
+        return (f"[ALREADY_DONE] {sid} 已经接进来了，凭证也在。"
+                f"直接用 list_source_tables / ingest_table 往下做；"
+                f"要换账号才需要重新接入（那时把新连接串带上）。")
+    return None
+
+
+def _recent_sync(st, asset: str):
+    """这张表是不是刚同步过。返回一句人话或 None。"""
+    from .approvals import rows_of
+    try:
+        rows = rows_of(st, "SELECT last_synced_at, row_count FROM sync_state"
+                           " WHERE asset = {0}", (asset,))
+    except Exception:                                        # noqa: BLE001
+        return None
+    if not rows or not rows[0][0]:
+        return None
+    age_h = (time.time() - float(rows[0][0])) / 3600.0
+    if age_h > RECENT_H:
+        return None
+    ago = f"{age_h:.1f} 小时前" if age_h >= 1 else f"{max(1, int(age_h * 60))} 分钟前"
+    return (f"{asset} {ago}刚接过（{rows[0][1] or 0:,} 行）。"
+            f"要刷新数据用 full_refresh；只是想看内容的话它已经在 "
+            f"iceberg.bronze 里，直接 sql_query（plane=lake）。")
+
+
+def _source_live(st, source_id: str) -> bool:
+    """这个源有没有已经登记好、且没被证明连不通的凭证。"""
+    from .approvals import rows_of
+    try:
+        rows = rows_of(st, "SELECT dsn FROM source_secrets WHERE source_id = {0}",
+                       (source_id,))
+    except Exception:                                        # noqa: BLE001
+        return False
+    if not rows or not rows[0][0]:
+        return False
+    return _identity_of(str(rows[0][0])) not in _failed_identities(st, source_id)
+
+
+def _registered_identity(st, source_id: str) -> set:
+    from .approvals import rows_of
+    try:
+        rows = rows_of(st, "SELECT dsn FROM source_secrets WHERE source_id = {0}",
+                       (source_id,))
+    except Exception:                                        # noqa: BLE001
+        return set()
+    return {_identity_of(str(r[0])) for r in rows if r[0]}
+
+
+def _failed_identities(st, source_id: str) -> set:
+    from .approvals import rows_of
+    try:
+        rows = rows_of(st, "SELECT payload FROM events WHERE"
+                           " kind='SOURCE_CONNECT_FAILED' ORDER BY seq DESC LIMIT 50")
+    except Exception:                                        # noqa: BLE001
+        return set()
+    out = set()
+    for (pl,) in rows:
+        try:
+            d = json.loads(pl or "{}")
+        except Exception:                                    # noqa: BLE001
+            continue
+        if d.get("source_id") == source_id and d.get("identity"):
+            out.add(d["identity"])
+    return out
+
+
+def _args_changed(st, approval_id, args: dict) -> bool:
+    """这张待批票里存的参数，和模型这次给的，是不是不一样。"""
+    from .approvals import rows_of
+    try:
+        rows = rows_of(st, "SELECT args_json FROM approvals WHERE id = {0}",
+                       (approval_id,))
+        if not rows:
+            return False
+        raw = rows[0][0]
+        old = json.loads(raw or "{}") if isinstance(raw, str) else (raw or {})
+    except Exception:                                        # noqa: BLE001
+        return False
+    return old != dict(args or {})
+
+
+def _connect_without_dsn(st, tool_name: str, args: dict):
+    """`connect_source` 拿不到可用的连接串时，**拒绝，且不发审批**。
+
+    实测撞到的那次：dba 给的账号在这个库上没权限，接入失败；模型于是
+    调 `connect_source(source_id="northwind")` 想重试一次 —— 没带 dsn。
+    门禁按老路给它开了一张新审批票，票里只有一个 source_id。
+
+    两个后果都不好：
+
+    - 人收到一封「请批准接入 northwind」，批了也没用 —— 里面没有新账号；
+    - 批下来之后 handler 会从旧审批里取回**那份已经证明连不通的** dsn，
+      于是拿同一份坏账号再连一次。而模型刚跟人说过「不会反复重试」。
+
+    所以这一步的判断是：**有没有可用的连接串**。没有就直接退回，
+    让模型去问人要 —— 那本来就是唯一的出路。
+    """
+    if tool_name != "connect_source":
+        return None
+    if str((args or {}).get("dsn") or "").strip():
+        return None                      # 带了新连接串，正常走审批
+    sid = str((args or {}).get("source_id") or "").strip()
+    if not sid:
+        # **缺参数不归门禁管。** CLAUDE.md：输入校验留在对应代码里，
+        # 门禁只判授权。在这里抢着报「需要 source_id」，会把一次
+        # 参数写错的调用说成授权问题，而真正的报错在 handler 里写得更准。
+        return None
+    try:
+        import sys as _s
+        _s.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), "services"))
+        usable = _usable_dsn_exists(st, sid)
+    except Exception:                                        # noqa: BLE001
+        usable = False
+    if usable:
+        return None                      # 有已批准且没失败过的，恢复照走
+    return (f"[NEED_DSN] 没有可用的 {sid} 连接串："
+            f"你没带 dsn，已批准的那份也已经证明连不通。"
+            f"**先去问对方要新的连接信息**，拿到了再调这个工具。"
+            f"现在发审批没有意义 —— 票里没有新账号，人批了也接不上。")
+
+
+def _usable_dsn_exists(st, source_id: str) -> bool:
+    """这个源上有没有「已批准、且没被证明连不通」的连接串。
+
+    与 `tools._dsn_from_approval` 是同一条判断 —— 那边取值、这边只问有没有。
+    两处都读 `SOURCE_CONNECT_FAILED` 事件，口径一致。
+    """
+    from .approvals import rows_of
+    try:
+        def _json_obj(raw):
+            return json.loads(raw or "{}") if isinstance(raw, str) else (raw or {})
+
+        approved = [_json_obj(r[0]) for r in rows_of(
+            st, "SELECT a.args_json FROM approvals a JOIN decisions d"
+                " ON d.approval_id = a.id WHERE a.tool_name='connect_source'"
+                " AND d.decision='approve' ORDER BY d.decided_at DESC LIMIT 20")]
+        bad = {d.get("identity") for d in
+               (_json_obj(r[0]) for r in rows_of(
+                   st, "SELECT payload FROM events WHERE"
+                       " kind='SOURCE_CONNECT_FAILED' ORDER BY seq DESC LIMIT 50"))
+               if d.get("source_id") == source_id}
+    except Exception:                                        # noqa: BLE001
+        return False
+    return any(_identity_of(str(d["dsn"])) not in bad for d in approved
+               if d.get("source_id") == source_id and d.get("dsn"))
+
+
+def _link_not_confirmed(st, args: dict):
+    """`answer_with_link` 用的连接必须是**人确认过**的（闭环 C）。
+
+    这条检查在这里、不在工具里，是因为铁律 1：写在工具里就是「模型自觉」，
+    而这正是最容易自觉不了的地方 —— 一条 `inferred` 的连接照样 JOIN 得出
+    结果，输出看起来跟真的一模一样。
+
+    实测过它有多像：`crm_customer.customer_id = crm_contact.id` 是错的连法，
+    但「有对接人的客户数」两种连法都答 40，「上海的」都答 24。
+    **答案对不对，从答案本身看不出来。**
+    """
+    asset = str(args.get("asset") or "").strip()
+    key = str(args.get("link_key") or "").strip()
+    if not (asset and key):
+        return ("[LINK_REQUIRED] answer_with_link 必须指明用的是哪条连接"
+                "（asset + link_key）—— 跨表结论要说得清凭什么连。")
+    try:
+        rows = st.catalog(asset=asset, kind="link")
+    except Exception as e:                                   # noqa: BLE001
+        # 查不到就拒。**不要 fail-open** —— 「档案读不出来」和
+        # 「这条连接人批过」是两回事，混起来等于没有这道门。
+        return f"[LINK_UNVERIFIABLE] 读不到连接档案，已按 fail-closed 拒绝：{type(e).__name__}"
+    cur = [r for r in rows if r["asset"] == asset and r["key"] == key]
+    if not cur:
+        return (f"[LINK_UNKNOWN] {asset} 上没有 {key} 这条连接。"
+                f"先用 propose_link 找候选，再请人确认。")
+    status = cur[-1]["status"]
+    if status == "confirmed":
+        return None
+    if status == "refuted":
+        why = cur[-1].get("value")
+        return (f"[LINK_REFUTED] 这条连接已经被人否定过：{str(why)[:120]}。"
+                f"换一条连法（会产生新的候选），不要重复用它。")
+    return (f"[LINK_NOT_CONFIRMED] {asset} · {key} 目前还是「{status}」，"
+            f"不是人确认过的事实。推断连得出结果，但那个结果没人担保 —— "
+            f"先用 confirm_link 让人拍一次。")
+
+
 def _sql_guard(args: dict, task_id: str = "", st=None):
     """before_sql：复用 Connector 的 AST 准入，再按 SQL 内容动态升级审批。
 
@@ -420,15 +801,27 @@ def _sql_guard(args: dict, task_id: str = "", st=None):
         return {"action": "block", "message": f"[SQL_REJECTED] {review.message}"[:220]}
 
     checked_args = {**clean_args, "plane": plane, "sql": review.sql}
-    if review.action == "needs_approval":
+    # 手动模式：**每条查询也要人点头**。写在这里而不是靠 `effective` ——
+    # sql_query 走的是这条独立的内容级准入，上面那次提级它根本走不到。
+    # 顺序也是刻意的：**先过 AST 校验再要票**，非法 SQL 直接拒，
+    # 不该为一条注定被拒的语句去打扰人。
+    manual = manual_approver()
+    if review.action == "needs_approval" or manual:
+        # 内容级审批本来就点了名（大表 JOIN → owner），保留它；
+        # 纯粹因为手动模式才要批的，才发给手动模式指定的那个人。
+        # **`SQLReview.approver_role` 默认就是 "owner"**（连 allow 的那份也是），
+        # 所以不能直接 `or` —— 那样手动模式下每条轻量查询都会去打扰 owner，
+        # 而设 MANUAL_MODE 的人以为自己接管了全部。
+        approver_role = (review.approver_role if review.action == "needs_approval"
+                         else "") or manual or "owner"
+        why = review.message or f"手动模式：每条 SQL 先过 {approver_role}"
         if st is None:
             return {"action": "block",
-                    "message": f"[SQL_APPROVAL_REQUIRED] {review.message}"[:220]}
+                    "message": f"[SQL_APPROVAL_REQUIRED] {why}"[:220]}
         h = st.action_hash("sql_query", checked_args)
         if st.is_denied(h):
             return {"action": "block",
                     "message": "[DENIED] sql_query 已被拒绝，不会重复发起审批。"}
-        approver_role = review.approver_role or "owner"
         over = _wip_exceeded(st, approver_role)
         if over:
             return {"action": "block", "message": over}
@@ -440,9 +833,9 @@ def _sql_guard(args: dict, task_id: str = "", st=None):
             if created:
                 _notify_async(aid, "sql_query", checked_args, approver_role)
             return {"action": "block",
-                    "message": (f"[PENDING_APPROVAL] SQL 查询可能增加源系统负担，"
-                                f"已向 {approver_role} 发起审批（id={aid[:8]}）。"
-                                f"原因：{review.message}。审批通过后再执行。")}
+                    "message": (f"[PENDING_APPROVAL] 这条 SQL 需要人先看一眼，"
+                                f"已向 {approver_role} 发起审批（id={str(aid)[:8]}）。"
+                                f"原因：{why}。审批通过后再执行。")}
         st.consume(tok[0])
         checked_args["_sql_gate_approved"] = True
         return {"action": "modify", "args": checked_args}
@@ -542,8 +935,14 @@ def _wip_exceeded(st, approver_role):
     一次给他 30 件待办等于什么也批不了。
     超限不是等待，而是让 Agent 转去做不需要审批的工作。
     """
-    per = int(os.environ.get("PER_PERSON_WIP_LIMIT", "3") or 3)
-    glob = int(os.environ.get("GLOBAL_WIP_LIMIT", "20") or 20)
+    # 手动模式下**默认值放宽**：人本来就是要逐条看的那个队列，
+    # 而这时几乎每个动作都要批（连出站的信也要）。仍然是 3 件的话，
+    # Agent 第四步就停下，理由还是「别人待办太多」—— 在手动模式里
+    # 那句话是假的，而它长得像门禁正常工作。
+    # **显式设了 env 仍然以 env 为准**：要限流的人照样限得住。
+    manual = bool(manual_approver())
+    per = int(os.environ.get("PER_PERSON_WIP_LIMIT") or (50 if manual else 3))
+    glob = int(os.environ.get("GLOBAL_WIP_LIMIT") or (200 if manual else 20))
     try:
         if st.open_count() >= glob:
             return (f"[WIP_LIMIT] 全局在办已达上限 {glob} 件，暂不发起新事项。"
@@ -685,7 +1084,10 @@ def _notify_async(approval_id, tool_name, args, approver_role):
             to = (st.resolve_role(approver_role)
                   or notify.cfg(f"MAIL_{approver_role.upper()}")
                   or notify.cfg("MAIL_OWNER") or "")
-            if not to and n.name == "email":
+            # `endswith`：手动模式下通道被闸门包了一层（`hold:email`），
+            # 写死相等的话这条「没配收件人就别发」的分支会失效，
+            # 于是拿空收件人去发信，报错长得像 SMTP 坏了。
+            if not to and n.name.endswith("email"):
                 st.append_event(approval_id, "MAIL_SKIPPED", "未配置收件人")
                 return
             target = args.get("table") or args.get("source") or json.dumps(args, ensure_ascii=False)
@@ -781,6 +1183,9 @@ _PROVENANCE_EVENTS = {
     # 但**记什么账属于设计**：等补实现时不必再想一遍，也不会漏掉血缘。
     "confirm_column_mapping": ("column_mapping_confirmed",
                                lambda a: a.get("asset")),
+    # 「这两张表凭什么能连」是这张表经历里必须记的一步 ——
+    # 后面所有跨表结论都建在它上面，审计问的往往正是它。
+    "confirm_link":        ("link_confirmed", lambda a: a.get("asset")),
     "connect_saas_control_plane": ("control_plane_connected",
                                    lambda a: a.get("source_id")),
     "dump_saas_permissions": ("permissions_dumped", lambda a: a.get("source_id")),

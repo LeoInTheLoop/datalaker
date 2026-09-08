@@ -31,6 +31,10 @@ class SyncError(RuntimeError):
     pass
 
 
+class UnknownColumnType(SyncError):
+    """列类型没有映射。**不猜** —— 见 `_pg_type_to_trino`。"""
+
+
 class SchemaDrift(SyncError):
     """源系统 schema 变了。**必须停下来问人**（readme 6.1：L2）。
 
@@ -70,6 +74,7 @@ def _trino_http(sql: str, timeout=180):
     容器用 claw 的凭证，就只能读源、只能写 iceberg。
     """
     import base64
+    import ssl
     import urllib.request
 
     url = TRINO_URL.rstrip("/") + "/v1/statement"
@@ -82,8 +87,10 @@ def _trino_http(sql: str, timeout=180):
     rows, err = [], None
     req = urllib.request.Request(url, data=sql.encode("utf-8"),
                                  headers=hdr, method="POST")
+    ca_file = os.environ.get("TRINO_CA_FILE", "")
+    context = ssl.create_default_context(cafile=ca_file) if ca_file else None
     while True:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as r:
             body = json.load(r)
         if body.get("error"):
             err = body["error"].get("message", "unknown")
@@ -216,11 +223,29 @@ def freshness(asset: str) -> dict:
             "row_count": s["row_count"]}
 
 
+# 认识的 PG 类型 → bronze（Iceberg）里的类型。
+#
+# **Iceberg 不收带长度的类型**（`varchar(20)`、`char(n)` 都不行），
+# 所以不能照抄源库或 Trino 的类型名，必须映射。
+UNKNOWN_TYPE_FALLBACK = "varchar"
+
+
 def _pg_type_to_trino(t: str) -> str:
-    t = (t or "").lower()
+    """PG 类型 → Iceberg 建表用的类型。**认不出来的会抛错，不再蒙 varchar。**
+
+    原先最后一行是 `return "varchar"`，任何没写进来的类型都悄悄变成 varchar。
+    实测撞上：`employees.photo` 是 `bytea`，Trino 那边是 `varbinary`，
+    于是 `INSERT INTO ...(photo varchar) SELECT photo` 报
+    `Insert query has mismatched column types` —— 而这条报错既不指名是哪一列，
+    也不指名是哪个类型，接入线只留下一句「失败」。
+
+    蒙一个类型的代价就是这个：**错不在建表那一刻暴露，而在插数那一刻，
+    带着一条看不懂的错。** 宁可在建表前就说「这个类型我不认识」。
+    """
+    t = (t or "").lower().strip()
     if "int" in t and "point" not in t:
-        return "bigint"
-    if any(k in t for k in ("numeric", "decimal", "real", "double")):
+        return "bigint"                      # smallint/integer/bigint 一律放宽
+    if any(k in t for k in ("numeric", "decimal", "real", "double", "float")):
         return "double"
     if "bool" in t:
         return "boolean"
@@ -228,7 +253,19 @@ def _pg_type_to_trino(t: str) -> str:
         return "timestamp(6)"
     if t == "date":
         return "date"
-    return "varchar"
+    if t.startswith("time"):                 # time / time with time zone
+        return "time(6)"
+    if t in ("bytea", "blob", "binary", "varbinary"):
+        # Trino 的 postgresql 连接器把 bytea 读成 varbinary。
+        # 声明成 varchar 就会在 INSERT 那一步类型对不上。
+        return "varbinary"
+    if any(k in t for k in ("char", "text", "uuid", "json", "xml", "enum",
+                            "inet", "cidr", "macaddr", "money", "interval")):
+        return "varchar"
+    raise UnknownColumnType(
+        f"不认识的列类型 {t!r} —— 没有映射就不建表。"
+        f"蒙成 varchar 的话，错会推迟到插数那一步，且报错里不带列名。"
+        f"请在 services/sync.py 的 _pg_type_to_trino 里显式登记它。")
 
 
 def lake_columns(schema: str, table: str) -> list:

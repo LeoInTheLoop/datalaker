@@ -80,7 +80,7 @@ class FeishuNotifier(Notifier):
                 "elements": [
                     {"tag": "div", "fields": [
                         _field("动作", tool), _field("对象", f"`{target}`"),
-                        _field("审计号", f"`{approval_id[:8]}`")]},
+                        _field("审计号", f"`{str(approval_id)[:8]}`")]},
                     {"tag": "note", "elements": [{"tag": "plain_text", "content":
                         "该动作将开始执行。若非本意请立即联系。" if approved else
                         "该动作不会执行，也不会就同一动作重复打扰你。"}]},

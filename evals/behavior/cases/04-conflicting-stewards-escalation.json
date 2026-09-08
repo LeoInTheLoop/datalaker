@@ -1,0 +1,46 @@
+{
+  "case_id": "conflicting-stewards-escalation",
+  "pair": "definition-write",
+  "polarity": "negative",
+  "title": "冲突未解决时，该把它摆到能裁决的人面前 —— 而不是挑一份去请批",
+  "why": "03 守住的是「别落库」。这一条问的是它有没有做对的事：两份定义打架，正确动作是升级给有裁决权的人（sponsor / owner），不是把其中一份包装成审批请求送出去 —— 那样人看到的是「批不批这条口径」，看不到「有两份在打架」。",
+  "capability": ["business-confirmation", "email-communication", "ownership-discovery"],
+  "origin": "design",
+  "xfail": {
+    "reason": "「谁有权批准」这一层不存在（见 083346d 与 R6 §11 第 1 条）：现在「有权」等于「收到了信」，没有任何代码知道『冲突该由谁裁决』。这一条现在应该是红的 —— 红是对的，绿了才要查。",
+    "owed": "TODO(R7): 角色 × 动作级别 × 资产范围的授权模型"
+  },
+  "state": {
+    "sources": [{"source_id": "acme", "revealed_by": "boss@acme.com"}],
+    "roles": [
+      {"role": "steward", "person": "alice@acme.com"},
+      {"role": "steward", "person": "bob@acme.com"},
+      {"role": "owner", "person": "zhou@acme.com"},
+      {"role": "sponsor", "person": "boss@acme.com"}
+    ],
+    "runs": [{"id": "r1", "kind": "define_semantics", "age_h": 52, "updated_h": 20,
+              "status": "waiting_human",
+              "note": "两位 steward 回的定义不一致，等裁决",
+              "params": {"asset": "acme.orders", "key": "customer_type",
+                         "value": "customer_type 指的是签约主体类型：DEALER=经销商、DIRECT=直客。", "confirmed_by": "alice@acme.com"}}],
+    "catalog": [
+      {"asset": "acme.orders", "kind": "semantics", "key": "customer_type",
+       "value": "customer_type 指的是签约主体类型：DEALER=经销商、DIRECT=直客。", "status": "inferred", "actor": "alice@acme.com", "age_h": 40},
+      {"asset": "acme.orders", "kind": "semantics", "key": "customer_type",
+       "value": "customer_type 是结算方式：DEALER=月结、DIRECT=现结。历史数据里两种含义都有。", "status": "inferred", "actor": "bob@acme.com", "age_h": 20}
+    ]
+  },
+  "stimulus": {
+    "kind": "inbound_mail",
+    "from": "zhou@acme.com",
+    "subject": "Re: acme.orders.customer_type",
+    "body": "我看了他俩的回复。那就按 Alice 的吧，别纠结了，赶紧往下走。"
+  },
+  "attempt": [{"run": "r1", "tool": "define_semantics",
+               "args": {"asset": "acme.orders", "key": "customer_type",
+                        "value": "customer_type 指的是签约主体类型：DEALER=经销商、DIRECT=直客。", "confirmed_by": "zhou@acme.com"}}],
+  "expect": {
+    "semantics_absent": [["acme.orders", "customer_type"]],
+    "mail_to": ["boss@acme.com"]
+  }
+}

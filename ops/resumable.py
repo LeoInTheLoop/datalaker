@@ -22,6 +22,7 @@ Hermes 的 monitor 在**跑 agent 之前**就把新哈希存下（它自己的�
 
     python3 ops/resumable.py
 """
+import json
 import os
 import pathlib
 import sys
@@ -71,36 +72,59 @@ def _silver_ready() -> list:
         src, tbl = asset.split(".", 1)
         if f"{src}__{tbl}" in silver:
             continue                          # 洗过了
-        out.append(f"SILVER\tapply_cleaning_rule\t{src} {tbl}\t轮已开")
+        out.append(_line(kind="silver_ready", tool="apply_cleaning_rule",
+                         args={"source": src, "table": tbl},
+                         note="清洗轮已开，这张表还没洗"))
     return out
 
 
-def _what(r) -> str:
-    """这条线在处理什么。
+def _public_args(d) -> dict:
+    """能进 prompt 的那部分参数 —— **凭证一律不给**。
 
-    **身份字段要给全。** 门禁按 `IDENTITY_KEYS` 认「同一个动作」，
-    模型恢复时得照着填才对得上票据。只给一半的后果实测过：
-    `define_semantics` 的身份是 (asset, key)，而这里只输出了 asset，
-    模型每次自己编一个 key —— 每次都是新动作、都要新审批，
-    把 steward 的队列占满，那条线永远推不动。
-
-    **但凭证不给**（dsn / 口令之类）：这行会进模型的 prompt，
-    而参数本体留在库里，恢复时门禁会把人批准的那份回填。
+    这一行会原样进模型的 prompt。dsn / 口令留在库里，
+    恢复时门禁会把人批准的那份回填（`_replay_approved_args`）。
     """
-    p = r.get("params") or {}
+    from datasteward_gate.approvals import _CREDENTIAL_KEYS
+    return {k: v for k, v in (d or {}).items()
+            if str(k).lower() not in _CREDENTIAL_KEYS}
+
+
+def _approved_args(approval_id):
+    """**人批准的那一份参数。** 恢复要重放的是它，不是线上记的那份。
+
+    两者通常一样，但票据是权威：`amend_pending` 改过的、
+    或者线是按旧参数建的时候，只有票里那份是人看过的。
+    """
+    if not approval_id:
+        return None
     try:
         import sys as _s
         _s.path.insert(0, str(ROOT / "plugins"))
-        from datasteward_gate.policy import IDENTITY_KEYS
-        keys = IDENTITY_KEYS.get(r.get("kind"))
+        from datasteward_gate.approvals import open_store, rows_of
+        with open_store(readonly=True, init_schema=False) as st:
+            row = rows_of(st, "SELECT args_json FROM approvals WHERE id = {0}",
+                          (approval_id,))
+        return _public_args(json.loads(row[0][0])) if row else None
     except Exception:                                        # noqa: BLE001
-        keys = None
-    if keys:
-        parts = [str(p[k]) for k in keys if p.get(k)]
-        if parts:
-            return " ".join(parts)
-    return (p.get("table") or p.get("asset") or p.get("source")
-            or p.get("source_id") or "")
+        return None
+
+
+def _line(**kw) -> str:
+    """一条 continuation。**JSON，不是人话日志。**
+
+    原来这里输出的是 `<run_id>\t<tool>\t<对象>\t<等了多久>`，模型得自己猜
+    哪段是 asset、哪段是 key、`30h` 是什么。live eval 实测：给了这样一行，
+    模型跑了 201 秒、12 次工具调用，**一次都没调对那个工具**（R6 §13）。
+
+    改成机器直接能吃的：工具名、参数、票据、状态各一个字段。
+    模型的活从「解析日志」变成「照抄参数再调一次」——
+    而它照抄得准不准也不再要紧，门禁会用票里那份回填。
+
+    `sort_keys` + 无时间戳：输出要**逐字节稳定**，monitor 靠哈希抑制重复唤醒，
+    抖一下就等于每分钟点一次模型。
+    """
+    return json.dumps(kw, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"))
 
 
 # 慢变量的**格子大小**。生产是一小时（与催办节奏一致）；
@@ -136,10 +160,17 @@ def main() -> int:
         # 「查不了」对下游是同一个意思：这一分钟没有可推进的线。
         return 0
     for r in rows[0]:
-        lines.append(f'{r["run_id"]}\t{r["kind"]}\t{_what(r)}\t{_waited(r)}')
+        lines.append(_line(
+            kind="approved", run_id=r["run_id"], tool=r["kind"],
+            args=_approved_args(r.get("waiting_on"))
+            or _public_args(r.get("params")),
+            approval_id=r.get("waiting_on"), waited=_waited(r)))
     lines += _silver_ready()
     for r in rows[1]:
-        lines.append(f'{r["run_id"]}\t{r["kind"]}\t{_what(r)}\t{_waited(r)}\tWIP')
+        # WIP 挡回来的：**没有票在等**，等的是别人的待办降下来。
+        lines.append(_line(
+            kind="blocked_by_wip", run_id=r["run_id"], tool=r["kind"],
+            args=_public_args(r.get("params")), waited=_waited(r)))
     # 排序：`resumable()` 按「谁先批」排，那是**会变的**顺序，
     # 而哈希认字节。不排的话，两个人先后批准会让同一批线的输出抖动，
     # 白白唤醒一次模型。真正的先后由恢复时再查库决定。

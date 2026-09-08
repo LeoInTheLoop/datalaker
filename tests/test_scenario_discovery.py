@@ -55,7 +55,7 @@ class Recorder(notify.Notifier):
 
 
 REC = Recorder()
-notify.get = lambda channel=None: REC
+notify.get = lambda channel=None, hold=True: REC
 
 st = store()
 admin = Store(DB, readonly=False)
@@ -100,10 +100,15 @@ r = inbound.process({"id": "m0", "headers": {**sysreply["headers"],
 chk(5, "Sponsor 回复被接受", r["action"] == "processed")
 
 # 走 L3 审批：批准后 IT 开只读账号，凭证注册进来
-g = gate("connect_source", {"source": SRC}, "scen")
+# **带上连接串**——真实链路就是这样：人在邮件里给账号，模型带着它来申请。
+# 不带 dsn 的调用现在会被门禁挡回（没有凭证的接入，人批了也接不上），
+# 那条路由 tests/test_connect_retry.py 专门验。
+_args = {"source_id": SRC, "dsn": _real_bootstrap[SRC],
+         "given_by": SCEN["roles"]["sponsor"]}
+g = gate("connect_source", _args, "scen")
 chk(5, "接入数据源需要审批（L3）",
     isinstance(g, dict) and "PENDING_APPROVAL" in g.get("message", ""))
-src_aid = st.pending(action_hash("connect_source", {"source": SRC}), "scen")
+src_aid = st.pending(action_hash("connect_source", _args), "scen")
 admin.decide(src_aid, "approve", SCEN["roles"]["sponsor"])
 connector.register_source(SRC, _real_bootstrap[SRC], approval_id=src_aid)
 chk(5, "批准后数据源才注册进来", SRC in connector.known_sources(), src_aid[:8])

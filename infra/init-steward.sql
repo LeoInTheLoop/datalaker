@@ -54,6 +54,9 @@ GRANT INSERT (id, run_id, action_hash, tool_name, args_json, approver, created_a
               expires_at, kind, options, question, evidence)
       ON approvals TO agent_role;
 GRANT UPDATE (used_at) ON approvals TO agent_role;
+-- 待决票收到新账号时，Agent 只能改参数正文；amend_pending() 会再次要求
+-- used_at 为空且 decisions 中不存在决定，不能改审批人、动作或生命周期字段。
+GRANT UPDATE (args_json) ON approvals TO agent_role;
 GRANT SELECT ON approvals, decisions TO agent_role;
 -- 关键：不授予 decisions 的 INSERT / UPDATE，也不授予 approvals 其他列的 UPDATE
 
@@ -141,6 +144,9 @@ CREATE TABLE IF NOT EXISTS events (
 );
 GRANT SELECT, INSERT ON events TO agent_role;
 GRANT USAGE, SELECT ON SEQUENCE events_seq_seq TO agent_role;
+-- Callback 需要把人类决定写入审计事件，但仍不能写 decisions。
+GRANT SELECT, INSERT ON events TO approver_role;
+GRANT USAGE, SELECT ON SEQUENCE events_seq_seq TO approver_role;
 
 -- 授权源清单（readme 8 凭证层）：**谁告诉过我们这个源存在**。
 -- 源是人给的，不是 Agent 自己找的 —— 未经授权的扫描本身就是违规。
@@ -152,7 +158,7 @@ CREATE TABLE IF NOT EXISTS source_grants (
     revealed_at DOUBLE PRECISION NOT NULL,
     note        TEXT
 );
-GRANT SELECT ON source_grants TO agent_role;
+GRANT SELECT, INSERT ON source_grants TO agent_role;
 GRANT SELECT, INSERT ON source_grants TO approver_role;
 
 -- 源系统凭证（readme 8 凭证层）：**agent_role 连 SELECT 都没有。**
@@ -167,8 +173,56 @@ CREATE TABLE IF NOT EXISTS source_secrets (
     registered_by TEXT NOT NULL,
     registered_at DOUBLE PRECISION NOT NULL
 );
--- 故意**不写** GRANT ... TO agent_role —— 那正是这张表的全部意义。
+-- Agent 不能 SELECT 凭证，但批准后的 Connector 需要把凭证写入隔离表；
+-- 读取仍只发生在 Connector 内部，且门禁必须先验证 approval_id。
+GRANT INSERT, UPDATE ON source_secrets TO agent_role;
 GRANT SELECT, INSERT, UPDATE ON source_secrets TO approver_role;
+
+-- The Agent must be able to register or replace a secret after an approved
+-- action without being able to SELECT the secret table.  PostgreSQL requires
+-- SELECT for a key-bearing UPDATE/ON CONFLICT statement, so keep that lookup
+-- inside this owner-controlled, write-only function instead.
+CREATE OR REPLACE FUNCTION datasteward_put_source_secret(
+    p_source_id text, p_dsn text, p_kind text, p_approval_id text, p_by text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  UPDATE public.source_secrets
+     SET dsn = p_dsn, kind = p_kind, approval_id = p_approval_id,
+         registered_by = p_by, registered_at = extract(epoch from now())
+   WHERE source_id = p_source_id;
+  IF NOT FOUND THEN
+    INSERT INTO public.source_secrets
+      (source_id, dsn, kind, approval_id, registered_by, registered_at)
+    VALUES
+      (p_source_id, p_dsn, p_kind, p_approval_id, p_by,
+       extract(epoch from now()));
+  END IF;
+END;
+$$;
+ALTER FUNCTION datasteward_put_source_secret(text,text,text,text,text) OWNER TO postgres;
+REVOKE ALL ON FUNCTION datasteward_put_source_secret(text,text,text,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION datasteward_put_source_secret(text,text,text,text,text) TO agent_role;
+
+-- Connector 跨 Hermes 会话需要按 source_id 取回已批准凭证；不要给 Agent
+-- source_secrets 的整表 SELECT，改由 owner 函数暴露单行、单源读取。
+CREATE OR REPLACE FUNCTION datasteward_get_source_secret(p_source_id text)
+RETURNS TABLE(dsn text, kind text)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+  SELECT s.dsn, s.kind
+    FROM public.source_secrets AS s
+   WHERE s.source_id = p_source_id
+   LIMIT 1
+$$;
+ALTER FUNCTION datasteward_get_source_secret(text) OWNER TO postgres;
+REVOKE ALL ON FUNCTION datasteward_get_source_secret(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION datasteward_get_source_secret(text) TO agent_role;
 
 -- 资产台账（readme 13 血缘）：**一张表的来历，一处记全。**
 -- append-only —— 血缘是历史事实，改写它等于伪造审计轨。
@@ -203,6 +257,9 @@ CREATE TABLE IF NOT EXISTS asset_catalog (
     key           TEXT NOT NULL,
     value         TEXT NOT NULL,
     status        TEXT NOT NULL CHECK (status IN ('observed','inferred','confirmed','refuted')),
+    -- TODO(R7): 改 JSONB + GIN 索引。现在是 TEXT，写侧自己 dumps ——
+    -- 「哪些推断靠 pg_constraint 得出」只能整表捞出来在 Python 里过滤。
+    -- 改之前先收口 `_catalog_norm` 允许纯字符串这条契约（readme R7 P2）。
     evidence      TEXT,
     actor         TEXT NOT NULL,
     observed_at   DOUBLE PRECISION NOT NULL,

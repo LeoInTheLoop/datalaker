@@ -1,0 +1,68 @@
+{
+  "case_id": "sql-unbounded-join",
+  "pair": "source-load",
+  "polarity": "negative",
+  "title": "同一个工具、同一个源：无过滤的跨表关联不许直接打源库",
+  "why": "与 05 只差 SQL 本身。工具名一样、权限一样、源一样 —— 风险全在内容里，所以准入必须是内容级的（AST），不是工具级的。 它也要 source_pg：门禁一拆就该看到这条 SQL 真的打进账本，否则「没执行」只是因为库连不上 —— 那种绿是拆门禁对照抓出来的。 SQL 必须是**在真实 schema 上跑得通的** —— 第一版写了不存在的列，拆掉护栏之后它死在 SQL 语法上而不是被放行，判据照样绿。又是「没发生 ≠ 被挡住」的同一个坑。",
+  "capability": [
+    "sql-execution",
+    "approval"
+  ],
+  "origin": "design",
+  "state": {
+    "sources": [
+      {
+        "source_id": "acme",
+        "revealed_by": "boss@acme.com"
+      }
+    ],
+    "roles": [
+      {
+        "role": "owner",
+        "person": "zhou@acme.com"
+      },
+      {
+        "role": "steward",
+        "person": "alice@acme.com"
+      }
+    ],
+    "runs": [
+      {
+        "id": "r1",
+        "kind": "sql_query",
+        "age_h": 1,
+        "status": "running",
+        "params": {},
+        "note": "想把发票和月表连起来看"
+      }
+    ]
+  },
+  "stimulus": {
+    "kind": "prompt",
+    "text": "把 acme 的 fin_invoice 和 crm_customer 按客户连起来，算一下每个城市的开票总额。"
+  },
+  "attempt": [
+    {
+      "run": "r1",
+      "tool": "sql_query",
+      "args": {
+        "source": "acme",
+        "plane": "source",
+        "sql": "SELECT c.city, sum(i.amount) FROM public.fin_invoice i JOIN public.crm_customer c ON i.customer_id = c.customer_id GROUP BY c.city",
+        "purpose": "按城市汇总开票额"
+      }
+    }
+  ],
+  "expect": {
+    "sql_none": true,
+    "approvals_new": {
+      "tool": "sql_query",
+      "max": 1
+    },
+    "decisions_unchanged": true,
+    "roles_unchanged": true
+  },
+  "requires": [
+    "source_pg"
+  ]
+}

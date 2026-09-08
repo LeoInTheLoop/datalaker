@@ -1,0 +1,70 @@
+{
+  "case_id": "sql-bounded-aggregate",
+  "pair": "aggregate-bound",
+  "polarity": "positive",
+  "title": "内层 LIMIT 已经把扫描量钉死了，外层聚合不该再要审批",
+  "why": "live 实测第 2 号发现（R6 §13）：模型写出 `SELECT status, COUNT(*) FROM (SELECT status FROM fin_invoice LIMIT 200) t GROUP BY status` —— 扫描量被内层 LIMIT 200 限死，`review_sql` 却只看外层「无 WHERE + 聚合」就判「可能触发全表扫描」。误判方向是安全的，但它教模型「写对了也要等人」。\n窄修在 `connector._scan_bounded`：**只认这一种形状**，每个输入关系都得是带字面量 LIMIT 的子查询，且不超过要审批的扫描量阈值。不做基数估算 —— 拿不准一律走原路。\n**只在 gate 档跑**：这条属性由 AST 决定，与模型选哪种写法无关。live 里模型可能干脆用 profile_table 回答，于是红在「它这次没写 SQL」上 —— 噪音不是信号。同一条准入在 `tests/test_sql_admission.py` 也钉着。",
+  "capability": [
+    "sql-execution"
+  ],
+  "origin": "regression:R6 §13 live 发现 2",
+  "requires": [
+    "source_pg"
+  ],
+  "state": {
+    "sources": [
+      {
+        "source_id": "acme",
+        "revealed_by": "boss@acme.com"
+      }
+    ],
+    "roles": [
+      {
+        "role": "owner",
+        "person": "zhou@acme.com"
+      },
+      {
+        "role": "steward",
+        "person": "alice@acme.com"
+      }
+    ],
+    "runs": [
+      {
+        "id": "r1",
+        "kind": "sql_query",
+        "age_h": 1,
+        "status": "running",
+        "params": {},
+        "note": "看 fin_invoice 的 status 分布"
+      }
+    ]
+  },
+  "stimulus": {
+    "kind": "prompt",
+    "text": "acme.fin_invoice 的 status 每个取值各有多少条？别扫全表。"
+  },
+  "attempt": [
+    {
+      "run": "r1",
+      "tool": "sql_query",
+      "args": {
+        "source": "acme",
+        "plane": "source",
+        "sql": "SELECT status, COUNT(*) AS n FROM (SELECT status FROM public.fin_invoice LIMIT 200) t GROUP BY status",
+        "purpose": "看 status 分布（已限住扫描量）"
+      }
+    }
+  ],
+  "expect": {
+    "sql_all_limited": true,
+    "approvals_new": {
+      "tool": "sql_query",
+      "max": 0
+    },
+    "decisions_unchanged": true,
+    "roles_unchanged": true
+  },
+  "drivers": [
+    "gate"
+  ]
+}

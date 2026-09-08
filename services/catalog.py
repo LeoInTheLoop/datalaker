@@ -56,6 +56,15 @@ def record_observed(source: str, table: str, meta: dict,
     # `sync._schema_hash` 只覆盖前两项，改它会让存量资产集体报 SchemaDrift，
     # 那笔账在闭环 B 一起还。
     cols = [[str(c[0]), str(c[1]), str(c[2])] for c in (meta.get("columns") or [])]
+    # **一列都没采到 ≠ 这张表有 0 列。**
+    # `connector.describe_table` 对不存在的表返回 `{"columns": []}` 而不是
+    # 报错（information_schema 查不到就是空结果集）。照单全收的后果是：
+    # 一张已建档的表因为权限变化或连接抖动读不到时，档案里的真实结构
+    # 会被**覆盖成空** —— 认知被自己的采集破坏掉，而且看起来一切正常。
+    # 空结构一律不落档，由调用方去判断是「表没了」还是「这次没读到」。
+    if not cols:
+        return {"asset": asset, "wrote": {}, "empty": True,
+                "why": "没有采到任何列 —— 表不存在、无权限、或这次读取失败"}
     pk = [str(x) for x in (meta.get("primary_key") or [])]
     rel = [[str(x) for x in f] for f in (fks or [])]
     who = actor or f"connector:{source}"

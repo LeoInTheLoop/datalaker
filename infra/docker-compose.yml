@@ -182,6 +182,9 @@ services:
       SMTP_PASS: ${SMTP_PASS:-}
       MAIL_SPONSOR: ${MAIL_SPONSOR:-}
       MAIL_OWNER: ${MAIL_OWNER:-}
+      MAIL_STEWARD: ${MAIL_STEWARD:-}
+      # 催办与周报同样是「对外说话」，手动模式下一并扣住等人放行
+      MANUAL_MODE: ${MANUAL_MODE:-}
       SCHEDULER_STATE: /app/state/scheduler.json
       ESCALATE_INTERVAL_SEC: ${ESCALATE_INTERVAL_SEC:-3600}
       CLAW_STANDALONE_SCHEDULER: ${CLAW_STANDALONE_SCHEDULER:-0}
@@ -227,6 +230,10 @@ services:
       MAIL_OWNER: ${MAIL_OWNER:-}
       MAIL_STEWARD: ${MAIL_STEWARD:-}
       MAIL_SPONSOR: ${MAIL_SPONSOR:-}
+      # 手动模式（每个动作与每封对外的信都要人放行）。**必须显式传进来** ——
+      # compose 只透传这里列出的变量，漏了它 .env 里设了也不生效，
+      # 而那种失败长得像「手动模式没做出来」。
+      MANUAL_MODE: ${MANUAL_MODE:-}
       MINIO_ENDPOINT: http://minio:9000
     volumes:
       # 工具白名单：安全主防线（readme 4.6）

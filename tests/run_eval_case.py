@@ -66,7 +66,7 @@ class Recorder(notify.Notifier):
         return {"channel": "recorder"}
 
 
-notify.get = lambda channel=None: Recorder()
+notify.get = lambda channel=None, hold=True: Recorder()
 
 
 def call(tool, args, fn=None, summary=None):
