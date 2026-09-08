@@ -42,10 +42,13 @@ class ModelExpirationPolicy(unittest.TestCase):
         os.environ["OPENAI_MODEL_FALLBACKS"] = fallbacks
         os.environ["DASHSCOPE_MODEL_EXPIRATIONS"] = expirations
 
-    def test_expiry_date_is_inclusive(self):
+    def test_stops_one_day_before_expiry(self):
         self.configure("primary", "fallback", "primary=2026-09-09,fallback=2026-10-01")
-        model, expiry = agent.select_model(date(2026, 9, 9))
+        model, expiry = agent.select_model(date(2026, 9, 7))
         self.assertEqual((model, expiry), ("primary", date(2026, 9, 9)))
+
+        model, expiry = agent.select_model(date(2026, 9, 8))
+        self.assertEqual((model, expiry), ("fallback", date(2026, 10, 1)))
 
     def test_expired_primary_moves_to_unexpired_fallback(self):
         self.configure("primary", "fallback", "primary=2026-09-08,fallback=2026-10-01")
@@ -60,7 +63,7 @@ class ModelExpirationPolicy(unittest.TestCase):
 
     def test_all_expired_models_block(self):
         self.configure("primary", "fallback", "primary=2026-09-08,fallback=2026-09-08")
-        with self.assertRaisesRegex(RuntimeError, "all configured models expired"):
+        with self.assertRaisesRegex(RuntimeError, "conservative cutoff"):
             agent.select_model(date(2026, 9, 9))
 
 

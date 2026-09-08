@@ -94,7 +94,7 @@ Hermes source-build 镜像没有官方 s6 入口，demo overlay 显式设
 
 模型免费额度有效期由 `DASHSCOPE_MODEL_EXPIRATIONS` 显式登记，格式为
 `model=YYYY-MM-DD`。`docker/agent-entrypoint.py` 在启动和每次网关运行期间做硬检查：
-到期日当天仍可用，次日阻断；主模型过期时按 `OPENAI_MODEL_FALLBACKS` 选择未过期模型；
+采用保守截止：到期日前一天即停止使用；主模型进入截止日时按 `OPENAI_MODEL_FALLBACKS` 选择仍安全的模型；
 缺少日期或全部候选过期则状态为 `blocked`，不会发起 chat completion。页面状态同时
 展示实际选择的 `model` 与 `model_expires_on`，便于核对。
 

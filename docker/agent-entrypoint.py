@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 
 HOME = pathlib.Path(os.environ.get("HERMES_HOME", "/state/hermes"))
@@ -59,9 +59,9 @@ def parse_model_expirations(raw: str) -> dict[str, date]:
 def select_model(today: date | None = None) -> tuple[str, date]:
     """Select the first non-expired model, or fail closed.
 
-    Expiry dates are inclusive: a model may be used through its configured
-    date, but never on a later date.  Missing metadata is also a hard block so
-    a newly added fallback cannot silently bypass the expiry policy.
+    Conservative cutoff: stop using a model one calendar day before its
+    configured expiration date.  Missing metadata is also a hard block so a
+    newly added fallback cannot silently bypass the expiry policy.
     """
     global ACTIVE_MODEL, ACTIVE_MODEL_EXPIRATION, MODEL_SELECTION_DETAIL
     primary = os.environ.get("OPENAI_MODEL", "").strip()
@@ -76,7 +76,8 @@ def select_model(today: date | None = None) -> tuple[str, date]:
     if missing:
         raise RuntimeError("model expiration metadata missing: " + ",".join(missing))
     now = today or datetime.now(timezone.utc).date()
-    expired = [model for model in candidates if now > expirations[model]]
+    expired = [model for model in candidates
+               if now >= expirations[model] - timedelta(days=1)]
     for model in candidates:
         if model in expired:
             continue
@@ -92,7 +93,7 @@ def select_model(today: date | None = None) -> tuple[str, date]:
             )
         return model, expirations[model]
     raise RuntimeError(
-        f"all configured models expired on or before {now.isoformat()}: "
+        f"all configured models reached conservative cutoff on or before {now.isoformat()}: "
         + ",".join(expired)
     )
 
@@ -252,8 +253,8 @@ def run_gateway() -> str:
     while process.poll() is None:
         if (ACTIVE_MODEL_EXPIRATION
                 and datetime.now(timezone.utc).date()
-                > date.fromisoformat(ACTIVE_MODEL_EXPIRATION)):
-            detail = (f"model expired: {ACTIVE_MODEL} "
+                >= date.fromisoformat(ACTIVE_MODEL_EXPIRATION) - timedelta(days=1)):
+            detail = (f"model cutoff reached: {ACTIVE_MODEL} "
                       f"(expiration={ACTIVE_MODEL_EXPIRATION})")
             write_status("blocked", detail, model_probe="fail")
             process.terminate()
