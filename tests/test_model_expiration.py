@@ -54,7 +54,12 @@ class ModelExpirationPolicy(unittest.TestCase):
         self.configure("primary", "fallback", "primary=2026-09-08,fallback=2026-10-01")
         model, expiry = agent.select_model(date(2026, 9, 9))
         self.assertEqual((model, expiry), ("fallback", date(2026, 10, 1)))
-        self.assertIn("primary_expired=primary", agent.MODEL_SELECTION_DETAIL)
+        self.assertIn("earliest_expiration", agent.MODEL_SELECTION_DETAIL)
+
+    def test_earliest_expiration_wins_over_primary_order(self):
+        self.configure("primary", "fallback", "primary=2026-12-01,fallback=2026-10-01")
+        model, expiry = agent.select_model(date(2026, 9, 9))
+        self.assertEqual((model, expiry), ("fallback", date(2026, 10, 1)))
 
     def test_missing_expiry_metadata_blocks_instead_of_guessing(self):
         self.configure("primary", "fallback", "primary=2026-10-01")

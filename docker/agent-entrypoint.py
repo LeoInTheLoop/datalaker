@@ -60,8 +60,10 @@ def select_model(today: date | None = None) -> tuple[str, date]:
     """Select the first non-expired model, or fail closed.
 
     Conservative cutoff: stop using a model one calendar day before its
-    configured expiration date.  Missing metadata is also a hard block so a
-    newly added fallback cannot silently bypass the expiry policy.
+    configured expiration date.  Among models still inside their safe window,
+    choose the earliest expiration first so free quota is consumed before it
+    disappears.  Missing metadata is also a hard block so a newly added
+    fallback cannot silently bypass the expiry policy.
     """
     global ACTIVE_MODEL, ACTIVE_MODEL_EXPIRATION, MODEL_SELECTION_DETAIL
     primary = os.environ.get("OPENAI_MODEL", "").strip()
@@ -78,19 +80,19 @@ def select_model(today: date | None = None) -> tuple[str, date]:
     now = today or datetime.now(timezone.utc).date()
     expired = [model for model in candidates
                if now >= expirations[model] - timedelta(days=1)]
-    for model in candidates:
-        if model in expired:
-            continue
+    safe = [model for model in candidates if model not in expired]
+    if safe:
+        order = {model: index for index, model in enumerate(candidates)}
+        model = min(safe, key=lambda item: (expirations[item], order[item]))
         ACTIVE_MODEL = model
         ACTIVE_MODEL_EXPIRATION = expirations[model].isoformat()
         os.environ["OPENAI_MODEL"] = model
-        if model == primary:
-            MODEL_SELECTION_DETAIL = f"model={model}; expires={ACTIVE_MODEL_EXPIRATION}"
-        else:
-            MODEL_SELECTION_DETAIL = (
-                f"model={model}; expires={ACTIVE_MODEL_EXPIRATION}; "
-                f"primary_expired={primary}"
-            )
+        reason = "earliest_expiration"
+        if model != primary:
+            reason += f"; primary={primary}"
+        MODEL_SELECTION_DETAIL = (
+            f"model={model}; expires={ACTIVE_MODEL_EXPIRATION}; {reason}"
+        )
         return model, expirations[model]
     raise RuntimeError(
         f"all configured models reached conservative cutoff on or before {now.isoformat()}: "
