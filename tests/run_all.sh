@@ -253,6 +253,10 @@ else
 fi
 
 echo ""
+echo "########## 8.1 模型免费额度到期硬门禁 ##########"
+$PY tests/test_model_expiration.py || rc=1
+
+echo ""
 echo "########## 9. 审批闭环（端到端） ##########"
 rm -f "$DATASTEWARD_DB" "$DATASTEWARD_DB-wal" "$DATASTEWARD_DB-shm"
 NOTIFY_CHANNEL=outbox NOTIFY_OUTBOX=/tmp/cb_outbox.jsonl \

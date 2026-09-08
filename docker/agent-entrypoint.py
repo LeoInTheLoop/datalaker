@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import date, datetime, timezone
 
 
 HOME = pathlib.Path(os.environ.get("HERMES_HOME", "/state/hermes"))
@@ -27,6 +28,73 @@ CONFIG = HOME / "config.yaml"
 CURRENT_RUN = ""
 PROJECT_SCRIPTS = pathlib.Path("/app/.hermes/home/scripts")
 ACTIVE_RUN = CONTROL_DIR / "active_run.json"
+ACTIVE_MODEL = ""
+ACTIVE_MODEL_EXPIRATION = ""
+MODEL_SELECTION_DETAIL = ""
+
+
+def parse_model_expirations(raw: str) -> dict[str, date]:
+    """Parse the operator-owned model expiry allowlist.
+
+    The gateway must not guess an expiry date from a model name.  Every model
+    in the primary/fallback chain therefore needs an explicit ISO date.
+    """
+    out: dict[str, date] = {}
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"invalid model expiration entry: {item}")
+        model, expiry = (part.strip() for part in item.split("=", 1))
+        if not model or not expiry:
+            raise ValueError(f"invalid model expiration entry: {item}")
+        try:
+            out[model] = date.fromisoformat(expiry)
+        except ValueError as exc:
+            raise ValueError(f"invalid model expiration date: {item}") from exc
+    return out
+
+
+def select_model(today: date | None = None) -> tuple[str, date]:
+    """Select the first non-expired model, or fail closed.
+
+    Expiry dates are inclusive: a model may be used through its configured
+    date, but never on a later date.  Missing metadata is also a hard block so
+    a newly added fallback cannot silently bypass the expiry policy.
+    """
+    global ACTIVE_MODEL, ACTIVE_MODEL_EXPIRATION, MODEL_SELECTION_DETAIL
+    primary = os.environ.get("OPENAI_MODEL", "").strip()
+    fallbacks = [m.strip() for m in os.environ.get(
+        "OPENAI_MODEL_FALLBACKS", "").split(",") if m.strip()]
+    candidates = list(dict.fromkeys([primary, *fallbacks]))
+    if not candidates or not candidates[0]:
+        raise RuntimeError("OPENAI_MODEL is empty")
+    expirations = parse_model_expirations(
+        os.environ.get("DASHSCOPE_MODEL_EXPIRATIONS", ""))
+    missing = [model for model in candidates if model not in expirations]
+    if missing:
+        raise RuntimeError("model expiration metadata missing: " + ",".join(missing))
+    now = today or datetime.now(timezone.utc).date()
+    expired = [model for model in candidates if now > expirations[model]]
+    for model in candidates:
+        if model in expired:
+            continue
+        ACTIVE_MODEL = model
+        ACTIVE_MODEL_EXPIRATION = expirations[model].isoformat()
+        os.environ["OPENAI_MODEL"] = model
+        if model == primary:
+            MODEL_SELECTION_DETAIL = f"model={model}; expires={ACTIVE_MODEL_EXPIRATION}"
+        else:
+            MODEL_SELECTION_DETAIL = (
+                f"model={model}; expires={ACTIVE_MODEL_EXPIRATION}; "
+                f"primary_expired={primary}"
+            )
+        return model, expirations[model]
+    raise RuntimeError(
+        f"all configured models expired on or before {now.isoformat()}: "
+        + ",".join(expired)
+    )
 
 
 def write_status(state: str, detail: str = "", model_probe: str = "unknown") -> None:
@@ -34,6 +102,8 @@ def write_status(state: str, detail: str = "", model_probe: str = "unknown") -> 
     (STATUS_DIR / "status.json").write_text(json.dumps({
         "state": state, "detail": detail[:160], "run_id": CURRENT_RUN,
         "model_probe": model_probe,
+        "model": ACTIVE_MODEL or os.environ.get("OPENAI_MODEL", ""),
+        "model_expires_on": ACTIVE_MODEL_EXPIRATION,
     }, ensure_ascii=False), encoding="utf-8")
 
 
@@ -157,6 +227,13 @@ def run_gateway() -> str:
         except (OSError, json.JSONDecodeError):
             CURRENT_RUN = ""
     install_project_scripts()
+    try:
+        select_model()
+    except (RuntimeError, ValueError) as exc:
+        write_status("blocked", str(exc), model_probe="fail")
+        print(f"gateway model policy blocked: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return "blocked"
     CONFIG.write_text(json.dumps(config(), ensure_ascii=False, indent=2), encoding="utf-8")
     write_status("checking", model_probe="unknown")
     try:
@@ -173,6 +250,19 @@ def run_gateway() -> str:
     ready = threading.Event()
     threading.Thread(target=stream_gateway, args=(process, ready), daemon=True).start()
     while process.poll() is None:
+        if (ACTIVE_MODEL_EXPIRATION
+                and datetime.now(timezone.utc).date()
+                > date.fromisoformat(ACTIVE_MODEL_EXPIRATION)):
+            detail = (f"model expired: {ACTIVE_MODEL} "
+                      f"(expiration={ACTIVE_MODEL_EXPIRATION})")
+            write_status("blocked", detail, model_probe="fail")
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+            return "blocked"
         request, payload = reset_request()
         if request:
             CURRENT_RUN = str((payload or {}).get("run_id") or "")
