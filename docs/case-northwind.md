@@ -1,6 +1,6 @@
 # 实测轨迹：northwind 接入到跨表回答
 
-> 真模型（qwen3.8-flash / DashScope）+ 真网关（Hermes email 平台）+ 真 Postgres。
+> 真模型（qwen3.8-27b / DashScope）+ 真网关（Hermes email 平台）+ 真 Postgres。
 > 邮件出入站都走 GreenMail 模拟。起点由 `tests/reset_live.py` 清空并自验。
 >
 > 选 northwind 而不是 olist：14 张表、**13 条外键**，含自引用
