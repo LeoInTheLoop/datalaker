@@ -130,6 +130,9 @@ if docker ps --format '{{.Names}}' | grep -q datalaker-source_pg-1; then
   echo ""
   echo "########## 3. 权限隔离（列级 GRANT） ##########"
   ./tests/test_grants.sh || rc=1
+  echo ""
+  echo "########## 3.1 PostgreSQL 授权语义合同 ##########"
+  $PY tests/test_postgres_authorization.py || rc=1
 else
   echo "  SKIP  Postgres 未启动（cd infra && docker compose --profile core up -d source_pg）"
 fi

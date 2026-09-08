@@ -19,6 +19,12 @@ class DemoUIContracts(unittest.TestCase):
         cases, snapshots = ui.cases()
         self.assertIn("northwind-sales", cases)
         self.assertIn("northwind-dirty-status", snapshots)
+        self.assertIn("northwind-full", snapshots)
+        self.assertEqual(
+            snapshots["northwind-full"]["source_tables"],
+            ["orders", "order_details", "employees", "demo_order_status"],
+        )
+        self.assertIn("silver raw 与洗后值", cases["northwind-sales"]["expects"])
         for case in cases.values():
             self.assertTrue(case["snapshots"])
             self.assertTrue(all(item in snapshots for item in case["snapshots"]))
