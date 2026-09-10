@@ -51,13 +51,18 @@ def main(dry_run=False):
                     st.append_event(item_id, f"ESCALATED_{lvl}", f"{label} · {approver}")
                     try:
                         import notify
+                        import mail_threads
                         to = st.resolve_role(approver) or approver
+                        # 催办是人最可能**直接回信**的一封（「这个不归我管」
+                        # 「换个账号试试」）。不带 token 的话，一个人手上同时
+                        # 有两条线时，他回的是哪一条完全无从判断。
                         notify.get().send_notice(
                             to, f"[数据管家] {label}：{tool}",
                             f"这件事已等待 {age_d:.0f} 天未获回应。\n"
                             f"若不属于你的职责范围，请回复告知应当找谁。\n"
                             f"第 {ABANDON_DAYS} 天仍无回应时，我会将其转为已知阻塞项"
-                            f"并在周报中说明，同时继续推进其他任务线。")
+                            f"并在周报中说明，同时继续推进其他任务线。",
+                            run_id=mail_threads.run_of_approval(item_id))
                     except Exception:
                         pass
                 acted.append((f"ESCALATE_{lvl}", item_id[:8], approver, tool, f"{age_d:.1f}d"))

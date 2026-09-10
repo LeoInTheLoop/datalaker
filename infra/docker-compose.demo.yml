@@ -79,7 +79,10 @@ services:
       EMAIL_SMTP_SECURITY: plain
       EMAIL_POLL_INTERVAL: "3"
       EMAIL_HOME_ADDRESS: boss@acme.com
-      EMAIL_ALLOWED_USERS: boss@acme.com,wang@acme.com,dba@acme.com
+      # 后两个是场景里的表负责人（services/table_owner.py）。他们是**对端**，
+      # 不是被授权人：能给 steward 写信，但审批资格仍只看 role_assignment，
+      # 正文里写「同意」照样不作数。
+      EMAIL_ALLOWED_USERS: boss@acme.com,wang@acme.com,dba@acme.com,orders-owner@acme.com,employees-owner@acme.com
       CLAW_RESUME_UNIT_SECONDS: "60"
       CLAW_NO_BOOTSTRAP_SOURCES: "1"
       TRINO_URL: https://trino:8443

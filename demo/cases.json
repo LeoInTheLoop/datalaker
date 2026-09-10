@@ -4,7 +4,11 @@
       "id": "northwind-sales",
       "title": "Northwind：销售复盘与跨表回答",
       "description": "从业务目标开始，模型自行索取接入信息、走审批、接入数据并回答销售问题。",
-      "snapshots": ["northwind-base", "northwind-full", "northwind-dirty-status"],
+      "snapshots": [
+        "northwind-base",
+        "northwind-full",
+        "northwind-dirty-status"
+      ],
       "expects": [
         "模型与 tool calling",
         "GreenMail 真实收发",
@@ -24,15 +28,60 @@
         "body": "请准备销售复盘，最后回答哪个销售卖得最好。你需要什么信息、权限或审批，请按治理流程推进。本轮若选择 Northwind 全链路，订单状态字段含大小写与空白脏值，发布前必须清洗并定义口径。"
       },
       "history": [
-        {"from": "boss@acme.com", "subject": "背景", "body": "Northwind 是运营侧系统；业务问题需要订单、订单明细和员工数据的关联。"},
-        {"from": "wang@acme.com", "subject": "数据负责人", "body": "我负责运营数据口径。涉及清洗或发布时请让我看到具体规则和影响。"}
+        {
+          "from": "boss@acme.com",
+          "subject": "背景",
+          "body": "Northwind 是运营侧系统；业务问题需要订单、订单明细和员工数据的关联。"
+        },
+        {
+          "from": "wang@acme.com",
+          "subject": "数据负责人",
+          "body": "我负责运营数据口径。涉及清洗或发布时请让我看到具体规则和影响。"
+        }
+      ],
+      "you_play": "公司里的三个人：老板（提业务问题）、王工（运营数据负责人）、DBA（发数据库账号）。管家问到谁，你就用谁的身份回信。",
+      "steps": [
+        "管家读完老板的问题，发现自己手上没有数据，先来问账号和权限。",
+        "你以 DBA 身份给账号。可以故意先给一个没权限的，看它怎么处理连不上。",
+        "它申请把源表接进数据湖，你在这个页面上点批准。",
+        "订单状态字段是脏的，它会提清洗规则和业务口径，等王工确认。",
+        "洗完发布，用三张表关联回答「哪个销售卖得最好」；页面自己直算九行跟它对账。"
+      ],
+      "replies": [
+        {
+          "label": "DBA：先给一个没权限的账号",
+          "from": "dba@acme.com",
+          "subject": "Re: 数据库账号",
+          "body": "账号给你：postgresql://crm_reader:<口令>@source_pg:5432/northwind\n有问题直接回我，不要找业务那边转。"
+        },
+        {
+          "label": "DBA：换成正确的只读账号",
+          "from": "dba@acme.com",
+          "subject": "Re: 数据库账号",
+          "body": "上一个账号在 northwind 上没有权限，用这个：\npostgresql://ops_reader:<口令>@source_pg:5432/northwind\n它对 northwind 的表只有 SELECT，写不了。"
+        },
+        {
+          "label": "王工：确认清洗规则和口径",
+          "from": "wang@acme.com",
+          "subject": "Re: 清洗规则",
+          "body": "规则我看过了，同意。发布给业务的状态只保留 DELIVERED / PENDING；原始来源值留在 silver，不要出现在 gold。"
+        },
+        {
+          "label": "老板：催结论",
+          "from": "boss@acme.com",
+          "subject": "Re: 销售复盘：谁卖得最好？",
+          "body": "进展怎么样？直接给我结论：哪个销售卖得最好，数字是从哪几张表算出来的。"
+        }
       ]
     },
     {
       "id": "northwind-recovery",
       "title": "Northwind：错误账号后的恢复",
       "description": "DBA 先给出无权限账号；模型必须把失败通知给 DBA，并在新账号到达后正确处理待决或已决票。",
-      "snapshots": ["northwind-base", "northwind-dirty-status"],
+      "snapshots": [
+        "northwind-base",
+        "northwind-dirty-status"
+      ],
       "expects": [
         "模型与 tool calling",
         "GreenMail 真实收发",
@@ -49,14 +98,48 @@
         "body": "请接入 Northwind 的订单数据用于销售复盘。请先说明需要的授权与连接信息。"
       },
       "history": [
-        {"from": "dba@acme.com", "subject": "连接约定", "body": "数据库账号由 DBA 提供；连接失败的技术通知请直接发给 DBA，不要让业务 Owner 代转。"}
+        {
+          "from": "dba@acme.com",
+          "subject": "连接约定",
+          "body": "数据库账号由 DBA 提供；连接失败的技术通知请直接发给 DBA，不要让业务 Owner 代转。"
+        }
+      ],
+      "you_play": "老板（提需求）和 DBA（发数据库账号）。这一轮重点看它拿到坏账号之后怎么办。",
+      "steps": [
+        "管家先说明它需要什么授权和连接信息。",
+        "你以 DBA 身份给一个在 northwind 上零权限的账号。",
+        "批准接入 → 连不上。看它把失败通知发给谁：应该是 DBA，不是业务负责人。",
+        "你再给正确账号。还没人批的票它会改参数重发；已经批过的票只能另开新票。"
+      ],
+      "replies": [
+        {
+          "label": "DBA：给一个没权限的账号",
+          "from": "dba@acme.com",
+          "subject": "Re: 接入 Northwind",
+          "body": "账号：postgresql://crm_reader:<口令>@source_pg:5432/northwind\n连接失败的技术问题直接回我。"
+        },
+        {
+          "label": "DBA：换成正确的只读账号",
+          "from": "dba@acme.com",
+          "subject": "Re: 接入 Northwind",
+          "body": "刚才那个账号在 northwind 上没权限，换这个：\npostgresql://ops_reader:<口令>@source_pg:5432/northwind"
+        },
+        {
+          "label": "DBA：问它旧票怎么办",
+          "from": "dba@acme.com",
+          "subject": "Re: 接入 Northwind",
+          "body": "之前那张已经批过的票还挂着吗？如果里面还是旧账号，说清楚你打算怎么处理。"
+        }
       ]
     },
     {
       "id": "northwind-clean-publish",
       "title": "Northwind：脏状态清洗并发布",
       "description": "清洗 demo 状态源，保留 raw 值，定义口径并在批准后发布 gold。",
-      "snapshots": ["northwind-dirty-status", "northwind-clean-status"],
+      "snapshots": [
+        "northwind-dirty-status",
+        "northwind-clean-status"
+      ],
       "expects": [
         "模型与 tool calling",
         "GreenMail 真实收发",
@@ -73,7 +156,50 @@
         "body": "请检查订单状态数据。若需要清洗，请先提出可见的规则，保留原始值，经过正确审批后再发布可用表。"
       },
       "history": [
-        {"from": "wang@acme.com", "subject": "口径原则", "body": "发布给业务的状态值使用 DELIVERED / PENDING；原始来源值只能留在 silver，不能出现在 gold。"}
+        {
+          "from": "wang@acme.com",
+          "subject": "口径原则",
+          "body": "发布给业务的状态值使用 DELIVERED / PENDING；原始来源值只能留在 silver，不能出现在 gold。"
+        }
+      ],
+      "you_play": "王工，运营数据负责人；需要连接信息时再以 DBA 身份提供只读账号。清洗规则和发布口径都要经你确认。",
+      "steps": [
+        "这一轮只放出一张源表 demo_order_status（状态值有大小写和空白差异），所以不会出现跨表 join —— 那是 northwind-sales 那个剧本的事。",
+        "管家先看数据长什么样，提出可见的清洗规则。",
+        "你确认规则和口径，它才能洗。",
+        "发布 gold 要再批一次；发布出来的表里不能有原始脏值。"
+      ],
+      "replies": [
+        {
+          "label": "DBA：提供只读账号",
+          "from": "dba@acme.com",
+          "subject": "Re: 订单状态源连接信息",
+          "body": "连接串：postgresql://ops_reader:<口令>@source_pg:5432/northwind\n只读账号，只接入 demo_order_status。"
+        },
+        {
+          "label": "王工：同意清洗规则",
+          "from": "wang@acme.com",
+          "subject": "Re: 订单状态清洗",
+          "body": "规则可以。统一成 DELIVERED / PENDING，大小写和首尾空白都归一。"
+        },
+        {
+          "label": "王工：要求保留原始值",
+          "from": "wang@acme.com",
+          "subject": "Re: 订单状态清洗",
+          "body": "洗之前的原始值必须留着，出问题我要能查是哪一行洗错了。原值放 silver，gold 里不要有。"
+        },
+        {
+          "label": "王工：确认可以发布",
+          "from": "wang@acme.com",
+          "subject": "Re: 发布",
+          "body": "口径没问题，可以发布给业务用。发布前再确认一遍 gold 里没有 _raw 列。"
+        },
+        {
+          "label": "王工：确认数据分类",
+          "from": "wang@acme.com",
+          "subject": "Re: 数据分类",
+          "body": "这张订单状态表按 Internal（内部）分类，只给公司内部业务使用。"
+        }
       ]
     }
   ],
@@ -82,28 +208,41 @@
       "id": "northwind-base",
       "database": "northwind",
       "title": "Northwind 基线",
-      "source_tables": ["orders", "order_details", "employees"],
+      "source_tables": [
+        "orders",
+        "order_details",
+        "employees"
+      ],
       "note": "只使用原始 Northwind 交易表；源库只读。"
     },
     {
       "id": "northwind-full",
       "database": "northwind",
       "title": "Northwind 全链路（交易 + 脏状态）",
-      "source_tables": ["orders", "order_details", "employees", "demo_order_status"],
+      "source_tables": [
+        "orders",
+        "order_details",
+        "employees",
+        "demo_order_status"
+      ],
       "note": "同时提供原始 Northwind 交易表与含大小写/空白差异的 demo_order_status；订单状态字段脏，发布前要洗，源库只读。"
     },
     {
       "id": "northwind-dirty-status",
       "database": "northwind",
       "title": "脏状态源",
-      "source_tables": ["demo_order_status"],
+      "source_tables": [
+        "demo_order_status"
+      ],
       "note": "demo_order_status 含大小写与空白差异；原始 Northwind 表未被修改。"
     },
     {
       "id": "northwind-clean-status",
       "database": "northwind",
       "title": "已规范状态源",
-      "source_tables": ["demo_order_status_clean"],
+      "source_tables": [
+        "demo_order_status_clean"
+      ],
       "note": "预先准备的规范状态源，用于只验证接入/发布分支。"
     }
   ]

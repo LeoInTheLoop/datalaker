@@ -88,7 +88,7 @@ class FeishuNotifier(Notifier):
         _post(self._hook(), card)
         return {"channel": "feishu", "to": to}
 
-    def send_notice(self, to, subject, body):
+    def send_notice(self, to, subject, body, run_id: str = ""):
         _post(self._hook(), {"msg_type": "interactive", "card": {
             "header": {"template": "blue",
                        "title": {"tag": "plain_text", "content": subject}},

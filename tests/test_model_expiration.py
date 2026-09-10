@@ -68,8 +68,25 @@ class ModelExpirationPolicy(unittest.TestCase):
 
     def test_all_expired_models_block(self):
         self.configure("primary", "fallback", "primary=2026-09-08,fallback=2026-09-08")
-        with self.assertRaisesRegex(RuntimeError, "conservative cutoff"):
+        with self.assertRaisesRegex(RuntimeError, "past cutoff=primary,fallback"):
             agent.select_model(date(2026, 9, 9))
+
+    def test_probe_rejected_model_is_skipped(self):
+        """额度耗尽只有真打过去才知道，纸面规则拦不住 —— 证伪一个要能换下一个。
+
+        实测撞到过：主模型免费额度用光，`select_model` 照样选它（没到期），
+        然后第一次真实对话 HTTP 403 不可重试，整轮死掉。
+        """
+        self.configure("primary", "fallback", "primary=2026-10-01,fallback=2026-12-01")
+        self.assertEqual(agent.select_model(date(2026, 9, 9))[0], "primary")
+        self.assertEqual(
+            agent.select_model(date(2026, 9, 9), skip={"primary"})[0], "fallback")
+
+    def test_all_models_probe_rejected_blocks(self):
+        """全被证伪就必须 blocked —— 不能绕回去用一个已经 403 的模型。"""
+        self.configure("primary", "fallback", "primary=2026-10-01,fallback=2026-12-01")
+        with self.assertRaisesRegex(RuntimeError, "probe-rejected=fallback,primary"):
+            agent.select_model(date(2026, 9, 9), skip={"primary", "fallback"})
 
 
 if __name__ == "__main__":

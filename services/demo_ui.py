@@ -752,42 +752,18 @@ def verification() -> list[dict]:
     return checks
 
 
-HTML = """<!doctype html><html lang=zh-CN><meta charset=utf-8>
-<title>Data Steward Claw · 真模型演练</title>
-<style>
-body{font:14px/1.5 system-ui,-apple-system,sans-serif;background:#f6f7f9;color:#17202a;margin:0}main{max-width:1500px;margin:auto;padding:22px}h1{margin:0}h2{font-size:17px;margin:0 0 10px}.hint{color:#59636e}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:15px;margin-top:16px}.wide{grid-column:1/-1}.card{background:#fff;border:1px solid #e2e7ec;border-radius:10px;padding:15px}.ready,.pass{color:#087443}.blocked,.fail{color:#b42318}.pending{color:#a15c00}.pill{padding:3px 7px;background:#edf2f7;border-radius:999px;font-size:12px}button{margin:3px;padding:7px 10px;border:1px solid #aab6c2;border-radius:6px;background:#fff;cursor:pointer}textarea,input,select{box-sizing:border-box;width:100%;margin:4px 0;padding:7px;font:inherit}pre{white-space:pre-wrap;overflow:auto;background:#f8fafc;padding:9px;border-radius:6px;max-height:310px}table{border-collapse:collapse;width:100%;font-size:13px}td,th{border-bottom:1px solid #e5e7eb;padding:5px;text-align:left;vertical-align:top}.mail{border-top:1px solid #e5e7eb;padding:10px 0}.mail:first-child{border-top:0}.approval{margin:2px;color:#135bc1}#error{color:#b42318}
-</style><main>
-<h1>Data Steward Claw · 真模型演练</h1>
-<p class=hint>页面只投递演练人员邮件、转发你点击的真实审批链接、读取实际证据与执行只读真测。Hermes 决定模型回复和治理工具调用。</p>
-<p id=agent></p><p id=error></p>
-<div class=grid>
-<section class=card><h2>固定 Case 与数据库 Snapshot</h2><select id=case></select><select id=snapshot></select><button id=start>开始本轮演练</button><button id=verify>运行只读真测</button><p id=run class=hint>尚未开始。</p><div id=checks></div></section>
-<section class=card><h2>演练人员邮件</h2><form id=mailForm><select id=from><option>boss@acme.com</option><option>wang@acme.com</option><option>dba@acme.com</option></select><input id=subject placeholder=主题 required><textarea id=body rows=5 placeholder=邮件正文 required></textarea><button>发送真实邮件</button></form><p class=hint>例如 DBA 先给错账号、再给正确账号；页面不会替模型调用工具。</p></section>
-<section class=card><h2>审批与模型事件</h2><div id=approvals></div><pre id=events></pre></section>
-<section class=card><h2>模型实际 SQL / 工具证据</h2><div id=queries></div><pre id=provenance></pre></section>
-<section class=card><h2>数据层证据</h2><div id=data></div></section>
-<section class=card><h2>独立源库核对：最佳销售</h2><div id=sales></div><p class=hint>此表由页面独立只读源库直算；模型实际 answer_with_link 证据另列显示。</p></section>
-<section class="card wide"><h2>GreenMail 收件箱</h2><div id=mail></div></section>
-</div></main>
-<script>
-const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-let meta={};
-async function api(path,method='GET',body){let r=await fetch(path,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});let d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d}
-function options(){let selected=$('#case').value;$('#case').innerHTML=meta.cases.map(x=>'<option value="'+esc(x.id)+'">'+esc(x.title)+'</option>').join('');if(selected)$('#case').value=selected;let c=meta.cases.find(x=>x.id===$('#case').value)||meta.cases[0];$('#snapshot').innerHTML=c.snapshots.map(id=>{let x=meta.snapshots.find(s=>s.id===id);return '<option value="'+esc(id)+'">'+esc(x.title)+' · '+esc(x.database)+'</option>'}).join('')}
-async function boot(){meta=await api('/api/meta');options();$('#case').onchange=options;$('#start').onclick=async()=>{try{let r=await api('/api/run/start','POST',{case_id:$('#case').value,snapshot_id:$('#snapshot').value});error.textContent='已建立 '+r.id+'；正在还原快照并等待 GreenMail 网关就绪。';refresh()}catch(e){error.textContent=e.message}};$('#verify').onclick=async()=>{try{renderChecks(await api('/api/verify','POST'));refresh()}catch(e){error.textContent=e.message}};$('#mailForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/send','POST',{from:$('#from').value,subject:$('#subject').value,body:$('#body').value});error.textContent='已送入 GreenMail，等待真实网关处理。';refresh()}catch(e){error.textContent=e.message}};refresh()}
-async function clickApproval(id){try{let r=await api('/api/approval','POST',{id});error.textContent='审批 callback：HTTP '+r.status+' · '+r.message.replace(/\\s+/g,' ').trim();refresh()}catch(e){error.textContent=e.message}}
-function renderChecks(a){checks.innerHTML=(a||[]).map(x=>'<p class="'+x.state+'"><b>'+esc(x.name)+'</b>：'+esc(x.state)+' · '+esc(x.evidence)+'</p>').join('')}
-function table(rows,heads){return '<table><tr>'+heads.map(x=>'<th>'+x+'</th>').join('')+'</tr>'+rows.map(r=>'<tr>'+r.map(x=>'<td>'+esc(x)+'</td>').join('')+'</tr>').join('')+'</table>'}
-async function refresh(){try{let s=await api('/api/status');agent.innerHTML='网关：<b class="'+(s.agent.state==='ready'?'ready':'blocked')+'">'+esc(s.agent.state)+'</b> '+esc(s.agent.detail||'');run.textContent=s.run?('本轮 '+s.run.id+' · '+s.run.case_title+' · '+s.run.snapshot_title+' · '+s.run.state):'尚未开始。';approvals.innerHTML=Array.isArray(s.approvals)?table(s.approvals.map(x=>[x.tool,x.approver,x.used?'已决':'待决']),['动作','审批人','状态']):esc(s.approvals.error);if(Array.isArray(s.approvals))approvals.querySelectorAll('tr').forEach((tr,i)=>{let x=s.approvals[i-1];if(x&&!x.used){let b=document.createElement('button');b.textContent='到本页邮件中处理';b.className='approval';b.onclick=()=>$('#mail').scrollIntoView({behavior:'smooth'});tr.lastChild.append(b)}});events.textContent=Array.isArray(s.events)?s.events.map(x=>x.kind+' · '+x.payload).join('\n'):s.events.error||'';queries.innerHTML=Array.isArray(s.queries)?table(s.queries.map(x=>[x.source,x.status,x.rows,x.duration_ms+'ms',x.sql]),['源','状态','行数','耗时','模型实际 SQL']):esc(s.queries.error);provenance.textContent=Array.isArray(s.provenance)?JSON.stringify(s.provenance,null,2):s.provenance.error||'';data.innerHTML='<pre>'+esc(JSON.stringify({source:s.source,lake:s.lake,lake_columns:s.lake_columns,silver:s.silver,gold:s.gold,answer_comparison:s.answer_comparison},null,2))+'</pre>';sales.innerHTML=Array.isArray(s.source_sales)?table(s.source_sales,['销售','销售额','订单','明细行']):'未能直算：'+esc(s.source_sales.error);let m=await api('/api/mail');mail.innerHTML=m.map(x=>'<article class=mail><span class=pill>'+esc(x.origin)+'</span> <b>'+esc(x.box)+'</b> ← '+esc(x.from)+'<br><b>'+esc(x.subject)+'</b><pre>'+esc(x.body)+'</pre><div>'+x.links.map(l=>'<button data-link="'+esc(l.id)+'" onclick="clickApproval(\''+esc(l.id)+'\')">'+esc(l.action==='approve'?'批准':l.action==='deny'?'拒绝':'选择')+'（真实审批）</button>').join('')+'</div></article>').join('')||'尚无邮件'}catch(e){error.textContent='读取失败：'+e.message}}
-boot();setInterval(refresh,5000);
-</script></html>"""
+PAGE = pathlib.Path(__file__).resolve().parent / "demo_ui.html"
 
-# The Python template would otherwise turn the JavaScript "\\n" escape into a
-# literal newline inside the quoted string, which makes the browser reject the
-# whole script before the Case selectors can be populated.
-HTML = HTML.replace("join('" + chr(10) + "')", "join('\\n')")
-HTML = HTML.replace("clickApproval(''+esc(l.id)+'')",
-                    "clickApproval(\\'" + "'+esc(l.id)+'" + "\\')")
+
+def page() -> str:
+    """The page is a separate file so the markup is reviewable and hot-editable.
+
+    It is read per request on purpose: ``services/`` is bind-mounted read-only
+    into the demo container, so editing the HTML and refreshing the browser is
+    enough.  The old inline string needed two ``str.replace`` escape fixups
+    that silently broke the whole script when either one stopped matching.
+    """
+    return PAGE.read_text(encoding="utf-8")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -810,7 +786,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/":
-            return self.reply(200, HTML, "text/html; charset=utf-8")
+            return self.reply(200, page(), "text/html; charset=utf-8")
         if self.path == "/api/meta":
             case_map, snapshot_map = cases()
             return self.reply(200, {"cases": list(case_map.values()),

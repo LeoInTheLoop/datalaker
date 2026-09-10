@@ -14,9 +14,29 @@ Trino 证据、把用户点击的真实审批令牌转发给 callback、启动�
 
 - `demo/cases.json`：固定 Northwind Case 与兼容 Snapshot。Case 只包含人写的
   业务背景与邮件历史，不含工具序列、SQL 或模型答案。
-- `services/demo_ui.py`：单页工作台。页面中的 SQL 来自实际 `query_ledger`；
+- `services/demo_ui.py` + `services/demo_ui.html`：单页工作台。页面标记拆成独立文件，
+  按请求读取（`services/` 是只读 bind mount，改完刷新即可，不必重建镜像），
+  同时去掉了原先内联字符串必须的两处 `str.replace` 转义补丁 —— 任一处不再匹配时
+  整段脚本会静默失效。页面中的 SQL 来自实际 `query_ledger`；
   跨表结果必须由模型邮件/`answer_with_link` 台账产生，旁边的九行销售表由页面
   独立只读源库计算，不能替代模型答案。
+- 页面结构面向「第一次打开的人」：顶栏网关灯 → 可折叠说明条 → 五步进度条 →
+  **全页唯一的「现在轮到你」蓝框**（未开始 / 环境准备中 / 待你审批 / 回信 / 已卡住，
+  同一时刻只出一种）→ 人在左管家在右的对话时间线 → 四个证据 tab → 调试视图。
+  右上角「调试视图」切换（`localStorage` 记住）才展开 events、provenance 和原始 JSON。
+- **机器码不再直接示人**：`run.state`、event kind、工具名、真测 check 名各有一张
+  确定性中文映射表，写在页面里；check 额外给一句「为什么这条重要」。
+  `pending` 显示成「还没走到这步」、`n/a` 显示成「本 Case 不涉及」，都不再像失败。
+- **空面板必须说明为什么空**：本 Case 的 `expects` 不含该项 → 「这个剧本本来就不做这件事」；
+  run 处于失败态 → 「这一轮卡在 X，模型没跑到这一步」；否则 → 「管家还没走到这一步」。
+  「管家做过什么」tab 顶部固定显示本轮 snapshot 放出了几张源表，
+  解释为什么某些剧本里不会出现 join。
+- 顶栏读的是网关此刻的状态，`run.state` 记的是这一轮开始时的状态。两者可以同时为真
+  （网关后来自己好了），页面在故障卡里直接说破，不让它看起来像自相矛盾。
+- `demo/cases.json` 每个 Case 增加 `you_play` / `steps` / `replies`。`replies` 是**人的台词**，
+  一键填进回信框、可改、不会自动发送；口令一律写成 `<口令>` 占位符，
+  演练口令仍只在 `infra/demo-init.sh`。这三个字段**不进 `case_packet()`**，
+  模型永远看不到剧本步骤（`tests/test_demo_ui.py` 有断言）。
 - 运行数据采用 `run_id`：每次开始会清 demo lake、治理运行态和 GreenMail，随后
   通过共享 control volume 让 agent entrypoint 重启 Hermes 并清除会话，再投递
   Case 邮件。源库永远不被清或写入；Snapshot 指向预置只读源表。
@@ -119,4 +139,6 @@ docker compose -p datalaker-demo --project-directory infra --env-file .env \
 - 不为稳定展示而在前端预写模型回答、SQL、审批决定或 lake 产物。
 - 不把 token、DSN 密码、模型 API key 放进页面、run history 或 handoff。
 - 不把 UI 的 Snapshot 管理权限扩成任意 SQL、任意容器控制或审批写接口。
+- 不把 `cases.json` 的 `steps` / `replies` 送进 `case_packet()`。那是给操作页面的人看的剧本，
+  进了邮件就成了喂给模型的工具序列。
 - 不用桩模式通过替代真模型结果；桩仅能证明管道，不能证明模型判断。

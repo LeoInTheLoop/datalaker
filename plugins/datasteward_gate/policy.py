@@ -85,6 +85,7 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     "check_freshness":      (Level.L0, None),
     # --- L2 需 Steward 确认 ---
     "define_semantics":     (Level.L2, "steward"),
+    "classify_asset":       (Level.L2, "steward"),
     "apply_cleaning_rule":  (Level.L2, "steward"),
     # --- L2 需 Steward 确认 ---
     # 导出的列名是**标签不是 API 名**（8.2）：业务方改个显示名列名就变，
@@ -178,6 +179,7 @@ IDENTITY_KEYS: dict[str, tuple] = {
     # 解法不是把 value 塞进指纹，而是恢复时由门禁**回填人批准的那份参数**
     # （见 `_replay_approved_args`）：执行的永远是人看过的那一份。
     "define_semantics": ("asset", "key"),
+    "classify_asset":   ("asset",),
     # 清洗的身份是**洗哪张表**；`approved_rules` / `pk` / `silver_table`
     # 是执行细节，模型每次给的都不一样。回填机制在这里价值最大：
     # **执行的清洗规则一定是人批准的那一组**，模型在恢复这一步加不了新规则。

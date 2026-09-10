@@ -43,6 +43,27 @@ CREATE TABLE IF NOT EXISTS approvals (
     question     TEXT,
     evidence     TEXT
 );
+-- 出站邮件 → 任务线（readme 10.1 第 1/3/4 层的存储）。
+--
+-- **同一个人可以同时挂着好几条线。** 他点审批链接时归属是精确的
+-- （令牌绑 approval_id）；但他**回一封信**时，正文里没有任何东西说明
+-- 这是在回哪一条。没有这张表，第 1 层（In-Reply-To → 哪条线）就没有
+-- 落点，`inbound.resolve_item` 只能一路掉到第 5 层交给模型去猜。
+--
+-- 它只是**路由记录**：写它不授予任何权限、不改变任何决定，
+-- 所以 agent_role 可以写。授权仍然只能由 decisions 表说了算。
+CREATE TABLE IF NOT EXISTS mail_threads (
+    message_id   TEXT PRIMARY KEY,   -- 出站信的 Message-ID，不含尖括号
+    thread_token TEXT NOT NULL,      -- 主题 [#token] 与 +ap-token 用的短标识
+    run_id       TEXT,
+    approval_id  TEXT,
+    to_addr      TEXT NOT NULL,
+    subject      TEXT NOT NULL,
+    kind         TEXT NOT NULL,      -- approval | receipt | notice
+    sent_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_mail_threads_token ON mail_threads(thread_token);
+CREATE INDEX IF NOT EXISTS ix_mail_threads_run ON mail_threads(run_id);
 CREATE TABLE IF NOT EXISTS decisions (
     id           TEXT PRIMARY KEY,
     approval_id  TEXT NOT NULL,
@@ -199,6 +220,10 @@ CREATE TABLE IF NOT EXISTS source_grants (
 CREATE TABLE IF NOT EXISTS source_secrets (
     source_id     TEXT PRIMARY KEY,
     dsn           TEXT NOT NULL,
+    -- 不含口令的身份。PG 侧 agent_role 只有这一列的列级 SELECT，
+    -- 门禁判幂等只看它；SQLite 侧没有角色隔离，但列要一致，
+    -- 否则单测跑的是另一套 schema，真库上的权限缺口测不出来。
+    identity      TEXT,
     kind          TEXT NOT NULL DEFAULT 'postgres',
     approval_id   TEXT NOT NULL,        -- 没有批准就没有数据源
     registered_by TEXT NOT NULL,
@@ -320,6 +345,21 @@ def _catalog_row(r):
 # 于是**又发一份新审批、又开一条新线** —— 人批过的那次白批了。
 #
 # 顺带也更干净：`approvals.action_hash` 里不再藏着口令的哈希。
+def _identity_of_dsn(dsn: str) -> str:
+    """`postgresql://u:pw@host:5432/db` → `u@host:5432/db`。**丢掉口令。**
+
+    门禁判「这个源接好了没」「是不是换了账号」只需要身份。身份不是凭证，
+    可以给 Agent 读；dsn 不行。PG 侧的 `datasteward_put_source_secret()`
+    用同一套切分推导 identity 列，两边必须给出同一个字符串。
+    """
+    try:
+        rest = str(dsn).split("://", 1)[1]
+        cred, host = rest.split("@", 1)
+        return f"{cred.split(':', 1)[0]}@{host}"
+    except Exception:                                        # noqa: BLE001
+        return "（连接串解析不出）"
+
+
 _CREDENTIAL_KEYS = {"dsn", "password", "passwd", "secret", "token",
                     "api_key", "apikey", "credential", "conn_str"}
 
@@ -1052,11 +1092,12 @@ class Store:
         if self.readonly:
             raise PermissionError("Agent 侧连接不允许写入源凭证")
         self.db.execute(
-            "INSERT INTO source_secrets (source_id, dsn, kind, approval_id,"
-            " registered_by, registered_at) VALUES (?,?,?,?,?,?)"
+            "INSERT INTO source_secrets (source_id, dsn, identity, kind,"
+            " approval_id, registered_by, registered_at) VALUES (?,?,?,?,?,?,?)"
             " ON CONFLICT(source_id) DO UPDATE SET dsn=excluded.dsn,"
+            " identity=excluded.identity,"
             " approval_id=excluded.approval_id, registered_at=excluded.registered_at",
-            (source_id, dsn, kind, approval_id, by, time.time()))
+            (source_id, dsn, _identity_of_dsn(dsn), kind, approval_id, by, time.time()))
         self.db.commit()
 
     def record_provenance(self, asset, event, actor="", approval_id="",

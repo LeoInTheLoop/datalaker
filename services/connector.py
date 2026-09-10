@@ -9,6 +9,7 @@ ponytail: R1 做成进程内模块。DSN 只在本模块读取，工具函数拿
 import json
 import os
 import pathlib
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -521,6 +522,9 @@ def query(source_id: str, sql: str, purpose: str = "",
             "duration_ms": round(dur * 1000, 1)}
 
 
+_PERSIST_WARNED = False
+
+
 def _record(source_id, sql, purpose, rows, dur, est, status):
     rec = {
         "ts": time.time(), "source": source_id, "purpose": purpose,
@@ -536,7 +540,14 @@ def _persist(rec):
 
     内存里的 LEDGER 进程一重启就没了 —— 记了等于没记。
     运维监控必须独立于被监控对象：Agent 挂掉时这些数据仍要可查。
-    落库失败不能影响查询本身，故整体吞掉异常。
+    落库失败不能影响查询本身，所以仍然不往上抛。
+
+    **但不能不出声。** 这里原先漏写 `ts` 列（表上 NOT NULL 且无默认），
+    每次 INSERT 都 NotNullViolation，被 `except: pass` 吞掉 —— 于是
+    「Agent 跑过哪些 SQL」这条审计轨整个不存在，而且看起来一切正常：
+    工具返回成功、事件记 TOOL_ok、只有台账是空的。R6 真实演练里
+    14 次 sql_query 成功、台账 0 行才发现（自增 id 已经到 76）。
+    静默的兜底会把「坏了」和「没事发生」变成同一个样子。
     """
     dsn = _E.get("STEWARD_AGENT_DSN") or _E.get("DATASTEWARD_DSN", "")
     if not dsn:
@@ -545,12 +556,16 @@ def _persist(rec):
         import psycopg
         with psycopg.connect(dsn, autocommit=True, connect_timeout=3) as c:
             c.execute(
-                "INSERT INTO query_ledger (source_id, purpose, sql_text, rows_out,"
-                " duration_ms, est_rows, status) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (rec["source"], rec["purpose"], rec["sql"], rec["rows"],
+                "INSERT INTO query_ledger (ts, source_id, purpose, sql_text, rows_out,"
+                " duration_ms, est_rows, status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (rec["ts"], rec["source"], rec["purpose"], rec["sql"], rec["rows"],
                  rec["duration_ms"], rec["est_rows"], rec["status"]))
-    except Exception:
-        pass
+    except Exception as exc:                                # noqa: BLE001
+        global _PERSIST_WARNED
+        if not _PERSIST_WARNED:
+            _PERSIST_WARNED = True
+            print(f"query_ledger 落库失败，SQL 审计轨将缺失：{type(exc).__name__}: "
+                  f"{str(exc).strip()[:200]}", file=sys.stderr)
 
 
 def _usage_store(readonly=True):
@@ -644,6 +659,22 @@ def list_tables(source_id: str) -> list:
                    " ORDER BY 2 DESC, 1")
     return [(a, int(b) if b is not None and int(b) >= 0 else -1)
             for a, b in r["rows"]]
+
+
+def validate_read_access(source_id: str, tables=None) -> list:
+    """确认注册的账号至少能读出一张表的列定义。
+
+    PostgreSQL 的 information_schema 允许已登录但没有表权限的账号看到
+    很少或没有列；只用 ``list_tables`` 做接入探针会把这种账号误判成可用，
+    直到同步阶段才拼出空列 DDL。接入时就把失败说清楚，避免后续产生假成功。
+    """
+    tables = list_tables(source_id) if tables is None else tables
+    for table, _ in tables:
+        meta = describe_table(source_id, table)
+        if meta.get("columns"):
+            return tables
+    raise ConnectorError(
+        f"账号已登录，但 {source_id} 没有任何可读表的 SELECT 权限")
 
 
 def describe_table(source_id: str, table: str) -> dict:

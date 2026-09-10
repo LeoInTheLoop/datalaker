@@ -144,14 +144,24 @@ def normalized_case(asset: str, column: str):
             _o.path.abspath(__file__))), "plugins"))
         from datasteward_gate.approvals import open_store
         with open_store(readonly=True, init_schema=False) as st:
-            row = st.known(f"{asset}.{column}", "normalize_rule")
+            semantic_asset = f"{asset}.{column}"
+            # `define_semantics` 将旧的 normalize_rule 同义词收敛为
+            # value_domain 后落库；读取也必须使用 canonical key，否则
+            # 人已经确认了大写口径，清洗仍会静默回退到 lower()。
+            row = st.known(semantic_asset, "value_domain")
+            if not row:
+                # 兼容迁移前已经写入的旧记录。
+                row = st.known(semantic_asset, "normalize_rule")
     except Exception:                                        # noqa: BLE001
         return None
     if not row:
         return None
     v = str(row.get("value") or "")
-    up = any(k in v for k in ("全大写", "大写", "upper", "UPPER"))
-    lo = any(k in v for k in ("全小写", "小写", "lower"))
+    # 「大小写差异」同时包含「大写」和「小写」两个子串，不能把它
+    # 当成既定了两种相反口径；先去掉这个描述性短语，再识别明确方向。
+    signal = v.replace("大小写", "")
+    up = any(k in signal for k in ("全大写", "大写", "upper", "UPPER"))
+    lo = any(k in signal for k in ("全小写", "小写", "lower"))
     if up and not lo:
         return "upper"
     if lo and not up:

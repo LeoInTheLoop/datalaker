@@ -45,8 +45,13 @@ class Notifier:
         """回执：批准之后告诉他批了什么（readme 10.6）。"""
         raise NotImplementedError
 
-    def send_notice(self, to, subject, body):
-        """通用通知：周报、升级、告警。"""
+    def send_notice(self, to, subject, body, run_id: str = ""):
+        """通用通知：周报、升级、告警。
+
+        `run_id` 是**归属线索**，不是路由参数：给了它，这封信的主题会挂上
+        `[#token]`、Reply-To 会带 `+ap-token`，于是人回信时能确定性地绑回
+        这条线（`services/mail_threads.py`）。不给也能发，只是回信要靠猜。
+        """
         raise NotImplementedError
 
 
@@ -102,7 +107,7 @@ class HoldNotifier(Notifier):
         return self.inner.send_receipt(to, approval_id, decision, tool,
                                        target, approver)
 
-    def send_notice(self, to, subject, body):
+    def send_notice(self, to, subject, body, run_id: str = ""):
         import json
         import sys
         if str(ROOT) not in sys.path:
@@ -110,11 +115,16 @@ class HoldNotifier(Notifier):
         from plugins.datasteward_gate.approvals import open_store
 
         letter = {"to": to, "subject": subject, "body": body}
+        # **归属线索不进动作指纹。** 指纹认的是「这封信」—— 人看到并放行的
+        # 是正文，不是它属于哪条线。把 run_id 算进去的话，同一封信会因为
+        # 线不同而变成两张票，而人在信里看不出任何差别；存量待批票的指纹
+        # 也会当场对不上。它只随 args 存下去，给放行后发信时用。
+        stored = dict(letter, **({"run_id": run_id} if run_id else {}))
         st = open_store(readonly=True)
         try:
             aid, created = st.request(
                 "mailroom", st.action_hash("send_notice", letter),
-                "send_notice", json.dumps(letter, ensure_ascii=False),
+                "send_notice", json.dumps(stored, ensure_ascii=False),
                 self.approver)
             if created:
                 # 审批信走**内层通道**，绕过这道闸 —— 见上面的套娃那段。

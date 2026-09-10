@@ -162,6 +162,9 @@ try:
           clean.normalized_case("a.b", "c") is None)
     _s2.remember("a.b.c", "normalize_rule", "统一成全大写 PAID/VOID", "wang")
     chk("**人定了全大写就返回 upper**", clean.normalized_case("a.b", "c") == "upper")
+    _s2.remember("a.b.f", "normalize_rule", "统一成大写，原始大小写保留", "wang")
+    chk("描述原始大小写不影响已定的大写口径",
+        clean.normalized_case("a.b", "f") == "upper")
     _s2.remember("a.b.d", "normalize_rule", "统一成小写", "wang")
     chk("人定了小写就返回 lower", clean.normalized_case("a.b", "d") == "lower")
     # 两种都提到 = 看不懂，**别猜**：猜错的方向是「按你没说过的规矩改了你的数据」。

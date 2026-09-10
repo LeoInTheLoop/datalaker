@@ -56,7 +56,8 @@ def parse_model_expirations(raw: str) -> dict[str, date]:
     return out
 
 
-def select_model(today: date | None = None) -> tuple[str, date]:
+def select_model(today: date | None = None,
+                 skip: set[str] | None = None) -> tuple[str, date]:
     """Select the first non-expired model, or fail closed.
 
     Conservative cutoff: stop using a model one calendar day before its
@@ -80,7 +81,11 @@ def select_model(today: date | None = None) -> tuple[str, date]:
     now = today or datetime.now(timezone.utc).date()
     expired = [model for model in candidates
                if now >= expirations[model] - timedelta(days=1)]
-    safe = [model for model in candidates if model not in expired]
+    # `skip` 是**已经被真实调用证伪**的模型（额度耗尽、端点拒绝）。
+    # 到期日是纸面规则，额度耗尽只有打过去才知道 —— 403 不可重试，
+    # 撞上就是整轮死。所以证伪一个排除一个，继续往下试。
+    safe = [model for model in candidates
+            if model not in expired and model not in (skip or set())]
     if safe:
         order = {model: index for index, model in enumerate(candidates)}
         model = min(safe, key=lambda item: (expirations[item], order[item]))
@@ -95,8 +100,9 @@ def select_model(today: date | None = None) -> tuple[str, date]:
         )
         return model, expirations[model]
     raise RuntimeError(
-        f"all configured models reached conservative cutoff on or before {now.isoformat()}: "
-        + ",".join(expired)
+        f"no usable model on {now.isoformat()}; "
+        f"past cutoff={','.join(expired) or '-'}; "
+        f"probe-rejected={','.join(sorted(skip or set())) or '-'}"
     )
 
 
@@ -151,7 +157,11 @@ def preflight() -> None:
             "name": "ping", "description": "Return a health acknowledgement.",
             "parameters": {"type": "object", "properties": {}},
         }}],
-        "max_tokens": 32,
+        # Reasoning-capable local models may need a short chain of thought
+        # before emitting the required tool call.  Keep this probe cheap, but
+        # do not reject a healthy endpoint merely because 32 tokens truncates
+        # the call envelope.
+        "max_tokens": 256,
     }
     request = urllib.request.Request(
         os.environ["OPENAI_BASE_URL"].rstrip("/") + "/chat/completions",
@@ -159,7 +169,9 @@ def preflight() -> None:
         headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"],
                  "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=45) as response:
+    # A local model may need to allocate a large KV cache on its first
+    # request; the health probe must not fail solely during that cold start.
+    with urllib.request.urlopen(request, timeout=120) as response:
         data = json.loads(response.read())
     calls = (data.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []
     if not calls:
@@ -230,21 +242,29 @@ def run_gateway() -> str:
         except (OSError, json.JSONDecodeError):
             CURRENT_RUN = ""
     install_project_scripts()
-    try:
-        select_model()
-    except (RuntimeError, ValueError) as exc:
-        write_status("blocked", str(exc), model_probe="fail")
-        print(f"gateway model policy blocked: {type(exc).__name__}: {exc}",
-              file=sys.stderr)
-        return "blocked"
-    CONFIG.write_text(json.dumps(config(), ensure_ascii=False, indent=2), encoding="utf-8")
-    write_status("checking", model_probe="unknown")
-    try:
-        preflight()
-    except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:
-        write_status("blocked", type(exc).__name__, model_probe="fail")
-        print(f"gateway preflight blocked: {type(exc).__name__}", file=sys.stderr)
-        return "blocked"
+    # 到期日挑一个 → 真打一次 → 不行就排除它再挑下一个。
+    # 只挑不试的话，额度耗尽的模型照样通过纸面检查，然后在第一次真实
+    # 对话时 403 且不可重试，整轮无声死掉（R6 演练实测撞到）。
+    rejected: set[str] = set()
+    while True:
+        try:
+            select_model(skip=rejected)
+        except (RuntimeError, ValueError) as exc:
+            write_status("blocked", str(exc), model_probe="fail")
+            print(f"gateway model policy blocked: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return "blocked"
+        CONFIG.write_text(json.dumps(config(), ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+        write_status("checking", model_probe="unknown")
+        try:
+            preflight()
+            break
+        except (RuntimeError, urllib.error.URLError,
+                urllib.error.HTTPError, ValueError) as exc:
+            print(f"model {ACTIVE_MODEL} rejected at preflight: "
+                  f"{type(exc).__name__}: {str(exc)[:160]}", file=sys.stderr)
+            rejected.add(ACTIVE_MODEL)
 
     write_status("connecting", model_probe="pass")
     process = subprocess.Popen(["hermes", "gateway", "run", "-v"],

@@ -20,6 +20,8 @@ import os
 import pathlib
 import sys
 import time
+from datetime import datetime, timezone
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT), str(ROOT / "services"), str(ROOT / "plugins")]
@@ -44,8 +46,10 @@ def chk(n, c, d=""):
 
 
 import sync                                                   # noqa: E402
+import connector                                               # noqa: E402
 from datasteward_gate import (_already_done, _args_changed,    # noqa: E402
-                              _connect_without_dsn, _usable_dsn_exists)
+                              _connect_without_dsn, _usable_dsn_exists,
+                              _gate as run_gate)
 from datasteward_gate.approvals import open_store, rows_of     # noqa: E402
 
 BAD = "postgresql://crm_reader:Crmro88@127.0.0.1:5432/northwind"
@@ -100,6 +104,35 @@ with open_store(readonly=False, init_schema=True) as st:
             st, "SELECT payload FROM events")),
         "只记 user@host:port/db")
 
+print("\n=== PostgreSQL 时间类型兼容 ===\n")
+
+import datasteward_gate as _gate
+import datasteward_gate.approvals as _approvals
+_real_rows_of = _approvals.rows_of
+_approvals.rows_of = lambda *_args, **_kwargs: [
+    (datetime.now(timezone.utc), 830)]
+try:
+    _recent = _gate._recent_sync(object(), "northwind.orders")
+    chk("PostgreSQL datetime 不会让重复接入门禁报 GATE_ERROR",
+        bool(_recent) and "刚接过" in _recent, str(_recent))
+finally:
+    _approvals.rows_of = _real_rows_of
+
+print("\n=== 错误账号不能被元数据清单误判为可用 ===\n")
+
+_real_list_tables = connector.list_tables
+_real_describe_table = connector.describe_table
+connector.list_tables = lambda _source: [("orders", 830)]
+connector.describe_table = lambda _source, _table: {"columns": [], "primary_key": []}
+try:
+    connector.validate_read_access("northwind")
+    chk("无任何可读列的账号在接入时被拒", False)
+except connector.ConnectorError as e:
+    chk("无任何可读列的账号在接入时被拒", "没有任何可读表" in str(e), str(e))
+finally:
+    connector.list_tables = _real_list_tables
+    connector.describe_table = _real_describe_table
+
 print("\n=== 坑 3：人发来新账号，不能被吞掉 ===\n")
 
 with open_store(readonly=False, init_schema=True) as st:
@@ -124,6 +157,29 @@ with open_store(readonly=False, init_schema=True) as st:
     still = json.loads(rows_of(st, "SELECT args_json FROM approvals"
                                    " WHERE id = {0}", (a2,))[0][0])
     chk("而且内容确实没被改掉", still.get("dsn") == GOOD)
+
+print("\n=== 恢复票据不能被无 dsn 防重试误伤 ===\n")
+
+import runs                                                   # noqa: E402
+
+with open_store(readonly=False, init_schema=True) as st:
+    resume_id = "resume-connect"
+    resume_args = {"source_id": "resume-source", "dsn": GOOD}
+    resume_hash = st.action_hash("connect_source", resume_args)
+    resume_aid, _ = st.request(resume_id, resume_hash, "connect_source",
+                                json.dumps(resume_args), "sponsor")
+    st.decide(resume_aid, "approve", "boss@acme.com")
+    st.append_event(resume_id, "SOURCE_CONNECT_FAILED", json.dumps(
+        {"source_id": "resume-source",
+         "identity": "ops_reader@127.0.0.1:5432/northwind",
+         "error": "old password"}))
+    runs.create("connect_source", resume_args, run_id=resume_id)
+    runs.suspend(resume_id, resume_aid)
+    with patch("datasteward_gate._source_not_granted", return_value=None):
+        resumed = run_gate("connect_source", {"source_id": "resume-source"},
+                           task_id="new-cron-session")
+    chk("**恢复时隐藏 dsn 仍能消费当前已批准票**",
+        resumed == {"action": "modify", "args": resume_args}, str(resumed))
 
 print("\n=== 坑 6：做完的事不再发审批 ===\n")
 

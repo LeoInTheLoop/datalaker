@@ -261,9 +261,13 @@ def _release_notice(store, payload):
         return
     try:
         # 同样 `hold=False`：这封信已经被人看过并放行了，不能再扣一次。
+        # `run_id` 是 HoldNotifier 扣信时一起存进 letter 的。带着它发，
+        # 这封放行后的信才和原来那条线是同一个 thread token ——
+        # 否则人回它的时候归属又回到靠猜。
         notify.get(hold=False).send_notice(letter.get("to", ""),
                                            letter.get("subject", ""),
-                                           letter.get("body", ""))
+                                           letter.get("body", ""),
+                                           run_id=letter.get("run_id", ""))
         store.append_event(payload["aid"], "NOTICE_SENT", letter.get("to", "")[:180])
     except Exception as e:                                    # noqa: BLE001
         # **发不出去要留痕。** 人已经点了批准，若这里静默失败，

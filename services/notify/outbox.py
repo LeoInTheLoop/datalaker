@@ -51,7 +51,7 @@ class OutboxNotifier(Notifier):
         return self._write("receipt", to, approval_id=approval_id,
                            decision=decision, tool=tool, target=target)
 
-    def send_notice(self, to, subject, body):
+    def send_notice(self, to, subject, body, run_id: str = ""):
         return self._write("notice", to, subject=subject, body=body)
 
 

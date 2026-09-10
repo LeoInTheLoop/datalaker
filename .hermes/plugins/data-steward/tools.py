@@ -142,7 +142,9 @@ def _recently_synced(asset: str, within_h: float = 6.0):
         return None
     if not row or not row[0]:
         return None
-    age_h = (time.time() - float(row[0])) / 3600.0
+    synced_at = row[0]
+    epoch = synced_at.timestamp() if hasattr(synced_at, "timestamp") else float(synced_at)
+    age_h = (time.time() - epoch) / 3600.0
     if age_h > within_h:
         return None
     ago = (f"{age_h:.1f} 小时前" if age_h >= 1
@@ -806,6 +808,24 @@ def _define_semantics(args: dict, **_: Any) -> str:
             f"以后不会再就这一条问人。")
 
 
+def _classify_asset(args: dict, **_: Any) -> str:
+    """记录资产分类（L2，Steward 确认）。"""
+    from . import _ensure_path
+    _ensure_path()
+    asset = str(args.get("asset") or "").strip()
+    level = str(args.get("level") or "").strip()
+    by = str(args.get("confirmed_by") or "").strip()
+    if not asset or not level or not by:
+        return "错误：需要 asset、level 与 confirmed_by。"
+    try:
+        import policy_sync
+        r = policy_sync.classify(asset, level, by)
+    except Exception as e:                                    # noqa: BLE001
+        return f"记录 {asset} 分类失败：{type(e).__name__}: {str(e)[:200]}"
+    return (f"已记录 {r['asset']} 分类为 {r['classification']}（{r['confirmed_by']} 确认）。"
+            "现在可以按该分类生成 gold 的访问策略。")
+
+
 # 受控词表从门禁那一份读，**一处定义两处用** —— 分成两份必然漂移，
 # 而漂移的表现是「schema 让模型写 A，门禁按 B 归一」，静默得很。
 def _canon_vocab():
@@ -852,6 +872,20 @@ _SCHEMAS.update({
             "source_item": {"type": "string",
                             "description": "依据的那份审批/提问 id，可空"}},
             "required": ["asset", "key", "value", "confirmed_by"]},
+    },
+    "classify_asset": {
+        "name": "classify_asset",
+        "description": (
+            "记录业务方确认的数据资产分类。**要 Steward 审批。**"
+            "不能猜 Public 或 Internal；没有明确分类前不能发布 gold。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "asset": {"type": "string", "description": "资产名，如 gold.customer_360"},
+            "level": {"type": "string",
+                      "enum": ["PII", "Confidential", "Internal", "Public"],
+                      "description": "业务确认的分类"},
+            "confirmed_by": {"type": "string", "description": "谁确认的（邮箱或姓名）"}},
+            "required": ["asset", "level", "confirmed_by"]},
     },
 })
 
@@ -1117,7 +1151,7 @@ def _connect_source(args: dict, **_: Any) -> str:
             by=str(args.get("given_by") or "邮件"))
     except Exception as e:                                   # noqa: BLE001
         err = f"注册 {sid} 失败：{type(e).__name__}: {str(e)[:200]}"
-        _notify_connect(sid, args.get("given_by"), [], err)
+        _notify_connect(sid, args.get("given_by"), [], err, approval_id=aid)
         return f"{err}。已把情况回给提供连接信息的人。"
 
     # **不要把连接串回显给模型。** 它已经在上下文里出现过一次（是参数），
@@ -1126,6 +1160,7 @@ def _connect_source(args: dict, **_: Any) -> str:
     tables, err = [], ""
     try:
         tables = connector.list_tables(sid)
+        connector.validate_read_access(sid, tables)
     except Exception as e:                                   # noqa: BLE001
         # **带上用的是哪个账号，别只给一句报错。** 收信的人手里通常有好几个
         # 账号，「连不上」他没法判断是哪一个。截断也放宽到 240 ——
@@ -1151,7 +1186,7 @@ def _connect_source(args: dict, **_: Any) -> str:
     # 只把结果 return 给模型的话，人那边什么都看不到 —— 而这条线是他批的，
     # 他有权知道批完之后到底连上没有。失败尤其要说：连不上多半是
     # 连接信息不对，而只有他能给新的。
-    _notify_connect(sid, args.get("given_by"), tables, err)
+    _notify_connect(sid, args.get("given_by"), tables, err, approval_id=aid)
 
     approval_short = str(aid)[:8]
     if err:
@@ -1174,7 +1209,7 @@ def _mail_of(text: str) -> str:
     return m.group(0) if m else ""
 
 
-def _notify_connect(sid, given_by, tables, err):
+def _notify_connect(sid, given_by, tables, err, approval_id=""):
     """把接入结果回给人。**发不出去要说出来**，不吞。"""
     to, subj = "", ""
     try:
@@ -1212,7 +1247,15 @@ def _notify_connect(sid, given_by, tables, err):
                     f"下一步：告诉我先接哪几张（接哪张表优先是业务判断，"
                     f"不是技术判断）。每张表的接入我会单独发审批给负责人。")
             subj = f"[数据管家] {sid} 已接入，共 {len(tables)} 张表"
-        result = notify.get().send_notice(to, subj, body)
+        # 失败通知是 DBA **回一个新账号**的那封信 —— 归属最要紧的一封。
+        # 票上记着这次接入属于哪条线，从它拿 run_id。
+        run_id = ""
+        try:
+            import mail_threads
+            run_id = mail_threads.run_of_approval(approval_id)
+        except Exception:                                    # noqa: BLE001
+            pass
+        result = notify.get().send_notice(to, subj, body, run_id=run_id)
         if st_ is not None:
             st_.append_event(
                 "connect", "SOURCE_CONNECT_NOTICE_SENT",
@@ -1388,6 +1431,7 @@ _SCHEMAS.update({
 _HANDLERS = {
     "trace_asset": _trace_asset,
     "define_semantics": _define_semantics,
+    "classify_asset": _classify_asset,
     "sql_query": _sql_query,
     "describe_asset": _describe_asset,
     "connect_source": _connect_source,

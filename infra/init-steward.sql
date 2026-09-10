@@ -168,14 +168,23 @@ GRANT SELECT, INSERT ON source_grants TO approver_role;
 CREATE TABLE IF NOT EXISTS source_secrets (
     source_id     TEXT PRIMARY KEY,
     dsn           TEXT NOT NULL,
+    -- 不含口令的身份（user@host:port/db）。门禁要判「这个源是不是已经接好了」
+    -- 和「是不是换了账号」，这两件事都只需要身份，不需要凭证。
+    -- 由 owner 函数从 dsn 推导，Agent 不能自己填一个假的。
+    identity      TEXT,
     kind          TEXT NOT NULL DEFAULT 'postgres',
     approval_id   TEXT NOT NULL,
     registered_by TEXT NOT NULL,
     registered_at DOUBLE PRECISION NOT NULL
 );
+ALTER TABLE source_secrets ADD COLUMN IF NOT EXISTS identity TEXT;
 -- Agent 不能 SELECT 凭证，但批准后的 Connector 需要把凭证写入隔离表；
 -- 读取仍只发生在 Connector 内部，且门禁必须先验证 approval_id。
 GRANT INSERT, UPDATE ON source_secrets TO agent_role;
+-- **列级** SELECT：门禁要读身份来判幂等，但绝不能读 dsn。
+-- 漏了这条，_source_live() 会抛 InsufficientPrivilege 并被吞成「没接入」，
+-- connect_source 的幂等门禁静默失效、审批票无限重发（R6 演练实测）。
+GRANT SELECT (source_id, identity, kind, approval_id) ON source_secrets TO agent_role;
 GRANT SELECT, INSERT, UPDATE ON source_secrets TO approver_role;
 
 -- The Agent must be able to register or replace a secret after an approved
@@ -189,16 +198,23 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+DECLARE
+  v_identity text;
 BEGIN
+  -- user@host:port/db，去掉口令。推导放在 owner 函数里，
+  -- Agent 只能提交 dsn，不能顺手写一个对不上的身份进来。
+  v_identity := split_part(split_part(p_dsn, '://', 2), ':', 1) || '@'
+                || split_part(split_part(p_dsn, '://', 2), '@', 2);
   UPDATE public.source_secrets
-     SET dsn = p_dsn, kind = p_kind, approval_id = p_approval_id,
+     SET dsn = p_dsn, identity = v_identity, kind = p_kind,
+         approval_id = p_approval_id,
          registered_by = p_by, registered_at = extract(epoch from now())
    WHERE source_id = p_source_id;
   IF NOT FOUND THEN
     INSERT INTO public.source_secrets
-      (source_id, dsn, kind, approval_id, registered_by, registered_at)
+      (source_id, dsn, identity, kind, approval_id, registered_by, registered_at)
     VALUES
-      (p_source_id, p_dsn, p_kind, p_approval_id, p_by,
+      (p_source_id, p_dsn, v_identity, p_kind, p_approval_id, p_by,
        extract(epoch from now()));
   END IF;
 END;
@@ -305,6 +321,32 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
 GRANT SELECT, INSERT, UPDATE ON runs TO agent_role;
+
+-- 出站邮件 → 任务线（readme 10.1 的第 1/3/4 层归属）。
+--
+-- **同一个人可以同时挂着好几条线。** 点审批链接时归属是精确的（令牌绑
+-- approval_id）；**回一封信**时正文里没有任何东西说明是在回哪一条。
+-- 这张表让 In-Reply-To / 主题 [#token] / plus-address 三条确定性线索
+-- 都有落点，模型只在三条全落空时才被叫来猜，且必须标不确定。
+--
+-- 它是**路由记录，不是授权记录**：写它不批准任何动作、不改变任何决定，
+-- 所以 agent_role 可以写。能不能执行仍然只看 decisions。
+CREATE TABLE IF NOT EXISTS mail_threads (
+  message_id   text PRIMARY KEY,        -- 出站信的 Message-ID，不含尖括号
+  thread_token text NOT NULL,           -- 主题 [#token] 与 +ap-token 用的短标识
+  run_id       text,
+  approval_id  text,
+  to_addr      text NOT NULL,
+  subject      text NOT NULL,
+  kind         text NOT NULL,           -- approval | receipt | notice
+  sent_at      double precision NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_mail_threads_token ON mail_threads(thread_token);
+CREATE INDEX IF NOT EXISTS ix_mail_threads_run ON mail_threads(run_id);
+GRANT SELECT, INSERT ON mail_threads TO agent_role;
+-- callback 是回执信的发信方，它也要留下同一条归属线索；
+-- 漏了这条，人回回执信时归属会掉到最后一层交给模型猜。
+GRANT SELECT, INSERT ON mail_threads TO approver_role;
 
 -- Remediation Ledger（readme 7）：治理动作的审计轨 + 给源系统的整改清单。
 --

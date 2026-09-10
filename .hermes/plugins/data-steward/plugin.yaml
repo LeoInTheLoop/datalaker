@@ -27,6 +27,7 @@ provides_tools:
   - sql_query
   - describe_asset
   - define_semantics
+  - classify_asset
   - trace_asset
 hooks:
   - pre_tool_call

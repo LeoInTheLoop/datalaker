@@ -135,10 +135,23 @@ def _current_model(home: str) -> tuple:
     # 配置格式是固定的，正则读 `model:` 段下那两行足够。
     import os as _os
     import re as _re
+    config_path = _os.path.join(home, "config.yaml")
     try:
-        txt = open(_os.path.join(home, "config.yaml"), encoding="utf-8").read()
+        txt = open(config_path, encoding="utf-8").read()
     except Exception:                                        # noqa: BLE001
         return (None, None)
+    # The demo entrypoint writes the Hermes config as JSON even though the
+    # path keeps its historical ``.yaml`` name.  Prefer the structured form
+    # when available; retain the small YAML parser for native Hermes configs.
+    try:
+        import json as _json
+        parsed = _json.loads(txt)
+        model_cfg = parsed.get("model") or {}
+        if isinstance(model_cfg, dict) and model_cfg.get("default"):
+            return (str(model_cfg["default"]).strip(),
+                    str(model_cfg.get("provider") or "").strip() or None)
+    except Exception:                                        # noqa: BLE001
+        pass
     m = _re.search(r"^model:\s*$(.*?)(?=^\S|\Z)", txt, _re.M | _re.S)
     body = m.group(1) if m else ""
     d = _re.search(r'^\s+default:\s*"?([^"\n]+)"?\s*$', body, _re.M)

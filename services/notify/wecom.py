@@ -62,7 +62,7 @@ class WecomNotifier(Notifier):
                               "该动作不会执行，也不会重复打扰你。"}})
         return {"channel": "wecom", "to": to}
 
-    def send_notice(self, to, subject, body):
+    def send_notice(self, to, subject, body, run_id: str = ""):
         _post(self._hook(), {"msgtype": "markdown",
                              "markdown": {"content": f"**{subject}**\n\n{body}"}})
         return {"channel": "wecom", "to": to}

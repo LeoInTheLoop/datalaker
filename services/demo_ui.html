@@ -1,0 +1,746 @@
+<!doctype html><html lang=zh-CN><meta charset=utf-8>
+<title>Data Steward Claw · 真模型演练</title>
+<style>
+:root{--ink:#17202a;--dim:#59636e;--line:#e2e7ec;--bg:#f4f6f8;--card:#fff;
+      --ok:#087443;--bad:#b42318;--wait:#a15c00;--accent:#1d4ed8;--accent-bg:#eef4ff}
+*{box-sizing:border-box}
+body{font:14px/1.6 system-ui,-apple-system,"PingFang SC",sans-serif;background:var(--bg);color:var(--ink);margin:0}
+main{max-width:1180px;margin:auto;padding:0 20px 60px}
+h1,h2,h3{margin:0}
+h2{font-size:16px;margin-bottom:10px}
+h3{font-size:14px}
+.top{position:sticky;top:0;z-index:9;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+     background:#fff;border-bottom:1px solid var(--line);padding:11px 20px}
+.brand{font-weight:600}
+.brand span{font-weight:400;color:var(--dim)}
+.top .spacer{flex:1}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:14px}
+.hint{color:var(--dim);font-size:13px}
+.ok,.pass{color:var(--ok)}.bad,.fail{color:var(--bad)}.wait,.pending{color:var(--wait)}
+.na{color:var(--dim)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;background:currentColor}
+button{padding:7px 12px;border:1px solid #b7c1cc;border-radius:7px;background:#fff;cursor:pointer;font:inherit}
+button:hover{border-color:#8e9aa6}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;padding:10px 20px}
+button.danger{border-color:#e2b4b0;color:var(--bad)}
+button.chip{padding:4px 10px;border-radius:999px;font-size:13px;margin:3px 4px 3px 0}
+button.link{border:0;background:none;color:var(--accent);padding:0;text-decoration:underline}
+textarea,input,select{width:100%;margin:5px 0;padding:8px;font:inherit;border:1px solid #c3ccd5;border-radius:7px;background:#fff}
+select{background:#fff}
+pre{white-space:pre-wrap;overflow:auto;background:#f7f9fb;border:1px solid var(--line);padding:10px;border-radius:7px;max-height:340px;font-size:12.5px;margin:6px 0}
+table{border-collapse:collapse;width:100%;font-size:13px}
+td,th{border-bottom:1px solid #eceff2;padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--dim);font-weight:500;background:#fafbfc}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef1f4;color:#45515e;font-size:12px}
+.pill.model{background:#f2ecfb;color:#5b3f96}
+.pill.human{background:#e8f1fb;color:#1c4f91}
+.pill.sys{background:#eef1f4;color:#54606c}
+
+/* 1 说明条 */
+.intro summary{cursor:pointer;font-weight:600;list-style:none}
+.intro summary::-webkit-details-marker{display:none}
+.intro summary::before{content:"▸ ";color:var(--dim)}
+.intro[open] summary::before{content:"▾ "}
+.intro ol{margin:10px 0 0;padding-left:20px}
+.intro li{margin:4px 0}
+
+/* 2 进度条 */
+.steps{display:flex;gap:6px;flex-wrap:wrap}
+.step{flex:1 1 150px;border-top:3px solid #dde3e9;padding-top:7px;font-size:13px;color:var(--dim)}
+.step.done{border-top-color:#9ec9ad;color:#4a6b56}
+.step.now{border-top-color:var(--accent);color:var(--ink);font-weight:600}
+.step.bad{border-top-color:var(--bad);color:var(--bad);font-weight:600}
+.step b{display:block;font-size:13px}
+
+/* 4 轮到你 */
+.turn{border:2px solid var(--accent);background:var(--accent-bg)}
+.turn.idle{border-color:var(--line);background:var(--card)}
+.turn.broken{border-color:#e6b4af;background:#fdf3f2}
+.turn h2{display:flex;align-items:center;gap:8px}
+.turn .body{background:#fff;border:1px solid var(--line);border-radius:8px;padding:13px;margin-top:10px}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid #c7d4e8;border-top-color:var(--accent);
+      border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.ask{display:grid;grid-template-columns:auto 1fr;gap:8px 10px;align-items:start;font-size:13px}
+.ask dt{color:var(--dim)}
+.ask dd{margin:0}
+
+/* 5 时间线 */
+.tl{display:flex;flex-direction:column;gap:9px}
+.msg{max-width:76%;border:1px solid var(--line);border-radius:9px;padding:10px 12px;background:#fff}
+.msg.human{align-self:flex-start;border-left:3px solid #4f8cc9}
+.msg.model{align-self:flex-end;border-right:3px solid #7b61a8;background:#fcfaff}
+.msg.preset{align-self:flex-start;border-left:3px solid #b6c0ca;background:#fafbfc}
+.msg.sys{align-self:center;max-width:100%;width:100%;border:0;border-top:1px dashed #dfe4e9;border-radius:0;
+         padding:5px 2px;background:none;color:var(--dim);font-size:12.5px}
+.msg .head{font-size:12.5px;color:var(--dim);margin-bottom:5px;display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.msg .subj{font-weight:600;color:var(--ink)}
+.msg .text{white-space:pre-wrap;overflow-wrap:anywhere}
+.msg details summary{cursor:pointer;color:var(--accent);font-size:13px}
+.clamp{max-height:9.6em;overflow:hidden;position:relative}
+.clamp::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2.4em;
+              background:linear-gradient(transparent,#fff)}
+
+/* 6 证据 tab */
+.tabs{display:flex;gap:6px;border-bottom:1px solid var(--line);margin-bottom:12px;flex-wrap:wrap}
+.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;padding:7px 11px;color:var(--dim)}
+.tabs button.on{border-bottom-color:var(--accent);color:var(--ink);font-weight:600}
+.empty{color:var(--dim);background:#fafbfc;border:1px dashed #dfe4e9;border-radius:7px;padding:11px;font-size:13px}
+.check{border-bottom:1px solid #eceff2;padding:9px 0}
+.check:last-child{border-bottom:0}
+.check .why{color:var(--dim);font-size:12.5px}
+.check pre{max-height:130px;font-size:12px}
+.dev{display:none}
+body.devmode .dev{display:block}
+body.devmode .devhide{display:none}
+#error:not(:empty){margin:10px 0 0;padding:9px 11px;border-radius:7px;background:#fdf3f2;color:var(--bad);font-size:13px}
+#toast:not(:empty){margin:10px 0 0;padding:9px 11px;border-radius:7px;background:#eef7f1;color:var(--ok);font-size:13px}
+</style>
+
+<header class=top>
+  <div class=brand>Data Steward Claw <span>· 真模型演练</span></div>
+  <div id=gateway class=hint></div>
+  <div class=spacer></div>
+  <div id=runline class=hint></div>
+  <button id=modeToggle title="调试视图会展开原始 events / provenance / JSON">调试视图</button>
+</header>
+
+<main>
+
+<details class="card intro" id=intro>
+  <summary>这个页面是什么？第一次来先看这三句</summary>
+  <ol>
+    <li><b>这是什么。</b>一个 AI 数据管家在真的干活：它读一封业务邮件，自己判断要什么数据、
+        找谁要权限，把数据接进数据湖、清洗、发布，最后回答业务问题。
+        模型、邮件、数据库、审批全是真的在跑，页面不预写任何结果。</li>
+    <li><b>你会看到什么。</b>下面是一条对话时间线：左边是人，右边是管家。
+        它每做一步都会留下可以独立核对的痕迹——真实 SQL、湖里的表、审批记录。</li>
+    <li><b>你要做什么。</b>你扮演公司里的人。全页只有一个蓝框区域会告诉你现在该干嘛：
+        要么点「开始」，要么批一张审批票，要么回一封信。<b>没提示的时候就是在等管家，什么都不用做。</b></li>
+  </ol>
+  <p class=hint>页面本身没有任何治理权限：它只能替你发邮件、把你点的审批链接转给独立的审批进程、
+     以只读方式读取证据。模型回什么、调哪个工具，全部由 Hermes 决定。</p>
+</details>
+
+<section class=card>
+  <div class=steps id=steps></div>
+  <p id=stepnote class=hint style="margin:11px 0 0"></p>
+</section>
+
+<section class="card turn" id=turn></section>
+
+<section class=card>
+  <h2>对话时间线</h2>
+  <p class=hint style="margin:-4px 0 10px">人在左、管家在右，中间的灰线是系统事件。Case 预设内容会标出来，不冒充模型输出。</p>
+  <div class=tl id=timeline></div>
+</section>
+
+<section class=card>
+  <h2>证据</h2>
+  <div class=tabs id=tabs>
+    <button data-tab=proof class=on>凭什么信</button>
+    <button data-tab=data>数据变成了什么</button>
+    <button data-tab=work>管家做过什么</button>
+    <button data-tab=cross>跨表关联</button>
+  </div>
+  <div id=tab-proof></div>
+  <div id=tab-data hidden></div>
+  <div id=tab-work hidden></div>
+  <div id=tab-cross hidden></div>
+</section>
+
+<section class="card dev">
+  <h2>原始数据（调试）</h2>
+  <details><summary>events</summary><pre id=rawEvents></pre></details>
+  <details><summary>asset_provenance</summary><pre id=rawProv></pre></details>
+  <details><summary>source / lake / silver / gold / answer_comparison</summary><pre id=rawData></pre></details>
+  <details><summary>四个信箱原文（未去重）</summary><pre id=rawMail></pre></details>
+</section>
+
+<p id=toast></p>
+<p id=error></p>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const CLAW = 'claw@acme.test';
+let meta = {cases: [], snapshots: []}, last = {}, mailCache = [], busy = false;
+
+async function api(path, method='GET', body){
+  const r = await fetch(path, {method, headers:{'Content-Type':'application/json'},
+                              body: body ? JSON.stringify(body) : undefined});
+  const d = await r.json();
+  if(!r.ok) throw new Error(d.error || r.status);
+  return d;
+}
+function say(msg){ $('#toast').textContent = msg; $('#error').textContent = ''; }
+function fail(msg){ $('#error').textContent = msg; $('#toast').textContent = ''; }
+
+/* ---------- 文案映射：把机器码翻译成人话 ---------- */
+
+const RUN_STATE = {
+  reset_requested:    {step:0, text:'正在清空上一轮的数据湖、治理库和邮箱',
+                       next:'等网关确认停机，通常 10–30 秒'},
+  reset_acknowledged: {step:0, text:'网关已确认停机，正在重启并清掉旧会话',
+                       next:'等它重新连上邮箱'},
+  case_delivered:     {step:1, text:'任务邮件已经送进管家的信箱',
+                       next:'管家开始读信、查源库、按需要发审批'},
+  gateway_blocked:    {step:-1, text:'网关起不来，这一轮没有模型在跑',
+                       next:'多半是模型端点不可用或免费额度到期。看顶栏的模型名和到期日，换一个再重开一轮'},
+  snapshot_failed:    {step:-1, text:'清空 / 还原环境时出错',
+                       next:'Trino、治理库或 GreenMail 有一个没起来。docker compose ps 看一眼再重开'},
+  delivery_failed:    {step:-1, text:'任务邮件没发出去',
+                       next:'GreenMail 不可达，确认 greenmail 容器在跑'},
+  reset_timeout:      {step:-1, text:'等了 3 分钟，网关一直没确认停机',
+                       next:'steward-agent 容器可能卡住了，重启它再重开一轮'},
+  gateway_timeout:    {step:-1, text:'网关确认了停机，但一直没重新就绪',
+                       next:'看 steward-agent 日志，通常是模型探测没过'},
+};
+
+const TOOL_CN = {
+  connect_source:'接上源库', list_source_tables:'列出源库有哪些表',
+  get_table_metadata:'读一张表的结构', describe_asset:'查资产档案',
+  profile_table:'给数据做画像', scan_permissions:'扫一遍权限',
+  sql_query:'跑一条查询', ingest_table:'把源表复制进数据湖',
+  ingest_export:'从导出文件接入', check_lake_quality:'在湖里做质量核验',
+  check_freshness:'检查数据新鲜度', run_dq_check:'跑质量规则',
+  propose_cleaning:'提出清洗规则', apply_cleaning_rule:'执行清洗',
+  define_semantics:'登记业务口径', propose_link:'提出跨表关联假设',
+  confirm_link:'确认跨表关联', publish_gold:'发布可用表',
+  grant_read:'授予读权限', answer_with_link:'用关联数据回答业务问题',
+  record_finding:'记一条发现', trace_asset:'追数据来历',
+  propose_stage_decision:'提出阶段决定', full_refresh:'整表重刷',
+};
+const toolCN = t => TOOL_CN[t] ? TOOL_CN[t] + '（' + t + '）' : (t || '未知动作');
+
+function eventCN(e){
+  let p = {}; try { p = JSON.parse(e.payload || '{}'); } catch(_) {}
+  const tool = p.tool || p.tool_name || '';
+  const k = e.kind;
+  if(k === 'TOOL_ok')       return '管家完成了：' + toolCN(tool);
+  if(k === 'TOOL_blocked')  return '门禁拦下了：' + toolCN(tool) + (p.msg ? ' —— ' + p.msg : '');
+  if(k === 'TOOL_error')    return '动作出错：' + toolCN(tool) + (p.msg ? ' —— ' + p.msg : '');
+  if(k === 'BLOCKED_SQL_REJECTED') return 'SQL 校验没放行' + (p.msg ? '：' + p.msg : '');
+  if(k === 'BLOCKED_NEED_DSN')     return '缺可用的数据库账号，门禁直接拒绝，没有发审批';
+  if(k === 'APPROVAL_REQUESTED')   return '管家发起审批：' + toolCN(tool) + ' —— 等人点链接';
+  if(k === 'AMEND_PENDING')        return '还没人批的那张票被改了参数，重新发信让人看清批的是什么';
+  if(k === 'NEW_TICKET_AFTER_DECISION') return '旧票已经有人决定过，改它就是伪造授权，所以另开了一张新票';
+  if(k === 'SOURCE_CONNECT_FAILED')     return '这个数据库账号连不上，已记下，不再拿它重试';
+  if(k === 'SOURCE_CONNECT_NOTICE_SENT')return '把连接结果通知了' + (p.to ? ' ' + p.to : '相关的人');
+  if(k.startsWith('DECIDED_'))     return '审批结果：' + (k.slice(8) === 'approve' ? '批准' : k.slice(8));
+  if(k.startsWith('MAIL_') || k.startsWith('NOTICE_')) return '发出一封邮件（' + k + '）';
+  return k + (e.payload ? ' · ' + e.payload : '');
+}
+
+/* check 名 → 人话 + 为什么这条重要 */
+const CHECK_CN = {
+  '模型与 tool calling': ['真的有模型在跑，而且会调工具',
+    '证明页面看到的动作来自真实模型，不是预录的脚本'],
+  'GreenMail 真实收发': ['邮件真的进出了邮件服务器',
+    '人和管家之间的往来是真邮件，不是页面里的假对话'],
+  'Agent 无 decisions 写权限': ['管家不能自己批准自己',
+    '审批结果只能由独立进程用独立数据库账号写入；这是数据库授权拦的，不是靠提示词'],
+  '源库无写权限': ['管家碰不了生产源库的数据',
+    '源库账号只有 SELECT，就算模型想写也写不进去'],
+  'Agent 决策权限与源库只读': ['权限证据这次读不到', '读不到就不能当通过'],
+  '错误账号失败通知发给 DBA': ['账号连不上时，通知发给了真正能修的人',
+    '之前的 bug 是发给了业务负责人，而他手里根本没有账号'],
+  '待决票 amend / 已决票新建': ['还没批的票可以改参数，批过的票只能另开新票',
+    '否则换个账号来会挂到旧票上，人批的和实际执行的不是同一件事'],
+  '审批链接重放被拒': ['同一个审批链接点第二次会被拒（HTTP 409）',
+    '一次性令牌，转发或误点都不会重复授权'],
+  'bronze 实际产物': ['数据真的落进了湖的 bronze 层',
+    '接入不是嘴上说说，Trino 里能查到行数'],
+  'silver raw 与洗后值': ['清洗后原始值仍然保留',
+    '洗过的值和 _raw 原值并存，随时能回溯洗错了没有'],
+  'gold 发布且不含 raw': ['对外发布的表里没有脏的原始值',
+    '按列名实际检查，不是看表存不存在'],
+  '跨表回答与九行独立直算': ['管家的跨表答案和页面独立直算逐行相等',
+    '页面自己连源库另算一遍九行，对不上就不算通过'],
+};
+const checkCN = n => CHECK_CN[n] || [n, ''];
+
+const STATE_CN = {pass:'通过', fail:'不符', pending:'还没走到这步', 'n/a':'本 Case 不涉及'};
+const STATE_ICON = {pass:'✓', fail:'✗', pending:'○', 'n/a':'—'};
+
+/* ---------- 进度 ---------- */
+
+const STEPS = ['准备环境', '把任务交给管家', '管家干活', '需要你决定', '出结果'];
+
+function stepOf(s){
+  if(!s.run) return {i:-1, note:'还没开始。选一个 Case，点下面的蓝色按钮。'};
+  const m = RUN_STATE[s.run.state];
+  if(m && m.step === -1) return {i:-2, note:m.text + '。' + m.next, why:m.text};
+  const pending = (Array.isArray(s.approvals) ? s.approvals : []).filter(x => !x.used);
+  const lake = s.lake || {};
+  const done = (s.answer_comparison || {}).matched
+            || Object.keys(lake.gold || {}).length > 0;
+  if(done) return {i:4, note:'这一轮有产出了。到下面「证据」里逐条核对。'};
+  if(pending.length) return {i:3, note:'管家申请了 ' + pending.length + ' 个动作，在等你批。'};
+  if(m && m.step === 0) return {i:0, note:m.text + '。' + m.next};
+  if(m && m.step === 1){
+    const ev = Array.isArray(s.events) ? s.events.length : 0;
+    return ev ? {i:2, note:'管家在工作中。它每做一步都会在下面留痕。'}
+              : {i:1, note:m.text + '。' + m.next};
+  }
+  return {i:1, note:''};
+}
+
+function renderSteps(s){
+  const st = stepOf(s);
+  $('#steps').innerHTML = STEPS.map((name, i) => {
+    let cls = 'step';
+    if(st.i === -2) cls += (i === 0 ? ' bad' : '');
+    else if(i < st.i) cls += ' done';
+    else if(i === st.i) cls += ' now';
+    return '<div class="' + cls + '"><b>' + (i+1) + '. ' + name + '</b></div>';
+  }).join('');
+  $('#stepnote').innerHTML = (st.i === -2 ? '<b class=bad>卡住了：</b>' : '') + esc(st.note || '');
+  return st;
+}
+
+/* ---------- 「现在轮到你」 ---------- */
+
+function caseById(id){ return meta.cases.find(c => c.id === id); }
+function snapById(id){ return meta.snapshots.find(x => x.id === id); }
+
+function startCard(){
+  const cs = meta.cases;
+  if(!cs.length) return '<h2>读不到 Case</h2><div class=body>demo/cases.json 没加载成功。</div>';
+  const sel = $('#caseSel') ? $('#caseSel').value : cs[0].id;
+  const c = caseById(sel) || cs[0];
+  const snaps = c.snapshots.map(id => {
+    const x = snapById(id);
+    return '<option value="' + esc(id) + '">' + esc(x ? x.title : id) +
+           ' · ' + esc(x ? x.source_tables.join('、') : '') + '</option>';
+  }).join('');
+  const steps = (c.steps || []).map(x => '<li>' + esc(x) + '</li>').join('');
+  return '<h2>① 选一个剧本，然后开始</h2><div class=body>' +
+    '<label class=hint>剧本</label>' +
+    '<select id=caseSel>' + cs.map(x => '<option value="' + esc(x.id) + '"' +
+      (x.id === c.id ? ' selected' : '') + '>' + esc(x.title) + '</option>').join('') + '</select>' +
+    '<label class=hint>这一轮放出哪些源表</label><select id=snapSel>' + snaps + '</select>' +
+    '<p style="margin:12px 0 4px">' + esc(c.description || '') + '</p>' +
+    (c.you_play ? '<p class=hint><b>你扮演：</b>' + esc(c.you_play) + '</p>' : '') +
+    (steps ? '<p class=hint style="margin-bottom:2px">会发生什么：</p><ol class=hint style="margin:0 0 10px;padding-left:20px">' + steps + '</ol>' : '') +
+    '<button class=primary id=startBtn>开始这一轮</button>' +
+    '<p class=hint style="margin:10px 0 0">开始会清空数据湖、治理库和四个邮箱，重启网关并清掉会话，然后把任务邮件发给管家。' +
+    '<b>源库永远只读，不会被清也不会被写。</b></p></div>';
+}
+
+function brokenCard(s){
+  const m = RUN_STATE[s.run.state] || {text:s.run.state, next:''};
+  const a = s.agent || {};
+  /* 顶栏读的是网关此刻的状态，run 记的是这一轮开始时的状态。两者可以同时为真，
+     但摆在一起像自相矛盾，所以这里直接说破。 */
+  const recovered = a.state === 'ready' && a.model_probe === 'pass';
+  return '<h2><span class="dot bad"></span>这一轮跑不下去了</h2><div class=body>' +
+    '<p><b>' + esc(m.text) + '</b>' + (s.run.error ? '（' + esc(s.run.error) + '）' : '') + '</p>' +
+    (recovered ? '<p class=hint>顶栏现在显示模型在线 —— 网关后来自己好了，' +
+       '但这一轮是在它起不来的时候开的，已经补不回来。直接重开一轮。</p>' : '') +
+    '<p class=hint>怎么办：' + esc(m.next) + '</p>' +
+    '<button class=primary id=againBtn>重开一轮</button></div>';
+}
+
+/* 审批卡直接建在真实邮件上 —— 令牌只在服务端，浏览器只有 link id。 */
+function approvalCards(messages, approvals){
+  const seen = new Set(), out = [];
+  for(const m of messages){
+    if(!m.links || !m.links.length) continue;
+    const key = m.subject + '|' + m.links.map(l => l.action).join(',');
+    if(seen.has(key)) continue;
+    seen.add(key);
+    const sub = m.subject.replace(/^\[数据管家\]\s*请批准：\s*/, '');
+    const parts = sub.split(' · ');
+    const tool = parts[0] || '', target = parts.slice(1).join(' · ');
+    const reason = (m.body.match(/理由：(.*)/) || [,''])[1];
+    const row = (approvals || []).find(a => a.tool === tool && !a.used);
+    out.push({box: m.box, tool, target, reason, links: m.links,
+              approver: row ? row.approver : m.box, decided: !!(row && row.used)});
+  }
+  return out;
+}
+
+function approvalCard(cards){
+  const live = cards.filter(c => !c.decided);
+  return '<h2><span class="dot" style="color:var(--accent)"></span>轮到你了：管家要做 ' +
+    live.length + ' 件需要授权的事</h2>' +
+    live.map(c =>
+      '<div class=body><dl class=ask>' +
+      '<dt>要做什么</dt><dd><b>' + esc(toolCN(c.tool)) + '</b></dd>' +
+      '<dt>对象</dt><dd><code>' + esc(c.target || '—') + '</code></dd>' +
+      (c.reason ? '<dt>它给的理由</dt><dd>' + esc(c.reason) + '</dd>' : '') +
+      '<dt>该谁批</dt><dd>' + esc(c.approver) + '</dd>' +
+      '</dl><div style="margin-top:10px">' +
+      c.links.map(l => '<button class="' + (l.action === 'approve' ? 'primary' : 'danger') +
+        '" data-approve="' + esc(l.id) + '">' +
+        (l.action === 'approve' ? '批准' : l.action === 'deny' ? '拒绝' : '选择') +
+        '</button> ').join('') +
+      '</div><p class=hint style="margin:9px 0 0">点下去等于点邮件里那枚一次性链接：' +
+      '页面把令牌转给独立的审批进程，由它写决定。页面自己没有写审批的权限。</p></div>').join('');
+}
+
+function replyCard(s, messages){
+  const c = caseById(s.run.case_id) || {};
+  const lastMsg = messages.filter(m => m.origin === '模型邮件输出').slice(-1)[0];
+  const replies = c.replies || [];
+  return '<h2><span class=spin></span> 管家在工作中</h2><div class=body>' +
+    (lastMsg ? '<p class=hint>它最近发出的一封信：<b>' + esc(lastMsg.subject) + '</b></p>' +
+               '<p class=text style="white-space:pre-wrap;max-height:8em;overflow:auto">' +
+               esc(lastMsg.body.slice(0, 600)) + '</p>' : '') +
+    '<p class=hint style="margin-top:12px"><b>它问你话的时候，用下面这个框回信。</b>没问就不用管，它会自己往下做。</p>' +
+    (replies.length ? '<div style="margin:6px 0">' + replies.map((r, i) =>
+        '<button class=chip data-reply="' + i + '">' + esc(r.label) + '</button>').join('') +
+      '</div><p class=hint style="margin:0 0 8px">这些是<b>人的台词</b>，一键填进下面的框，可以改，' +
+      '按了不会自动发。里面的 <code>&lt;口令&gt;</code> 要你自己填，演练口令在 infra/demo-init.sh。</p>' : '') +
+    '<form id=mailForm>' +
+    '<select id=mailFrom>' + ['boss@acme.com','wang@acme.com','dba@acme.com']
+      .map(x => '<option>' + x + '</option>').join('') + '</select>' +
+    '<input id=mailSubject placeholder="主题" required>' +
+    '<textarea id=mailBody rows=4 placeholder="正文" required></textarea>' +
+    '<button class=primary>以这个身份发出去</button></form></div>';
+}
+
+function renderTurn(s, messages, st){
+  const el = $('#turn');
+  if(!s.run){ el.className = 'card turn'; el.innerHTML = startCard(); return; }
+  if(st.i === -2){ el.className = 'card turn broken'; el.innerHTML = brokenCard(s); return; }
+  const cards = approvalCards(messages, Array.isArray(s.approvals) ? s.approvals : []);
+  const live = cards.filter(c => !c.decided);
+  if(live.length){ el.className = 'card turn'; el.innerHTML = approvalCard(live); return; }
+  const pending = (Array.isArray(s.approvals) ? s.approvals : []).filter(x => !x.used);
+  if(pending.length){
+    el.className = 'card turn';
+    el.innerHTML = '<h2><span class=spin></span> 审批申请已发出，邮件还在路上</h2><div class=body>' +
+      '<p>' + pending.map(x => esc(toolCN(x.tool))).join('、') +
+      '</p><p class=hint>等这封信落进 ' + esc(pending[0].approver) +
+      ' 的信箱，批准按钮就会出现在这里。</p></div>';
+    return;
+  }
+  if(RUN_STATE[s.run.state] && RUN_STATE[s.run.state].step === 0){
+    el.className = 'card turn idle';
+    el.innerHTML = '<h2><span class=spin></span> 正在准备环境</h2><div class=body><p>' +
+      esc(RUN_STATE[s.run.state].text) + '</p><p class=hint>' +
+      esc(RUN_STATE[s.run.state].next) + '。这一步不需要你做任何事。</p></div>';
+    return;
+  }
+  el.className = 'card turn idle';
+  el.innerHTML = replyCard(s, messages);
+}
+
+/* ---------- 时间线 ---------- */
+
+function actor(mail){ return String(mail || '').split('@')[0] || '未知'; }
+function when(x){ const t = Date.parse(x.date || ''); return isNaN(t) ? 0 : t; }
+
+/* 同一封信在发件人和收件人两个信箱各存一份，按 Message-ID 去重。 */
+function dedupe(messages){
+  const seen = new Map();
+  for(const m of messages){
+    const key = (m.id && m.id.includes('@')) ? m.id : m.from + '|' + m.subject + '|' + m.date;
+    if(!seen.has(key)) seen.set(key, m);
+  }
+  return [...seen.values()].sort((a, b) => when(a) - when(b));
+}
+
+function bubble(kind, tags, subject, text, extra){
+  return '<div class="msg ' + kind + '"><div class=head>' +
+    tags.map(t => '<span class="pill ' + (t[1] || '') + '">' + esc(t[0]) + '</span>').join('') +
+    (subject ? '<span class=subj>' + esc(subject) + '</span>' : '') + '</div>' +
+    (text ? '<div class=text>' + text + '</div>' : '') + (extra || '') + '</div>';
+}
+
+function foldable(text, limit){
+  if(text.length <= limit) return esc(text);
+  return '<details><summary>展开全文（' + text.length + ' 字）</summary><div class=text>' +
+         esc(text) + '</div></details><div class=text style="color:#59636e">' +
+         esc(text.slice(0, limit)) + '…</div>';
+}
+
+function renderTimeline(s, messages){
+  const c = caseById((s.run && s.run.case_id) || ($('#caseSel') && $('#caseSel').value));
+  const out = [];
+  if(!c){ $('#timeline').innerHTML = '<div class=empty>还没选 Case。</div>'; return; }
+  (c.history || []).forEach(h => out.push(bubble('preset',
+    [['Case 预设'], [actor(h.from), 'human']], h.subject, esc(h.body))));
+  if(!s.run){
+    out.push(bubble('preset', [['Case 预设'], [actor(c.opening.from), 'human']],
+      c.opening.subject, esc(c.opening.body)));
+    out.push(bubble('sys', [], '', '↑ 以上是这一轮开始前就存在的邮件历史。点上面的「开始这一轮」，最后这封会真的发进管家信箱。'));
+    $('#timeline').innerHTML = out.join('');
+    return;
+  }
+  const items = dedupe(messages).map(m => {
+    /* 任务简报那封信正文很长（Case + Snapshot + 历史全在里面）。它是页面代投的，
+       origin 会是「演练人员输入」，但它不是你写的，所以先于 origin 判断。 */
+    const brief = m.body.indexOf('【演练 Case：') === 0;
+    if(brief)
+      return bubble('sys', [['系统', 'sys']], m.subject,
+        '任务简报已投递给管家：Case 背景 + 本轮可用源表 + ' + esc(actor(m.from)) + ' 的问题' +
+        '<details><summary>看原文</summary><div class=text>' + esc(m.body) + '</div></details>');
+    if(m.origin === '模型邮件输出')
+      return bubble('model', [['管家', 'model'], [actor(m.from), 'model']],
+        m.subject, foldable(m.body, 700));
+    if(m.origin === '演练人员输入')
+      return bubble('human', [['你发的', 'human'], [actor(m.from), 'human']],
+        m.subject, foldable(m.body, 700));
+    if(m.origin === '系统通知模板')
+      return bubble('sys', [['系统', 'sys']], m.subject, foldable(m.body, 400));
+    return bubble('human', [['外部', 'human'], [actor(m.from), 'human']],
+      m.subject, foldable(m.body, 700));
+  });
+  const evs = (Array.isArray(s.events) ? s.events : []).slice().reverse()
+    .map(e => bubble('sys', [], '', esc(eventCN(e))));
+  $('#timeline').innerHTML = out.concat(items, evs).join('') ||
+    '<div class=empty>还没有任何邮件。</div>';
+}
+
+/* ---------- 证据 ---------- */
+
+/* 空面板必须说清为什么空：本 Case 不涉及 / 还没走到这步 / 出错了。 */
+function why(s, feature){
+  if(!s.run) return '还没开始这一轮。';
+  const c = caseById(s.run.case_id);
+  if(c && Array.isArray(c.expects) && feature && !c.expects.includes(feature))
+    return '这个剧本（' + c.title + '）本来就不做这件事，所以这里是空的 —— 不是失败。';
+  const m = RUN_STATE[s.run.state];
+  if(m && m.step === -1) return '这一轮卡在「' + m.text + '」，模型没跑到这一步。';
+  return '管家还没走到这一步。';
+}
+
+function table(rows, heads){
+  if(!rows.length) return '';
+  return '<table><tr>' + heads.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr>' +
+    rows.map(r => '<tr>' + r.map(x => '<td>' + esc(x) + '</td>').join('') + '</tr>').join('') +
+    '</table>';
+}
+const box = (html, empty) => html || '<div class=empty>' + esc(empty) + '</div>';
+
+function renderProof(s){
+  const v = ((s.run || {}).verification || []).slice(-1)[0];
+  const checks = v ? v.checks : [];
+  const head = '<p class=hint style="margin-top:0">这些判据由页面独立只读地查库、查湖、查邮箱得出，' +
+    '<b>拿不到证据就只能是「还没走到这步」，绝不会自动算通过。</b></p>' +
+    '<button id=verifyBtn>重新核对一遍</button>';
+  if(!checks.length)
+    return head + '<div class=empty style="margin-top:11px">还没核对过。点上面的按钮跑一次（只读，不会改任何东西）。</div>';
+  return head + '<div style="margin-top:11px">' + checks.map(x => {
+    const [name, whyIt] = checkCN(x.name);
+    return '<div class=check><div class="' + x.state + '"><b>' +
+      STATE_ICON[x.state] + ' ' + esc(name) + '</b> · ' + esc(STATE_CN[x.state] || x.state) + '</div>' +
+      (whyIt ? '<div class=why>为什么这条重要：' + esc(whyIt) + '</div>' : '') +
+      '<pre class=dev>' + esc(x.evidence) + '</pre></div>';
+  }).join('') + '</div>';
+}
+
+function renderData(s){
+  const lake = s.lake || {}, cols = s.lake_columns || {};
+  const src = s.source || {};
+  let html = '<h3>本轮放出的源表（只读）</h3>' +
+    box(table(Object.entries(src).map(([k, v]) => [k, v + ' 行']), ['源表', '行数']),
+        '读不到源库。');
+  for(const [layer, desc, feat] of [
+      ['bronze', '原样接进来的数据，不改一个字', 'bronze 实际产物'],
+      ['silver', '清洗后的数据，原始值以 _raw 保留', 'silver raw 与洗后值'],
+      ['gold',   '发布给业务用的表，不该出现 _raw', 'gold 发布且不含 raw']]){
+    const t = lake[layer] || {};
+    const rows = Object.entries(t).map(([name, n]) =>
+      [name, n + ' 行', (cols[layer] && cols[layer][name] || []).join(', ')]);
+    html += '<h3 style="margin-top:16px">' + layer + ' 层 <span class=hint>· ' + desc + '</span></h3>' +
+      box(table(rows, ['表', '行数', '列']), why(s, feat));
+  }
+  const sv = s.silver || {};
+  html += '<h3 style="margin-top:16px">清洗前后对照 <span class=hint>· 洗掉了什么，原值还在不在</span></h3>' +
+    box(table((sv.samples || []).map(r => r.map(x => String(x).trim())),
+              ['order_id', '原始值 _raw', '洗后值']),
+        why(s, 'silver raw 与洗后值'));
+  const gd = s.gold || {};
+  html += '<h3 style="margin-top:16px">已确认的业务口径</h3>' +
+    box(table((gd.semantics || []).map(x => [x.asset, x.key, x.value, x.by]),
+              ['资产', '口径项', '取值', '谁确认的']),
+        '还没有人确认过口径。');
+  return html;
+}
+
+function renderWork(s){
+  const q = Array.isArray(s.queries) ? s.queries : [];
+  let html = '<h3 style="margin-top:0">管家真正跑过的 SQL</h3>' +
+    '<p class=hint>直接来自 query_ledger，不是页面编的。' +
+    (s.snapshot ? '本轮只放出 ' + (s.snapshot.source_tables || []).length +
+       ' 张源表：' + esc((s.snapshot.source_tables || []).join('、')) +
+       '，所以能出现的关联最多就这么多。' : '') + '</p>' +
+    box(q.map(x => '<div class=check><div><span class=pill>' + esc(x.source) + '</span> ' +
+        '<span class="' + (x.status === 'ok' ? 'pass' : 'fail') + '">' + esc(x.status) + '</span> · ' +
+        esc(x.rows) + ' 行 · ' + esc(x.duration_ms) + 'ms' +
+        (x.purpose ? ' · ' + esc(x.purpose) : '') + '</div>' +
+        '<pre>' + esc(x.sql) + '</pre></div>').join(''),
+      q.length ? '' : why(s));
+  const p = Array.isArray(s.provenance) ? s.provenance : [];
+  html += '<h3 style="margin-top:16px">每个资产的来历</h3>' +
+    box(table(p.map(x => [x.asset, x.event, x.actor,
+        JSON.stringify(x.detail).slice(0, 160), x.time]),
+      ['资产', '发生了什么', '谁做的', '细节', '时间']), why(s));
+  const a = Array.isArray(s.approvals) ? s.approvals : [];
+  html += '<h3 style="margin-top:16px">审批台账</h3>' +
+    box(table(a.map(x => [toolCN(x.tool), x.approver, x.used ? '已决' : '待决', x.created]),
+      ['动作', '该谁批', '状态', '发起时间']), '这一轮还没有任何动作需要审批。');
+  return html;
+}
+
+function renderCross(s){
+  const ac = s.answer_comparison || {}, direct = s.source_sales || [];
+  const links = (Array.isArray(s.provenance) ? s.provenance : [])
+    .filter(x => /link/i.test(x.event));
+  let html = '<h3 style="margin-top:0">跨表关联假设与确认</h3>' +
+    '<p class=hint>没有外键的表之间，管家先提假设、带证据，人确认之后才允许用来回答问题。</p>' +
+    box(table(links.map(x => [x.asset, x.event, x.actor,
+        JSON.stringify(x.detail).slice(0, 200)]), ['资产', '状态', '谁', '证据']),
+      why(s, '跨表回答与九行独立直算'));
+  html += '<h3 style="margin-top:16px">管家的跨表答案 vs 页面独立直算</h3>';
+  if(!direct.length && !(ac.model_rows || []).length){
+    html += '<div class=empty>' + esc(why(s, '跨表回答与九行独立直算')) + '</div>';
+    return html;
+  }
+  html += '<p class=hint>' + (ac.question ? '它回答的问题：' + esc(ac.question) + '。' : '') +
+    '右边这张表是<b>页面自己</b>连源库另算一遍的，用来对账；它不能代替管家的答案。</p>' +
+    '<p class="' + (ac.matched ? 'pass' : 'pending') + '"><b>' +
+    (ac.matched ? '✓ 逐行相等' : '○ 还没有可以对账的模型答案') + '</b></p>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
+    '<div><h3>管家答的</h3>' + box(table((ac.model_rows || []).map(r =>
+        Array.isArray(r) ? r : String(r).split(',')),
+      ['销售', '销售额', '订单', '明细行']), why(s, '跨表回答与九行独立直算')) + '</div>' +
+    '<div><h3>页面直算的</h3>' + box(table(direct, ['销售', '销售额', '订单', '明细行']),
+      '读不到源库。') + '</div></div>';
+  return html;
+}
+
+/* ---------- 刷新 ---------- */
+
+async function refresh(){
+  if(busy) return;
+  busy = true;
+  try{
+    const s = await api('/api/status');
+    last = s;
+    const a = s.agent || {};
+    const gwOK = a.state === 'ready' && a.model_probe === 'pass';
+    $('#gateway').innerHTML = '<span class="dot ' + (gwOK ? 'ok' : 'bad') + '"></span>' +
+      (gwOK ? '模型在线' : '模型不可用') +
+      (a.model ? ' · ' + esc(a.model) : '') +
+      (a.model_expires_on ? ' · 额度到期 ' + esc(a.model_expires_on) : '') +
+      (gwOK ? '' : ' · ' + esc(a.detail || a.state || ''));
+    $('#runline').textContent = s.run ? ('本轮 ' + s.run.id + ' · ' + s.run.case_title) : '未开始';
+
+    let messages = [];
+    try { messages = await api('/api/mail'); mailCache = messages; }
+    catch(e){ messages = mailCache; }
+
+    const st = renderSteps(s);
+    renderTurn(s, messages, st);
+    renderTimeline(s, messages);
+    $('#tab-proof').innerHTML = renderProof(s);
+    $('#tab-data').innerHTML  = renderData(s);
+    $('#tab-work').innerHTML  = renderWork(s);
+    $('#tab-cross').innerHTML = renderCross(s);
+    $('#rawEvents').textContent = JSON.stringify(s.events, null, 2);
+    $('#rawProv').textContent   = JSON.stringify(s.provenance, null, 2);
+    $('#rawData').textContent   = JSON.stringify({source:s.source, lake:s.lake,
+      lake_columns:s.lake_columns, silver:s.silver, gold:s.gold,
+      answer_comparison:s.answer_comparison}, null, 2);
+    $('#rawMail').textContent   = JSON.stringify(messages, null, 2);
+  }catch(e){
+    fail('读取失败：' + e.message);
+  }finally{
+    busy = false;
+  }
+}
+
+/* ---------- 事件（委托，避免每次重绘丢绑定） ---------- */
+
+document.addEventListener('change', e => {
+  if(e.target.id === 'caseSel') renderTurn(last, mailCache, stepOf(last));
+});
+
+document.addEventListener('click', async e => {
+  const t = e.target;
+  if(t.id === 'startBtn' || t.id === 'againBtn'){
+    if(t.id === 'againBtn'){ renderTurn({}, [], {i:-1}); return; }
+    t.disabled = true;
+    try{
+      const r = await api('/api/run/start', 'POST',
+        {case_id: $('#caseSel').value, snapshot_id: $('#snapSel').value});
+      say('已开始 ' + r.id + '。正在清空环境并重启网关，页面每 5 秒自己刷新，不用手动刷。');
+    }catch(err){ fail(err.message); t.disabled = false; }
+    refresh();
+  }
+  if(t.id === 'verifyBtn'){
+    t.disabled = true; t.textContent = '核对中…';
+    try{ await api('/api/verify', 'POST'); say('核对完成。'); }
+    catch(err){ fail(err.message); }
+    refresh();
+  }
+  if(t.dataset.approve){
+    t.disabled = true;
+    try{
+      const r = await api('/api/approval', 'POST', {id: t.dataset.approve});
+      const msg = String(r.message || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+      if(r.status === 409) say('审批进程拒绝了重复点击（HTTP 409）—— 一次性链接只认第一次。');
+      else if(r.status < 300) say('审批进程已记下你的决定（HTTP 200）。管家会在下次唤醒时继续。');
+      else fail('审批进程返回 HTTP ' + r.status + ' · ' + msg);
+    }catch(err){ fail(err.message); }
+    refresh();
+  }
+  if(t.dataset.reply !== undefined){
+    const c = caseById((last.run || {}).case_id) || caseById($('#caseSel') && $('#caseSel').value);
+    const r = ((c || {}).replies || [])[Number(t.dataset.reply)];
+    if(r){
+      $('#mailFrom').value = r.from; $('#mailSubject').value = r.subject;
+      $('#mailBody').value = r.body; $('#mailBody').focus();
+      say('已填进下面的框。检查一遍（尤其是 <口令>），确认无误再点发送。');
+    }
+  }
+  if(t.id === 'modeToggle'){
+    document.body.classList.toggle('devmode');
+    const dev = document.body.classList.contains('devmode');
+    t.textContent = dev ? '演示视图' : '调试视图';
+    try{ localStorage.setItem('demoui.dev', dev ? '1' : '0'); }catch(_){}
+  }
+  if(t.dataset.tab){
+    document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b === t));
+    ['proof','data','work','cross'].forEach(n =>
+      $('#tab-' + n).hidden = (n !== t.dataset.tab));
+  }
+});
+
+document.addEventListener('submit', async e => {
+  if(e.target.id !== 'mailForm') return;
+  e.preventDefault();
+  try{
+    await api('/api/send', 'POST', {from: $('#mailFrom').value,
+      subject: $('#mailSubject').value, body: $('#mailBody').value});
+    say('已经真的发进 GreenMail。管家下次收信时会看到。');
+    $('#mailSubject').value = ''; $('#mailBody').value = '';
+  }catch(err){ fail(err.message); }
+  refresh();
+});
+
+/* ---------- 启动 ---------- */
+
+(async function boot(){
+  try{
+    if(localStorage.getItem('demoui.dev') === '1'){
+      document.body.classList.add('devmode');
+      $('#modeToggle').textContent = '演示视图';
+    }
+    if(localStorage.getItem('demoui.intro') !== 'seen') $('#intro').open = true;
+    $('#intro').addEventListener('toggle', () => {
+      try{ if(!$('#intro').open) localStorage.setItem('demoui.intro', 'seen'); }catch(_){}
+    });
+  }catch(_){ $('#intro').open = true; }
+  try{ meta = await api('/api/meta'); }
+  catch(e){ fail('读不到 Case 列表：' + e.message); }
+  await refresh();
+  setInterval(refresh, 5000);
+})();
+</script></html>

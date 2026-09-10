@@ -199,9 +199,17 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     if why:
         return {"action": "block", "message": why}
 
+    # 先找已批准但尚未消费的票，再检查 dsn。恢复作业会按安全约定隐藏
+    # dsn；如果先做「无 dsn」检查，就会把真正已经批准的接入线误判成坏账号
+    # 重试，永远走不到 `_replay_approved_args`。
+    held = None
+    if level >= Level.L2:
+        held = st.find_valid(h, task_id) or _ticket_of_waiting_run(
+            st, tool_name, args, task_id=task_id)
+
     # 没有连接串就不要开审批票 —— 人收到也没法处理（见下）。
     why = _connect_without_dsn(st, tool_name, args)
-    if why:
+    if why and not held:
         return {"action": "block", "message": why}
 
     # 用连接回答问题：**先查这条连接人确认过没有**，再走 SQL 那条准入。
@@ -241,10 +249,6 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     # 两条路找票，**指纹之外还要认线**：指纹解决同义词漂移，
     # 认线解决粒度漂移（票批的是表级口径、模型回来写列级）。
     # 见 `_ticket_of_waiting_run`。
-    held = None
-    if level >= Level.L2:
-        held = st.find_valid(h, task_id) or _ticket_of_waiting_run(st, tool_name, args)
-
     # WIP 限制（readme 10.7）：不要淹没任何人
     if level >= Level.L2 and not held:
         over = _wip_exceeded(st, approver_role or "owner")
@@ -355,7 +359,7 @@ def _replay_approved_args(st, tool_name, approval_id, args):
                            if k in IDENTITY_KEYS[tool_name]}}
 
 
-def _ticket_of_waiting_run(st, tool_name: str, args: dict):
+def _ticket_of_waiting_run(st, tool_name: str, args: dict, task_id: str = ""):
     """这条线在等的那张票批下来没有 —— **按线找，不按指纹找。**
 
     为什么需要它：指纹能把同义词收敛（`enum_rule` / `normalize_rule`），
@@ -378,13 +382,17 @@ def _ticket_of_waiting_run(st, tool_name: str, args: dict):
 
     from .approvals import rows_of
     from .canonical import RULES, normalize_approval_args
-    if tool_name not in RULES:
+    from .policy import IDENTITY_KEYS
+    if tool_name not in RULES and tool_name not in IDENTITY_KEYS:
         return None                      # 没声明归一规则的工具行为不变
 
     def _sig(a):
         """身份去掉 target —— 剩下的必须逐字相同。"""
-        i = normalize_approval_args(tool_name, a)["identity"] or {}
-        return (i.get("asset"), i.get("key"))
+        if tool_name in RULES:
+            i = normalize_approval_args(tool_name, a)["identity"] or {}
+            return (i.get("asset"), i.get("key"))
+        return tuple(str((a or {}).get(k) or "").strip()
+                     for k in IDENTITY_KEYS[tool_name])
 
     want = _sig(args)
     if not all(want):
@@ -399,16 +407,18 @@ def _ticket_of_waiting_run(st, tool_name: str, args: dict):
             if _sig(r["params"]) != want:
                 continue
             row = rows_of(st,
-                          "SELECT a.id FROM approvals a"
+                          "SELECT a.id, a.expires_at FROM approvals a"
                           " JOIN decisions d ON d.approval_id = a.id"
                           " WHERE a.id = {0} AND d.decision = 'approve'"
-                          " AND a.used_at IS NULL AND a.expires_at > {0} LIMIT 1",
-                          (r["waiting_on"], _t.time()))
-            if row:
+                          " AND a.used_at IS NULL LIMIT 1",
+                          (r["waiting_on"],))
+            if row and _epoch(row[0][1]) > _t.time():
                 try:
+                    identity = (want[0] if len(want) == 1
+                                else {"asset": want[0], "key": want[1]})
                     st.append_event(r["run_id"], "TICKET_BOUND_BY_RUN",
                                     json.dumps({"tool": tool_name,
-                                                "asset": want[0], "key": want[1],
+                                                "identity": identity,
                                                 "approval": str(row[0][0])[:8]},
                                                ensure_ascii=False))
                 except Exception:                            # noqa: BLE001
@@ -554,6 +564,11 @@ def _public_sql_args(args: dict) -> dict:
 RECENT_H = 6.0
 
 
+def _epoch(value) -> float:
+    """Normalize SQLite epoch values and PostgreSQL datetime values."""
+    return value.timestamp() if hasattr(value, "timestamp") else float(value)
+
+
 def _already_done(st, tool_name: str, args: dict):
     """做完的事不要再发审批。**拦在建票之前，不是拦在执行之前。**
 
@@ -601,7 +616,7 @@ def _recent_sync(st, asset: str):
         return None
     if not rows or not rows[0][0]:
         return None
-    age_h = (time.time() - float(rows[0][0])) / 3600.0
+    age_h = (time.time() - _epoch(rows[0][0])) / 3600.0
     if age_h > RECENT_H:
         return None
     ago = f"{age_h:.1f} 小时前" if age_h >= 1 else f"{max(1, int(age_h * 60))} 分钟前"
@@ -610,27 +625,31 @@ def _recent_sync(st, asset: str):
             f"iceberg.bronze 里，直接 sql_query（plane=lake）。")
 
 
+def _registered_identities(st, source_id: str) -> set:
+    """这个源登记过哪些身份（user@host:port/db，**不含口令**）。
+
+    **只读 identity 列，绝不读 dsn。** Agent 对 `source_secrets` 只有
+    identity 的列级 SELECT；从前这里读的是 dsn，于是每次都抛
+    `InsufficientPrivilege`，被 `except: return False` 吞成「这个源没接入」——
+    `_already_done()` 的 connect 分支永不触发，同一个动作被反复发审批，
+    人批一张模型生一张（R6 真实演练实测，四张同 action_hash 的票）。
+
+    所以这里**不吞异常**：读不到就是门禁坏了，要能看见，不能装作没接入。
+    """
+    from .approvals import rows_of
+    rows = rows_of(st, "SELECT identity FROM source_secrets WHERE source_id = {0}",
+                   (source_id,))
+    return {str(r[0]) for r in rows if r and r[0]}
+
+
 def _source_live(st, source_id: str) -> bool:
     """这个源有没有已经登记好、且没被证明连不通的凭证。"""
-    from .approvals import rows_of
-    try:
-        rows = rows_of(st, "SELECT dsn FROM source_secrets WHERE source_id = {0}",
-                       (source_id,))
-    except Exception:                                        # noqa: BLE001
-        return False
-    if not rows or not rows[0][0]:
-        return False
-    return _identity_of(str(rows[0][0])) not in _failed_identities(st, source_id)
+    live = _registered_identities(st, source_id) - _failed_identities(st, source_id)
+    return bool(live)
 
 
 def _registered_identity(st, source_id: str) -> set:
-    from .approvals import rows_of
-    try:
-        rows = rows_of(st, "SELECT dsn FROM source_secrets WHERE source_id = {0}",
-                       (source_id,))
-    except Exception:                                        # noqa: BLE001
-        return set()
-    return {_identity_of(str(r[0])) for r in rows if r[0]}
+    return _registered_identities(st, source_id)
 
 
 def _failed_identities(st, source_id: str) -> set:
@@ -1178,6 +1197,7 @@ _PROVENANCE_EVENTS = {
     "publish_gold":        ("published", lambda a: a.get("silver_table")),
     "grant_read":          ("granted", lambda a: a.get("asset")),
     "define_semantics":    ("semantics_defined", lambda a: a.get("asset")),
+    "classify_asset":      ("classified", lambda a: a.get("asset")),
     "full_refresh":        ("refreshed", lambda a: _asset_of(a)),
     # 下面三个还没实现（见 tests/test_toolset_whitelist 的 NOT_YET_IMPLEMENTED），
     # 但**记什么账属于设计**：等补实现时不必再想一遍，也不会漏掉血缘。
@@ -1226,12 +1246,10 @@ _SECRET_ARGS = {"dsn", "password", "passwd", "secret", "token", "api_key"}
 
 
 def _identity_of(dsn: str) -> str:
-    try:
-        rest = str(dsn).split("://", 1)[1]
-        cred, host = rest.split("@", 1)
-        return f"{cred.split(':', 1)[0]}@{host}"
-    except Exception:                                        # noqa: BLE001
-        return "（连接串解析不出）"
+    """单一实现放在 approvals 里 —— 写库那一侧和判幂等这一侧必须同一套切分，
+    两份各写一遍迟早会漂移成「登记的身份和门禁比对的身份对不上」。"""
+    from .approvals import _identity_of_dsn
+    return _identity_of_dsn(dsn)
 
 
 def _actor_of(st, tool_name, args) -> str:
