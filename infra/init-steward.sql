@@ -96,6 +96,20 @@ GRANT SELECT, INSERT, UPDATE ON role_assignment TO agent_role;
 GRANT USAGE, SELECT ON SEQUENCE role_assignment_id_seq TO agent_role;
 GRANT SELECT ON role_assignment TO approver_role;
 
+-- 联系人目录只记录「哪条数据线该联系谁」，不授予角色、审批或数据权限。
+-- 它刻意不复用 role_assignment：登记联系人绝不能改变审批资格。
+CREATE TABLE IF NOT EXISTS source_contacts (
+    source_id       TEXT NOT NULL,
+    email           TEXT NOT NULL,
+    display_name    TEXT NOT NULL,
+    relationship    TEXT NOT NULL,
+    recorded_from   TEXT NOT NULL,
+    recorded_at     DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (source_id, email)
+);
+GRANT SELECT, INSERT, UPDATE ON source_contacts TO agent_role;
+GRANT SELECT ON source_contacts TO approver_role;
+
 -- 业务知识沉淀：问过的不再问（readme 5.7）
 CREATE TABLE IF NOT EXISTS asset_semantics (
     id           BIGSERIAL PRIMARY KEY,

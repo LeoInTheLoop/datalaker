@@ -122,6 +122,22 @@ class PostgresAuthorizationContracts(unittest.TestCase):
             agent.close()
             approver.close()
 
+    def test_controlled_writer_derives_the_nonsecret_connection_identity(self):
+        agent = PgStore(_dsn("agent"))
+        source_id = f"test-identity-{uuid.uuid4()}"
+        try:
+            dsn = f"postgresql://test_user:test_password@source.invalid/{source_id}"
+            with agent.db.cursor() as cur:
+                cur.execute("SELECT datasteward_put_source_secret(%s,%s,%s,%s,%s)",
+                            (source_id, dsn, "postgres", str(uuid.uuid4()), "test"))
+                cur.execute("SELECT identity FROM source_secrets WHERE source_id=%s",
+                            (source_id,))
+                identity = cur.fetchone()[0]
+            self.assertEqual(identity, f"test_user@source.invalid/{source_id}")
+            self.assertNotIn("test_password", identity)
+        finally:
+            agent.close()
+
 
 if __name__ == "__main__":
     unittest.main()

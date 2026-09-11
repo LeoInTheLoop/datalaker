@@ -1,6 +1,45 @@
 {
   "cases": [
     {
+      "id": "northwind-connection-handoff",
+      "title": "Northwind：连接交接",
+      "environment": {
+        "summary": "Northwind 是待受控接入的业务源数据库。模型不能自行取得连接、读取表或授予权限。",
+        "people": [
+          {
+            "name": "老板",
+            "responsibility": "提出接入需求"
+          },
+          {
+            "name": "数据库管理员",
+            "email": "dba@acme.com",
+            "responsibility": "负责 Northwind 的只读连接信息"
+          },
+          {
+            "name": "数据负责人",
+            "responsibility": "审批受控接入"
+          }
+        ],
+        "assets": [
+          {
+            "name": "Northwind",
+            "kind": "业务源数据库",
+            "tables": "接入前未开放表清单"
+          }
+        ]
+      },
+      "snapshots": [
+        "northwind-boss-points-dba",
+        "northwind-dba-sent-credentials"
+      ],
+      "expects": [
+        "模型与 tool calling",
+        "GreenMail 真实收发"
+      ]
+    }
+  ],
+  "staging_cases": [
+    {
       "id": "northwind-sales",
       "title": "Northwind：销售复盘与跨表回答",
       "description": "从业务目标开始，模型自行索取接入信息、走审批、接入数据并回答销售问题。",
@@ -22,6 +61,11 @@
         "gold 发布且不含 raw",
         "跨表回答与九行独立直算"
       ],
+      "expected_outcome": {
+        "kind": "sales_leader",
+        "answer": "销售第一名是 Peacock (4)：销售额 232890.85，156 单，420 条明细。",
+        "row": ["Peacock (4)", "232890.85", "156", "420"]
+      },
       "opening": {
         "from": "boss@acme.com",
         "subject": "销售复盘：谁卖得最好？",
@@ -92,6 +136,10 @@
         "审批链接重放被拒",
         "bronze 实际产物"
       ],
+      "expected_outcome": {
+        "kind": "recovery",
+        "answer": "坏账号的失败通知必须发给 DBA；拿到新账号后，产生可追溯的恢复分支并实际落下 bronze。"
+      },
       "opening": {
         "from": "boss@acme.com",
         "subject": "接入 Northwind",
@@ -150,6 +198,12 @@
         "silver raw 与洗后值",
         "gold 发布且不含 raw"
       ],
+      "expected_outcome": {
+        "kind": "clean_publish",
+        "answer": "gold 只允许 DELIVERED / PENDING；原始状态只保留在 silver 的 _raw 列，gold 不得包含 _raw。",
+        "asset": "northwind.demo_order_status",
+        "allowed_values": ["DELIVERED", "PENDING"]
+      },
       "opening": {
         "from": "wang@acme.com",
         "subject": "整理订单状态表",
@@ -204,6 +258,51 @@
     }
   ],
   "snapshots": [
+    {
+      "id": "northwind-boss-points-dba",
+      "database": "northwind",
+      "title": "① 老板指向数据库管理员",
+      "source_tables": [],
+      "table_scope": "本轮不指定、不读取、不接入任何业务表；只确认 Northwind 的技术联系人。",
+      "note": "当前只有老板的转介：本轮判断模型是否联系数据库管理员并登记联系人；不自动接入数据。",
+      "tool_scope": ["register_contact", "send_contact_email"],
+      "terminal_condition": "联系人已登记且索取连接信息的邮件已发出",
+      "expected_outcome": {
+        "kind": "contact_request",
+        "answer": "数据库管理员被登记为 Northwind 技术联系人，且模型真的向数据库管理员发出了索取只读连接信息的邮件。",
+        "source_id": "northwind",
+        "email": "dba@acme.com"
+      },
+      "opening": {
+        "from": "boss@acme.com",
+        "subject": "Northwind 的连接信息请找数据库管理员",
+        "body": "数据库管理员（dba@acme.com）负责 Northwind 的数据库连接。请直接向其索取只读连接信息，并把其登记为 Northwind 的技术联系人。"
+      },
+      "history": []
+    },
+    {
+      "id": "northwind-dba-sent-credentials",
+      "database": "northwind",
+      "title": "② 数据库管理员发来账号密码",
+      "source_tables": [],
+      "table_scope": "本轮只验证 Northwind 的只读连接；不指定、不读取业务数据、不复制或接入任何表。连接结果须同时反馈数据库管理员和数据负责人，首批表留到下一 Snapshot 决定。",
+      "note": "当前数据库管理员已发来连接信息：本轮只判断模型如何处理凭证与受控接入；审批后连接成功即结束。",
+      "tool_scope": ["connect_source"],
+      "terminal_condition": "Northwind 已依据本轮审批成功接入",
+      "expected_outcome": {
+        "kind": "credential_received",
+        "answer": "数据库管理员的真实邮件已安全投递给模型；模型以 connect_source 发起受控接入，负责人批准后 Northwind 成功连接，并把“未接入任何业务表”的结果邮件发给数据库管理员和数据负责人；Snapshot 到此结束。",
+        "source_id": "northwind",
+        "email": "dba@acme.com"
+      },
+      "opening": {
+        "from": "dba@acme.com",
+        "subject": "Northwind 只读数据库连接信息",
+        "body": "Northwind 的只读连接信息已在本邮件正文中提供。请查看并按治理流程处理；切勿在回信或页面中复述密码。"
+      },
+      "private_opening": "demo_source_dsn",
+      "history": []
+    },
     {
       "id": "northwind-base",
       "database": "northwind",

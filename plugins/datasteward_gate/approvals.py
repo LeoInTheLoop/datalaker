@@ -86,6 +86,17 @@ CREATE TABLE IF NOT EXISTS role_assignment (
     granted_by  TEXT NOT NULL,
     reason      TEXT
 );
+-- 联系人目录：这是「知道该找谁」的业务线索，不是角色授权。
+-- 它与 role_assignment 分表，避免模型仅凭转介邮件就影响审批资格。
+CREATE TABLE IF NOT EXISTS source_contacts (
+    source_id       TEXT NOT NULL,
+    email           TEXT NOT NULL,
+    display_name    TEXT NOT NULL,
+    relationship    TEXT NOT NULL,
+    recorded_from   TEXT NOT NULL,
+    recorded_at     REAL NOT NULL,
+    PRIMARY KEY (source_id, email)
+);
 -- 业务知识沉淀：问过的不再问（readme 5.7）
 CREATE TABLE IF NOT EXISTS asset_semantics (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,

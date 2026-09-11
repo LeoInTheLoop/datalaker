@@ -66,6 +66,10 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     "propose_cleaning":     (Level.L1, None),
     # 写的是我们自己的整改台账，不碰源系统也不碰 lake
     "record_finding":       (Level.L1, None),
+    # 只记录「这条数据线可以联系谁」，不写 role_assignment、不改变审批资格。
+    "register_contact":    (Level.L1, None),
+    # 仅能发给已登记联系人，正文由工具拒绝凭证与审批 token。
+    "send_contact_email":  (Level.L1, None),
     # 阶段提案：**只发问，不改东西** —— 与 propose_cleaning 同构。
     # 设成 L2 的话，「发问」这件事自己也要先被批一次，套娃。
     # 真正的门是下面那条轮级规则：没批 start_silver 就洗不了。

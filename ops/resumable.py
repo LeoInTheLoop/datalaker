@@ -31,6 +31,54 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT), str(ROOT / "services"), str(ROOT / "plugins")]
 
 
+def _active_demo_snapshot() -> dict | None:
+    """Read the trusted, read-only current Snapshot when demo scope is enabled."""
+    if os.environ.get("DEMO_SNAPSHOT_GUARD", "").lower() not in ("1", "true", "yes"):
+        return None
+    run_dir = pathlib.Path(os.environ.get("DEMO_RUN_DIR", "/runs"))
+    cases_file = pathlib.Path(os.environ.get("DEMO_CASES_FILE", "/app/demo/cases.json"))
+    try:
+        run = json.loads((run_dir / "runs.json").read_text(encoding="utf-8")).get("current")
+        if not isinstance(run, dict) or run.get("state") != "case_delivered":
+            return None
+        snapshots = json.loads(cases_file.read_text(encoding="utf-8")).get("snapshots", [])
+        return next((item for item in snapshots if isinstance(item, dict)
+                     and item.get("id") == run.get("snapshot_id")), None)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _demo_snapshot_terminal(success_events: list[dict] | None = None) -> bool:
+    """Whether the active demo Snapshot has independently reached its endpoint.
+
+    A successful ``connect_source`` normally closes its task line, but a cron
+    monitor can still observe the old pre-close state once and wake a fresh
+    model session. For a fixed Snapshot that is wasted model work and led to
+    repeated planning. The terminal fact is an emitted success notice, not a
+    model statement and not merely a source grant (a failed validation may
+    already have written a grant).
+    """
+    snapshot = _active_demo_snapshot()
+    expected = (snapshot or {}).get("expected_outcome") or {}
+    if expected.get("kind") != "credential_received":
+        return False
+    source_id = str(expected.get("source_id") or "").strip().lower()
+    if not source_id:
+        return False
+    if success_events is None:
+        try:
+            from datasteward_gate.approvals import open_store, rows_of
+            with open_store(readonly=True, init_schema=False) as st:
+                rows = rows_of(st, "SELECT payload FROM events WHERE"
+                               " kind='SOURCE_CONNECT_NOTICE_SENT' ORDER BY seq DESC LIMIT 40")
+            success_events = [json.loads(row[0] or "{}") for row in rows]
+        except Exception:  # noqa: BLE001
+            return False                    # Cannot prove terminal = do not suppress work.
+    return any(str(event.get("source_id") or "").lower() == source_id
+               and not event.get("failed") for event in success_events
+               if isinstance(event, dict))
+
+
 def _silver_ready() -> list:
     """轮开了、bronze 有表、口径也有了 —— 这些表可以洗了。
 
@@ -150,6 +198,11 @@ def _waited(r) -> str:
 
 
 def main() -> int:
+    # This is an external terminal condition for the fixed demo Snapshot. It
+    # runs before collecting resumable lines, so a stale pre-close task cannot
+    # create one more model session after the evaluated action has succeeded.
+    if _demo_snapshot_terminal():
+        return 0
     import runs
     lines = []
     try:

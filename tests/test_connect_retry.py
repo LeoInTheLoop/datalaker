@@ -254,16 +254,19 @@ out.unlink(missing_ok=True)
 TOOLS._notify_connect("northwind", "dba@acme.com（sun 转交）", [], "连不上：权限不足")
 mails = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()
          if l.strip()] if out.exists() else []
-chk("**失败通知发给 dba**（给账号的那个人）",
-    bool(mails) and mails[-1]["to"] == "dba@acme.com",
+chk("**失败结果同时发给 dba 和 owner**（修账号与知晓结果都不断链）",
+    bool(mails) and "dba@acme.com" in [m["to"] for m in mails]
+    and len({m["to"] for m in mails}) >= 2,
     str([m["to"] for m in mails]))
 
 out.unlink(missing_ok=True)
 TOOLS._notify_connect("northwind", "dba@acme.com", [("orders", 830)], "")
 mails = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()
          if l.strip()] if out.exists() else []
-chk("**成功通知发给 owner**（先接哪几张表是业务判断）",
-    bool(mails) and mails[-1]["to"] != "dba@acme.com",
+chk("**成功结果同时发给 dba 和 owner**（连接状态与后续选表都有人收到）",
+    bool(mails) and "dba@acme.com" in [m["to"] for m in mails]
+    and len({m["to"] for m in mails}) >= 2
+    and all("未接入业务表" in m["subject"] for m in mails),
     str([m["to"] for m in mails]))
 
 print(f"\n结果: {len(ok)} passed, {len(bad)} failed")

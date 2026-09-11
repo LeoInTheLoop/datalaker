@@ -60,6 +60,9 @@ services:
       CLAW_ROOT: /app
       DEMO_AGENT_STATUS_DIR: /status
       DEMO_CONTROL_DIR: /control
+      DEMO_RUN_DIR: /runs
+      DEMO_SNAPSHOT_GUARD: "1"
+      DEMO_CASES_FILE: /app/demo/cases.json
       NOTIFY_CHANNEL: email
       MAIL_TRANSPORT: smtp
       SMTP_HOST: greenmail
@@ -94,6 +97,9 @@ services:
       - hermes_demo_state:/state/hermes
       - demo_agent_status:/status
       - demo_control:/control
+      - demo_runs:/runs:ro
+      - ../demo:/app/demo:ro
+      - ../ops:/app/ops:ro
 
   demo-ui:
     build:
@@ -127,6 +133,7 @@ services:
       - ../plugins:/app/plugins:ro
       - ../tests:/app/tests:ro
       - ../demo:/app/demo:ro
+      - ../infra:/app/infra:ro
       - demo_agent_status:/status:ro
       - demo_control:/control
       - demo_runs:/runs

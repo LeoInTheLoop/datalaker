@@ -1210,28 +1210,31 @@ def _mail_of(text: str) -> str:
 
 
 def _notify_connect(sid, given_by, tables, err, approval_id=""):
-    """把接入结果回给人。**发不出去要说出来**，不吞。"""
-    to, subj = "", ""
+    """把连接结果回给提供凭证者和后续表范围负责人。"""
+    recipients, subj = [], ""
+    st_ = None
     try:
         import notify
-        st_ = None
         try:
             from datasteward_gate import store
             st_ = store()
         except Exception:                                    # noqa: BLE001
             pass
-        # **连不上时该找谁**：给连接串的那个人，不是数据 owner。
-        # 实测撞过 —— dba 给了个在这个库上没权限的账号，失败通知却发给了
-        # wang（owner），而 wang 手里没有账号。能修的人一直不知道出了事。
-        # 成功时反过来：先接哪几张表是业务判断，那是 owner 的事。
-        to = (_mail_of(given_by) or _resolve_to(st_, "owner") or "") if err \
-            else (_resolve_to(st_, "owner") or _mail_of(given_by) or "")
+        # 连接提供者需要知道账号是否可用；数据负责人需要知道何时能开始决定
+        # 首批表。两人都收结果，避免「接上了但没人知道」或「坏账号只有 owner
+        # 知道」的断链。相同地址只投递一次。
+        provider = _mail_of(given_by)
+        owner = _resolve_to(st_, "owner")
+        recipients = list(dict.fromkeys(x for x in (provider, owner) if x))
         if err:
-            body = (f"{sid} 的接入审批已经通过，但按这份连接信息**连不上**：\n\n"
+            body = (f"{sid} 的只读连接验证失败。\n\n"
+                    "本 Snapshot 未指定、未读取或接入任何业务表。\n\n"
+                    f"审批已经通过，但按这份连接信息**连不上**：\n\n"
                     f"  {err}\n\n"
                     f"下一步：麻烦确认一下账号/口令/网络是否可达，"
-                    f"再把新的连接信息发我。在收到之前我不会反复重试。")
-            subj = f"[数据管家] {sid} 接入失败，需要新的连接信息"
+                    f"再把新的连接信息发我。在收到之前我不会反复重试。"
+                    "数据库管理员修正连接信息后，数据负责人再收到新的结果。")
+            subj = f"[数据管家] {sid} 连接失败（未接入业务表）"
         else:
             # `list_tables` 返回 (表名, 行数估算) 的元组列表。
             # 行数是**估算**，-1 表示未知 —— 别把 -1 印成「-1 行」。
@@ -1242,12 +1245,15 @@ def _notify_connect(sid, given_by, tables, err, approval_id=""):
                         else f"{t[0]}（行数未知）"
                 return str(t)
             names = "、".join(_one(t) for t in tables[:12])
-            body = (f"{sid} 已经接进来了，能看到 {len(tables)} 张表：\n\n"
+            body = (f"{sid} 的只读连接验证成功。\n\n"
+                    "本 Snapshot 未指定、未复制或接入任何业务表；"
+                    "下面仅是连接可访问性校验结果，不代表选择了这些表。\n\n"
+                    f"能看到 {len(tables)} 张表：\n\n"
                     f"  {names}{'……' if len(tables) > 12 else ''}\n\n"
-                    f"下一步：告诉我先接哪几张（接哪张表优先是业务判断，"
-                    f"不是技术判断）。每张表的接入我会单独发审批给负责人。")
-            subj = f"[数据管家] {sid} 已接入，共 {len(tables)} 张表"
-        # 失败通知是 DBA **回一个新账号**的那封信 —— 归属最要紧的一封。
+                    "本 Snapshot 到此结束。下一 Snapshot 由数据负责人明确首批表；"
+                    "每张表的接入会单独发审批给负责人。")
+            subj = f"[数据管家] {sid} 连接成功（未接入业务表）"
+        # 结果邮件与审批同属一条线，方便人回复连接信息时确定性回到本轮。
         # 票上记着这次接入属于哪条线，从它拿 run_id。
         run_id = ""
         try:
@@ -1255,27 +1261,157 @@ def _notify_connect(sid, given_by, tables, err, approval_id=""):
             run_id = mail_threads.run_of_approval(approval_id)
         except Exception:                                    # noqa: BLE001
             pass
-        result = notify.get().send_notice(to, subj, body, run_id=run_id)
-        if st_ is not None:
+        delivered, delivery = [], {}
+        for to in recipients:
+            try:
+                result = notify.get().send_notice(to, subj, body, run_id=run_id)
+                delivered.append(to)
+                delivery[to] = ((result or {}).get("kind", "sent")
+                                if isinstance(result, dict) else "sent")
+            except Exception as exc:                         # noqa: BLE001
+                delivery[to] = f"failed:{type(exc).__name__}"
+        if st_ is not None and delivered:
             st_.append_event(
                 "connect", "SOURCE_CONNECT_NOTICE_SENT",
-                json.dumps({"source_id": sid, "to": to, "subject": subj,
+                json.dumps({"source_id": sid, "to": delivered, "subject": subj,
                             "failed": bool(err),
-                            "delivery": (result or {}).get("kind", "sent")
-                                        if isinstance(result, dict) else "sent"},
+                            "delivery": delivery},
                            ensure_ascii=False))
+        elif st_ is not None:
+            st_.append_event(
+                "connect", "SOURCE_CONNECT_NOTICE_FAILED",
+                json.dumps({"source_id": sid, "to": recipients, "subject": subj,
+                            "delivery": delivery}, ensure_ascii=False))
     except Exception:                                        # noqa: BLE001
         if st_ is not None:
             try:
                 st_.append_event(
                     "connect", "SOURCE_CONNECT_NOTICE_FAILED",
-                    json.dumps({"source_id": sid, "to": to,
+                    json.dumps({"source_id": sid, "to": recipients,
                                 "subject": subj}, ensure_ascii=False))
             except Exception:                                # noqa: BLE001
                 pass
 
 
+def _register_contact(args: dict, **_: Any) -> str:
+    """登记某数据源可联系的人；它不改变任何角色或数据权限。"""
+    import re
+    import time
+
+    source_id = str(args.get("source_id") or "").strip().lower()
+    email = str(args.get("email") or "").strip().lower()
+    display_name = str(args.get("display_name") or "").strip()
+    relationship = str(args.get("relationship") or "技术联系人").strip()
+    recorded_from = str(args.get("recorded_from") or "当前邮件").strip()
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", source_id):
+        return "错误：source_id 必须是稳定的数据源 id，例如 northwind。"
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        return "错误：需要有效的联系人 email。"
+    if not display_name:
+        display_name = email.split("@", 1)[0]
+    if any(len(value) > limit for value, limit in (
+            (display_name, 100), (relationship, 100), (recorded_from, 240))):
+        return "错误：联系人名称、关系或来源说明过长。"
+
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        from datasteward_gate.approvals import open_store
+        with open_store(readonly=False, init_schema=True) as st:
+            values = (source_id, email, display_name, relationship, recorded_from, time.time())
+            if type(st).__name__ == "PgStore":
+                with st.db.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO source_contacts (source_id,email,display_name,relationship,"
+                        "recorded_from,recorded_at) VALUES (%s,%s,%s,%s,%s,%s) "
+                        "ON CONFLICT (source_id,email) DO UPDATE SET "
+                        "display_name=EXCLUDED.display_name, relationship=EXCLUDED.relationship, "
+                        "recorded_from=EXCLUDED.recorded_from, recorded_at=EXCLUDED.recorded_at",
+                        values)
+            else:
+                st.db.execute(
+                    "INSERT INTO source_contacts (source_id,email,display_name,relationship,"
+                    "recorded_from,recorded_at) VALUES (?,?,?,?,?,?) "
+                    "ON CONFLICT(source_id,email) DO UPDATE SET "
+                    "display_name=excluded.display_name, relationship=excluded.relationship, "
+                    "recorded_from=excluded.recorded_from, recorded_at=excluded.recorded_at",
+                    values)
+                st.db.commit()
+    except Exception as exc:  # noqa: BLE001
+        return f"联系人登记失败：{type(exc).__name__}: {str(exc)[:160]}"
+    return (f"已把 {display_name} <{email}> 登记为 {source_id} 的{relationship}。"
+            "这只用于后续联系，不授予角色、审批或数据权限。")
+
+
+def _send_contact_email(args: dict, **_: Any) -> str:
+    """只向已登记联系人发普通工作邮件，且拒绝把凭证带出系统。"""
+    import re
+
+    source_id = str(args.get("source_id") or "").strip().lower()
+    to = str(args.get("to") or "").strip().lower()
+    subject = str(args.get("subject") or "").strip()
+    body = str(args.get("body") or "").strip()
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", source_id):
+        return "错误：source_id 必须是稳定的数据源 id，例如 northwind。"
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", to):
+        return "错误：需要已登记联系人的有效邮箱。"
+    if not subject or not body or len(subject) > 180 or len(body) > 3000:
+        return "错误：邮件需要主题和正文，且主题不超过 180 字、正文不超过 3000 字。"
+    # 联系人目录是联络许可，不是秘密外发许可。连接串、口令、审批链接都
+    # 不得通过这条通道带出去；拿到这些内容时应使用受控工具而非转发。
+    if re.search(r"(?i)(postgres(?:ql)?://|\bpassword\s*[=:]|\bpasswd\s*[=:]|"
+                 r"\btoken\s*[=:]|/(?:approve|deny|choose)\?t=)", subject + "\n" + body):
+        return "错误：联系人邮件不能包含连接串、口令、token 或审批链接。"
+
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        from datasteward_gate.approvals import open_store, rows_of
+        with open_store(readonly=True, init_schema=True) as st:
+            known = rows_of(st, "SELECT 1 FROM source_contacts WHERE source_id={0} "
+                            "AND lower(email)=lower({0}) LIMIT 1", (source_id, to))
+            sent = rows_of(st, "SELECT 1 FROM mail_threads WHERE to_addr={0} "
+                           "AND subject={0} AND kind='notice' LIMIT 1", (to, subject))
+        if not known:
+            return (f"错误：{to} 尚未登记为 {source_id} 的联系人。"
+                    "先用 register_contact 记录邮件里明确给出的对接人。")
+        if sent:
+            return f"同一主题的联系人邮件已发给 {to}，不重复发送。"
+        import notify
+        result = notify.get().send_notice(to, subject, body)
+    except Exception as exc:  # noqa: BLE001
+        return f"联系人邮件发送失败：{type(exc).__name__}: {str(exc)[:160]}"
+    return notify.sent_line(result, to)
+
+
 _SCHEMAS.update({
+    "register_contact": {
+        "name": "register_contact",
+        "description": (
+            "把邮件中明确给出的对接人登记到数据源联系人目录。"
+            "它只保存联络线索，**不授予角色、审批或任何数据权限**。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "source_id": {"type": "string", "description": "稳定的数据源 id，如 northwind"},
+            "email": {"type": "string", "description": "对接人的邮箱，必须来自当前邮件或已给背景"},
+            "display_name": {"type": "string", "description": "对接人姓名或称呼"},
+            "relationship": {"type": "string", "description": "例如技术联系人，默认技术联系人"},
+            "recorded_from": {"type": "string", "description": "线索来源，例如 boss@acme.com 的转介"}},
+            "required": ["source_id", "email"]},
+    },
+    "send_contact_email": {
+        "name": "send_contact_email",
+        "description": (
+            "向某数据源目录中**已登记**的联系人发一封普通工作邮件。"
+            "只能发给该目录中的邮箱；正文不得包含连接串、密码、token 或审批链接。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "source_id": {"type": "string", "description": "稳定的数据源 id，如 northwind"},
+            "to": {"type": "string", "description": "已登记联系人的邮箱"},
+            "subject": {"type": "string", "description": "邮件主题"},
+            "body": {"type": "string", "description": "普通工作正文；绝不能粘贴连接串、密码、token 或审批链接"}},
+            "required": ["source_id", "to", "subject", "body"]},
+    },
     "connect_source": {
         "name": "connect_source",
         "description": (
@@ -1435,6 +1571,8 @@ _HANDLERS = {
     "sql_query": _sql_query,
     "describe_asset": _describe_asset,
     "connect_source": _connect_source,
+    "register_contact": _register_contact,
+    "send_contact_email": _send_contact_email,
     "propose_stage_decision": _propose_stage_decision,
     "apply_cleaning_rule": _apply_cleaning_rule,
     "publish_gold": _publish_gold,

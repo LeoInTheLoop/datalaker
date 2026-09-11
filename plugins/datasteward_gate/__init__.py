@@ -15,10 +15,11 @@ import json
 import time
 import threading
 import os
+import pathlib
 
 from .approvals import Store, open_store, rows_of
 from .policy import (HERMES_DANGEROUS, Level, arg_denied, effective,
-                     is_declared, lookup, manual_approver)
+                     is_declared, lookup, manual_approver, POLICY)
 
 DB_PATH = os.environ.get("DATASTEWARD_DB", os.path.expanduser("~/.datalaker/approvals.db"))
 # 每个线程一个句柄：Hermes 在线程池里跑工具，SQLite 连接不许跨线程用
@@ -125,6 +126,54 @@ def _budget_exceeded():
     return over
 
 
+def _demo_snapshot_scope() -> tuple[str, tuple[str, ...], str] | None:
+    """Return the selected demo Snapshot's bounded tool scope, if enabled.
+
+    A Snapshot is an isolated, fixed moment in a Case, not a miniature copy of
+    the whole governance programme. Its permitted side effects therefore
+    belong to the trusted demo adapter's data file and run record, rather than
+    to model instructions. The agent only gets a read-only mount of that
+    record; it cannot broaden its own scope.
+
+    This guard is deliberately opt-in and demo-only. Normal deployments and
+    regression drivers do not set ``DEMO_SNAPSHOT_GUARD`` and keep their full
+    policy surface unchanged.
+    """
+    if os.environ.get("DEMO_SNAPSHOT_GUARD", "").lower() not in ("1", "true", "yes"):
+        return None
+    run_dir = pathlib.Path(os.environ.get("DEMO_RUN_DIR", "/runs"))
+    cases_file = pathlib.Path(os.environ.get("DEMO_CASES_FILE", "/app/demo/cases.json"))
+    try:
+        run = json.loads((run_dir / "runs.json").read_text(encoding="utf-8")).get("current")
+        if not isinstance(run, dict) or run.get("state") != "case_delivered":
+            return None
+        snapshot_id = str(run.get("snapshot_id") or "")
+        snapshots = json.loads(cases_file.read_text(encoding="utf-8")).get("snapshots", [])
+        snapshot = next((item for item in snapshots
+                         if isinstance(item, dict) and item.get("id") == snapshot_id), None)
+        scope = tuple(str(name) for name in (snapshot or {}).get("tool_scope", [])
+                      if str(name))
+        terminal = str((snapshot or {}).get("terminal_condition") or "")
+        return (snapshot_id, scope, terminal) if scope else None
+    except (OSError, json.JSONDecodeError, TypeError):
+        # A demo presentation constraint must never relax normal governance
+        # policy merely because its observer files are temporarily unavailable.
+        return None
+
+
+def _snapshot_scope_block(tool_name: str):
+    """Keep a selected demo Snapshot from spilling into later workflow steps."""
+    context = _demo_snapshot_scope()
+    if context is None or tool_name not in POLICY:
+        return None
+    snapshot_id, allowed, terminal = context
+    if tool_name in allowed:
+        return None
+    end = f"；终点是{terminal}" if terminal else ""
+    return (f"[SNAPSHOT_SCOPE] 当前 Snapshot（{snapshot_id}）只允许："
+            f"{', '.join(allowed)}。{tool_name} 属于后续流程，本轮不执行{end}。")
+
+
 def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     # `effective` = 策略表 + 手动模式提级（MANUAL_MODE）。
     # 提级发生在这一行，不是散在下面每个分支里——散着写必然漏一个，
@@ -169,6 +218,13 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     if why:
         return {"action": "block",
                 "message": f"[L4] {tool_name} 这次调用被拒绝：{why}。"}
+
+    # Snapshot 是一个固定时刻的真实链路测试，不是让模型接着跑完整项目。
+    # 在建票和工具 handler 之前收口，避免一次连接成功后继续查表、提阶段
+    # 问题或再次接入。正常部署不启用这条 demo-only scope。
+    why = _snapshot_scope_block(tool_name)
+    if why:
+        return {"action": "block", "message": why}
 
     # 没人提过的源，碰都不该碰（readme 8 / evals v2 发现机制）
     why = _source_not_granted(st, args, tool_name)

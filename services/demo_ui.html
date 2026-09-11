@@ -1,5 +1,5 @@
 <!doctype html><html lang=zh-CN><meta charset=utf-8>
-<title>Data Steward Claw · 真模型演练</title>
+<title>Data Steward Claw · Snapshot Case</title>
 <style>
 :root{--ink:#17202a;--dim:#59636e;--line:#e2e7ec;--bg:#f4f6f8;--card:#fff;
       --ok:#087443;--bad:#b42318;--wait:#a15c00;--accent:#1d4ed8;--accent-bg:#eef4ff}
@@ -35,6 +35,7 @@ th{color:var(--dim);font-weight:500;background:#fafbfc}
 .pill.model{background:#f2ecfb;color:#5b3f96}
 .pill.human{background:#e8f1fb;color:#1c4f91}
 .pill.sys{background:#eef1f4;color:#54606c}
+.pill.fresh{background:#dcfce7;color:#166534;font-weight:700}
 
 /* 1 说明条 */
 .intro summary{cursor:pointer;font-weight:600;list-style:none}
@@ -98,7 +99,7 @@ body.devmode .devhide{display:none}
 </style>
 
 <header class=top>
-  <div class=brand>Data Steward Claw <span>· 真模型演练</span></div>
+  <div class=brand>Data Steward Claw <span>· Snapshot Case</span></div>
   <div id=gateway class=hint></div>
   <div class=spacer></div>
   <div id=runline class=hint></div>
@@ -110,43 +111,38 @@ body.devmode .devhide{display:none}
 <details class="card intro" id=intro>
   <summary>这个页面是什么？第一次来先看这三句</summary>
   <ol>
-    <li><b>这是什么。</b>一个 AI 数据管家在真的干活：它读一封业务邮件，自己判断要什么数据、
-        找谁要权限，把数据接进数据湖、清洗、发布，最后回答业务问题。
-        模型、邮件、数据库、审批全是真的在跑，页面不预写任何结果。</li>
-    <li><b>你会看到什么。</b>下面是一条对话时间线：左边是人，右边是管家。
-        它每做一步都会留下可以独立核对的痕迹——真实 SQL、湖里的表、审批记录。</li>
-    <li><b>你要做什么。</b>你扮演公司里的人。全页只有一个蓝框区域会告诉你现在该干嘛：
-        要么点「开始」，要么批一张审批票，要么回一封信。<b>没提示的时候就是在等管家，什么都不用做。</b></li>
+    <li><b>这是什么。</b>Case 是固定环境：谁负责什么、有哪些数据和权限边界。Snapshot 是这个
+        环境的一个时刻：此前邮件、本轮可见源表和一封当前来信。模型会在真实 Hermes 运行时拿到
+        所选 Snapshot 及已注册的工具，自行决定下一动作。</li>
+    <li><b>你会看到什么。</b>快照交给模型后，下面只显示它真实发出的邮件、实际调用的工具、
+        审批结果和已留下的数据记录；页面不预写答案，也不安排模型的步骤。</li>
+    <li><b>你要做什么。</b>开始一份快照后，只有模型真的提出审批或真的发来问题时才需要回应。
+        没有新输入时，页面只观察，不替人或模型补动作。</li>
   </ol>
-  <p class=hint>页面本身没有任何治理权限：它只能替你发邮件、把你点的审批链接转给独立的审批进程、
-     以只读方式读取证据。模型回什么、调哪个工具，全部由 Hermes 决定。</p>
+  <p class=hint>页面没有治理权限：它只能投递人的真实回信、把审批链接转给独立 callback，
+     并只读展示记录。工具 schema 由 Hermes 运行时提供，不由网页伪造。</p>
 </details>
 
 <section class=card>
-  <div class=steps id=steps></div>
-  <p id=stepnote class=hint style="margin:11px 0 0"></p>
+  <div id=runstate></div>
+</section>
+
+<section class=card>
+  <div id=caseOutcome></div>
 </section>
 
 <section class="card turn" id=turn></section>
 
 <section class=card>
-  <h2>对话时间线</h2>
-  <p class=hint style="margin:-4px 0 10px">人在左、管家在右，中间的灰线是系统事件。Case 预设内容会标出来，不冒充模型输出。</p>
+  <h2>对话时间线 <button id=backendToggle>显示模型后台动作</button></h2>
+  <p class=hint id=timelineHint style="margin:-4px 0 10px">默认只看对话和人工审批；需要核对模型调用或系统事件时再展开。</p>
   <div class=tl id=timeline></div>
 </section>
 
-<section class=card>
-  <h2>证据</h2>
-  <div class=tabs id=tabs>
-    <button data-tab=proof class=on>凭什么信</button>
-    <button data-tab=data>数据变成了什么</button>
-    <button data-tab=work>管家做过什么</button>
-    <button data-tab=cross>跨表关联</button>
-  </div>
-  <div id=tab-proof></div>
-  <div id=tab-data hidden></div>
-  <div id=tab-work hidden></div>
-  <div id=tab-cross hidden></div>
+<section class=card id=actionsCard hidden>
+  <h2>模型实际调用</h2>
+  <p class=hint style="margin:-4px 0 10px">只列本轮治理台账已经记录到的动作；没有记录就不把它算作模型做过。</p>
+  <div id=actions></div>
 </section>
 
 <section class="card dev">
@@ -165,7 +161,9 @@ body.devmode .devhide{display:none}
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const CLAW = 'claw@acme.test';
-let meta = {cases: [], snapshots: []}, last = {}, mailCache = [], busy = false;
+let meta = {cases: [], snapshots: []}, last = {}, mailCache = [], busy = false,
+    showBackend = false, followUp = null;
+let choosingNewCase = false;
 
 async function api(path, method='GET', body){
   const r = await fetch(path, {method, headers:{'Content-Type':'application/json'},
@@ -176,6 +174,54 @@ async function api(path, method='GET', body){
 }
 function say(msg){ $('#toast').textContent = msg; $('#error').textContent = ''; }
 function fail(msg){ $('#error').textContent = msg; $('#toast').textContent = ''; }
+
+function mailKey(m){ return m.id || [m.from, m.subject, m.date, m.box].join('|'); }
+function eventKey(e){ return [e.kind, e.time, e.payload].join('|'); }
+function beginFollowUp(s, messages){
+  followUp = {
+    runId: (s.run || {}).id || '',
+    mailBefore: new Set((messages || []).map(mailKey)),
+    eventBefore: new Set((s.events || []).map(eventKey)),
+    approvalBefore: new Set((s.approvals || []).map(a => String(a.id))),
+    newMail: new Set(), newEvents: new Set(), newApprovals: new Set(),
+    newDecisions: new Set(),
+  };
+}
+function observeFollowUp(s, messages){
+  if(!followUp) return;
+  if(followUp.runId !== ((s.run || {}).id || '')){ followUp = null; return; }
+  for(const m of messages || []){
+    const key = mailKey(m);
+    if(!followUp.mailBefore.has(key)) followUp.newMail.add(key);
+  }
+  for(const e of s.events || []){
+    const key = eventKey(e);
+    if(!followUp.eventBefore.has(key)){
+      followUp.newEvents.add(key);
+      if(e.kind.startsWith('DECIDED_')) followUp.newDecisions.add(key);
+    }
+  }
+  for(const a of s.approvals || [])
+    if(!followUp.approvalBefore.has(String(a.id))) followUp.newApprovals.add(String(a.id));
+}
+function isNewMail(m){ return !!followUp && followUp.newMail.has(mailKey(m)); }
+function isNewEvent(e){ return !!followUp && followUp.newEvents.has(eventKey(e)); }
+function isNewApproval(id){ return !!followUp && followUp.newApprovals.has(String(id || '')); }
+function followUpText(){
+  if(!followUp) return '';
+  const human = followUp.newDecisions.size;
+  const backend = followUp.newEvents.size - human;
+  const mail = followUp.newMail.size;
+  const approvals = followUp.newApprovals.size;
+  if(!human && !backend && !mail && !approvals)
+    return '审批已提交，正在等管家读取真实决定；页面会自动标出之后新出现的内容。';
+  const parts = [];
+  if(human) parts.push(human + ' 条人工决定');
+  if(mail) parts.push(mail + ' 封回信');
+  if(backend) parts.push(backend + ' 项模型后台动作');
+  if(approvals) parts.push(approvals + ' 张新审批票');
+  return '批准后新出现：' + parts.join('、') + '。';
+}
 
 /* ---------- 文案映射：把机器码翻译成人话 ---------- */
 
@@ -200,6 +246,7 @@ const RUN_STATE = {
 
 const TOOL_CN = {
   connect_source:'接上源库', list_source_tables:'列出源库有哪些表',
+  skill_view:'读取工作说明', todo_list:'查看待办',
   get_table_metadata:'读一张表的结构', describe_asset:'查资产档案',
   profile_table:'给数据做画像', scan_permissions:'扫一遍权限',
   sql_query:'跑一条查询', ingest_table:'把源表复制进数据湖',
@@ -210,6 +257,7 @@ const TOOL_CN = {
   confirm_link:'确认跨表关联', publish_gold:'发布可用表',
   grant_read:'授予读权限', answer_with_link:'用关联数据回答业务问题',
   record_finding:'记一条发现', trace_asset:'追数据来历',
+  register_contact:'登记数据源联系人', send_contact_email:'给联系人发邮件',
   propose_stage_decision:'提出阶段决定', full_refresh:'整表重刷',
 };
 const toolCN = t => TOOL_CN[t] ? TOOL_CN[t] + '（' + t + '）' : (t || '未知动作');
@@ -219,18 +267,23 @@ function eventCN(e){
   const tool = p.tool || p.tool_name || '';
   const k = e.kind;
   if(k === 'TOOL_ok')       return '管家完成了：' + toolCN(tool);
-  if(k === 'TOOL_blocked')  return '门禁拦下了：' + toolCN(tool) + (p.msg ? ' —— ' + p.msg : '');
-  if(k === 'TOOL_error')    return '动作出错：' + toolCN(tool) + (p.msg ? ' —— ' + p.msg : '');
+  if(k === 'TOOL_blocked')  return '这一步暂不能执行：' + toolCN(tool);
+  if(k === 'TOOL_error')    return '动作出错：' + toolCN(tool);
   if(k === 'BLOCKED_SQL_REJECTED') return 'SQL 校验没放行' + (p.msg ? '：' + p.msg : '');
   if(k === 'BLOCKED_NEED_DSN')     return '缺可用的数据库账号，门禁直接拒绝，没有发审批';
+  if(k === 'BLOCKED_PENDING_APPROVAL') return '已提交审批，等待负责人决定：' + toolCN(tool);
   if(k === 'APPROVAL_REQUESTED')   return '管家发起审批：' + toolCN(tool) + ' —— 等人点链接';
   if(k === 'AMEND_PENDING')        return '还没人批的那张票被改了参数，重新发信让人看清批的是什么';
   if(k === 'NEW_TICKET_AFTER_DECISION') return '旧票已经有人决定过，改它就是伪造授权，所以另开了一张新票';
   if(k === 'SOURCE_CONNECT_FAILED')     return '这个数据库账号连不上，已记下，不再拿它重试';
-  if(k === 'SOURCE_CONNECT_NOTICE_SENT')return '把连接结果通知了' + (p.to ? ' ' + p.to : '相关的人');
-  if(k.startsWith('DECIDED_'))     return '审批结果：' + (k.slice(8) === 'approve' ? '批准' : k.slice(8));
-  if(k.startsWith('MAIL_') || k.startsWith('NOTICE_')) return '发出一封邮件（' + k + '）';
-  return k + (e.payload ? ' · ' + e.payload : '');
+  if(k === 'SOURCE_CONNECT_NOTICE_SENT')return '把连接结果通知了' +
+    (p.to ? ' ' + (Array.isArray(p.to) ? p.to.join('、') : p.to) : '相关的人');
+  if(k.startsWith('DECIDED_'))     return '人工审批：' + (k.slice(8).toLowerCase() === 'approve' ? '批准' : '拒绝');
+  if(k === 'MAIL_SENT')            return '已向相关负责人发出通知';
+  if(k === 'RECEIPT_SENT')         return '已向审批人发送回执';
+  if(k === 'CRON_JOB_CREATED')     return '系统已就绪，恢复和巡检作业已登记';
+  if(k.startsWith('MAIL_') || k.startsWith('NOTICE_')) return '系统已发出通知';
+  return '系统记录了：' + k;
 }
 
 /* check 名 → 人话 + 为什么这条重要 */
@@ -239,6 +292,14 @@ const CHECK_CN = {
     '证明页面看到的动作来自真实模型，不是预录的脚本'],
   'GreenMail 真实收发': ['邮件真的进出了邮件服务器',
     '人和管家之间的往来是真邮件，不是页面里的假对话'],
+  '联系人目录落库': ['数据库管理员已进入数据源联系人目录',
+    '联系人登记只用于后续联络，不会改变角色、审批或数据权限'],
+  '给数据库管理员的真实邮件': ['数据库管理员的真实收件箱收到了模型邮件',
+    '核对的是 GreenMail 实际收件箱，不是模型说自己发了'],
+  '数据库管理员的凭证安全到达': ['数据库管理员的连接信息真的进了模型收件箱',
+    '网页只显示脱敏后的邮件，密码不会返回浏览器'],
+  '按凭证发起受控连接': ['模型用连接信息进入受控接入',
+    '接入仍会先走审批，模型不能自行把凭证变成数据权限'],
   'Agent 无 decisions 写权限': ['管家不能自己批准自己',
     '审批结果只能由独立进程用独立数据库账号写入；这是数据库授权拦的，不是靠提示词'],
   '源库无写权限': ['管家碰不了生产源库的数据',
@@ -264,40 +325,109 @@ const checkCN = n => CHECK_CN[n] || [n, ''];
 const STATE_CN = {pass:'通过', fail:'不符', pending:'还没走到这步', 'n/a':'本 Case 不涉及'};
 const STATE_ICON = {pass:'✓', fail:'✗', pending:'○', 'n/a':'—'};
 
-/* ---------- 进度 ---------- */
+/* ---------- 当前状态，不预排流程 ---------- */
 
-const STEPS = ['准备环境', '把任务交给管家', '管家干活', '需要你决定', '出结果'];
-
-function stepOf(s){
-  if(!s.run) return {i:-1, note:'还没开始。选一个 Case，点下面的蓝色按钮。'};
+function runPhase(s){
+  if(choosingNewCase) return {kind:'not_started', text:'正在选择下一份 Snapshot；当前运行不会被改变。'};
+  if(!s.run) return {kind:'not_started', text:'还没有把 Snapshot 交给模型。'};
+  if((s.case_result || {}).state === 'pass')
+    return {kind:'complete', text:'Snapshot 已完成：预期结果已由独立记录核对通过。'};
   const m = RUN_STATE[s.run.state];
-  if(m && m.step === -1) return {i:-2, note:m.text + '。' + m.next, why:m.text};
+  if(m && m.step === -1) return {kind:'failed', text:m.text, next:m.next};
   const pending = (Array.isArray(s.approvals) ? s.approvals : []).filter(x => !x.used);
-  const lake = s.lake || {};
-  const done = (s.answer_comparison || {}).matched
-            || Object.keys(lake.gold || {}).length > 0;
-  if(done) return {i:4, note:'这一轮有产出了。到下面「证据」里逐条核对。'};
-  if(pending.length) return {i:3, note:'管家申请了 ' + pending.length + ' 个动作，在等你批。'};
-  if(m && m.step === 0) return {i:0, note:m.text + '。' + m.next};
+  if(pending.length) return {kind:'approval', text:'模型已申请 ' + pending.length + ' 个受控动作，正在等真实审批。'};
+  if(m && m.step === 0) return {kind:'preparing', text:m.text + '。' + m.next};
   if(m && m.step === 1){
-    const ev = Array.isArray(s.events) ? s.events.length : 0;
-    return ev ? {i:2, note:'管家在工作中。它每做一步都会在下面留痕。'}
-              : {i:1, note:m.text + '。' + m.next};
+    const events = Array.isArray(s.events) ? s.events.length : 0;
+    return {kind:'running', text:events
+      ? 'Snapshot 已交给模型；它正在根据当前状态和运行时工具决定下一动作。'
+      : m.text + '。' + m.next};
   }
-  return {i:1, note:''};
+  return {kind:'running', text:'正在等待模型或外部状态带来下一动作。'};
 }
 
-function renderSteps(s){
-  const st = stepOf(s);
-  $('#steps').innerHTML = STEPS.map((name, i) => {
-    let cls = 'step';
-    if(st.i === -2) cls += (i === 0 ? ' bad' : '');
-    else if(i < st.i) cls += ' done';
-    else if(i === st.i) cls += ' now';
-    return '<div class="' + cls + '"><b>' + (i+1) + '. ' + name + '</b></div>';
-  }).join('');
-  $('#stepnote').innerHTML = (st.i === -2 ? '<b class=bad>卡住了：</b>' : '') + esc(st.note || '');
-  return st;
+function personName(identity){
+  const name = actor(identity).toLowerCase();
+  return ({boss:'老板', wang:'王工', dba:'数据库管理员', steward:'数据负责人', claw:'管家'})[name] || name || '相关人员';
+}
+
+function selectedCaseId(s){
+  if(!choosingNewCase && s.run && s.run.case_id) return s.run.case_id;
+  return ($('#caseSel') && $('#caseSel').value) || (meta.cases[0] || {}).id;
+}
+
+function selectedSnapshotId(s){
+  if(!choosingNewCase && s.run && s.run.snapshot_id) return s.run.snapshot_id;
+  const c = caseById(selectedCaseId(s));
+  return ($('#snapSel') && $('#snapSel').value) || ((c || {}).snapshots || [])[0];
+}
+
+function snapshotContext(s){
+  const c = caseById(selectedCaseId(s));
+  const snapshot = snapById(selectedSnapshotId(s));
+  return {case:c, snapshot:snapshot};
+}
+
+function currentStory(s){
+  const context = snapshotContext(s), c = context.case, snapshot = context.snapshot;
+  if(!c || !snapshot) return '选定 Snapshot 后，模型只会看到这个时刻的邮件、状态和本轮可见源表。';
+  if(!s.run || choosingNewCase)
+    return '固定环境不变；当前预览「' + snapshot.title + '」，模型只会从这个时刻的邮件、状态和本轮可见源表继续判断。';
+  if((s.case_result || {}).state === 'pass')
+    return '起因是' + personName((snapshot.opening || {}).from) + '提供了当前连接信息；'
+      + '连接已在负责人批准后成功完成，本 Snapshot 已在终点收口。';
+  const events = Array.isArray(s.events) ? s.events : [];
+  const has = kind => events.some(e => e.kind === kind);
+  const hasTool = tool => events.some(e => {
+    try { return e.kind === 'TOOL_ok' && JSON.parse(e.payload || '{}').tool === tool; }
+    catch(_) { return false; }
+  });
+  const opening = snapshot.opening || {};
+  const cause = personName(opening.from) + '因「' + (opening.subject || '当前来信') + '」要求处理这份数据';
+  const inspected = hasTool('profile_table') || hasTool('list_source_tables');
+  const pending = (Array.isArray(s.approvals) ? s.approvals : []).filter(a => !a.used);
+  if(pending.length)
+    return '起因是' + cause + '；模型' + (inspected ? '已查看源表和数据画像' : '已收到请求') +
+      (has('BLOCKED_NEED_DSN') ? '，但缺少可用连接信息，数据尚未落湖' : '') +
+      '，现正等待' + personName(pending[0].approver) + '审批「' + toolCN(pending[0].tool) + '」。';
+  if(has('BLOCKED_NEED_DSN'))
+    return '起因是' + cause + '；模型' + (inspected ? '已查看源表和数据画像' : '正在核对输入') +
+      '，但缺少可用连接信息，数据尚未落湖；它会根据后续真实回信决定下一步。';
+  if(inspected)
+    return '起因是' + cause + '；模型已查看源表和数据画像，正根据已有邮件与真实工具结果决定下一步。';
+  return '起因是' + cause + '；Snapshot 已交给模型，正等待它的第一条真实动作或回信。';
+}
+
+function renderRunState(s){
+  const phase = runPhase(s);
+  const cls = phase.kind === 'failed' ? 'bad' : phase.kind === 'approval' ? 'wait' :
+    phase.kind === 'complete' ? 'pass' : 'hint';
+  const afterApproval = followUpText();
+  $('#runstate').innerHTML = '<h2>' + (phase.kind === 'failed' ? '这份 Snapshot 已中断' :
+    phase.kind === 'complete' ? '这份 Snapshot 已完成' : '当前状态') +
+    '</h2><p class="' + cls + '" style="margin:0">' + esc(phase.text) + '</p>' +
+    '<p class=hint style="margin:9px 0 0">' + esc(currentStory(s)) + '</p>' +
+    (afterApproval ? '<p class=wait style="margin:9px 0 0"><span class="pill fresh">新</span> ' +
+      esc(afterApproval) + '</p>' : '');
+  return phase;
+}
+
+function renderCaseOutcome(s){
+  const el = $('#caseOutcome'), result = s.case_result || {};
+  if(!s.run || choosingNewCase){
+    el.innerHTML = '<h2>Snapshot 判定</h2><p class=hint>模型执行后，会用当前 Snapshot 的隐藏预期结果与真实记录核对；预期结果不会发送给模型。</p>';
+    return;
+  }
+  const state = result.state || 'pending';
+  const label = state === 'pass' ? 'Snapshot 正确' : state === 'fail' ? 'Snapshot 不正确' : '尚未判完';
+  const checks = Array.isArray(result.checks) ? result.checks : [];
+  el.innerHTML = '<h2>Snapshot 判定</h2><p class="' + (state === 'pass' ? 'pass' : state === 'fail' ? 'fail' : 'pending') + '">' +
+    '<b>' + esc(label) + '</b> · ' + esc(result.summary || '') + '</p>' +
+    '<p class=hint><b>预期结果：</b>' + esc(result.expected || '—') + '</p>' +
+    (checks.length ? checks.map(check => '<div class=check><div class="' + esc(check.state) + '"><b>' +
+      esc(STATE_ICON[check.state] || '○') + ' ' + esc(check.name) + '</b> · ' +
+      esc(STATE_CN[check.state] || check.state) + '</div><div class=hint>' +
+      esc(check.evidence) + '</div></div>').join('') : '<div class=empty>暂时没有可判的记录。</div>');
 }
 
 /* ---------- 「现在轮到你」 ---------- */
@@ -305,27 +435,42 @@ function renderSteps(s){
 function caseById(id){ return meta.cases.find(c => c.id === id); }
 function snapById(id){ return meta.snapshots.find(x => x.id === id); }
 
+function environmentCard(c){
+  const environment = c.environment || {};
+  const people = (environment.people || []).map(person =>
+    esc(person.name) + '：' + esc(person.responsibility) +
+    (person.email ? '（' + esc(person.email) + '）' : '')).join('；');
+  const assets = (environment.assets || []).map(asset =>
+    esc(asset.name) + '（' + esc(asset.kind || '') + '，' + esc(asset.tables || '') + '）').join('；');
+  return '<h3>固定环境</h3><p class=hint>' + esc(environment.summary || '—') + '</p>' +
+    (people ? '<p class=hint><b>人：</b>' + people + '</p>' : '') +
+    (assets ? '<p class=hint><b>数据：</b>' + assets + '</p>' : '');
+}
+
 function startCard(){
   const cs = meta.cases;
   if(!cs.length) return '<h2>读不到 Case</h2><div class=body>demo/cases.json 没加载成功。</div>';
   const sel = $('#caseSel') ? $('#caseSel').value : cs[0].id;
   const c = caseById(sel) || cs[0];
+  const selectedSnapshot = ($('#snapSel') && $('#snapSel').value) || c.snapshots[0];
   const snaps = c.snapshots.map(id => {
     const x = snapById(id);
-    return '<option value="' + esc(id) + '">' + esc(x ? x.title : id) +
-           ' · ' + esc(x ? x.source_tables.join('、') : '') + '</option>';
+    return '<option value="' + esc(id) + '"' + (id === selectedSnapshot ? ' selected' : '') + '>' + esc(x ? x.title : id) +
+           ' · ' + esc(x ? (x.table_scope || x.source_tables.join('、')) : '') + '</option>';
   }).join('');
-  const steps = (c.steps || []).map(x => '<li>' + esc(x) + '</li>').join('');
-  return '<h2>① 选一个剧本，然后开始</h2><div class=body>' +
-    '<label class=hint>剧本</label>' +
-    '<select id=caseSel>' + cs.map(x => '<option value="' + esc(x.id) + '"' +
-      (x.id === c.id ? ' selected' : '') + '>' + esc(x.title) + '</option>').join('') + '</select>' +
-    '<label class=hint>这一轮放出哪些源表</label><select id=snapSel>' + snaps + '</select>' +
-    '<p style="margin:12px 0 4px">' + esc(c.description || '') + '</p>' +
-    (c.you_play ? '<p class=hint><b>你扮演：</b>' + esc(c.you_play) + '</p>' : '') +
-    (steps ? '<p class=hint style="margin-bottom:2px">会发生什么：</p><ol class=hint style="margin:0 0 10px;padding-left:20px">' + steps + '</ol>' : '') +
-    '<button class=primary id=startBtn>开始这一轮</button>' +
-    '<p class=hint style="margin:10px 0 0">开始会清空数据湖、治理库和四个邮箱，重启网关并清掉会话，然后把任务邮件发给管家。' +
+  const ready = !last.environment || last.environment.snapshot_ready !== false;
+  const caseControl = cs.length === 1
+    ? '<h2>' + esc(c.title) + '</h2>'
+    : '<h2>选一个 Case</h2><label class=hint>Case</label><select id=caseSel>' +
+      cs.map(x => '<option value="' + esc(x.id) + '"' +
+        (x.id === c.id ? ' selected' : '') + '>' + esc(x.title) + '</option>').join('') + '</select>';
+  return caseControl + '<div class=body>' + environmentCard(c) +
+    '<label class=hint>Snapshot（选择当前时刻）</label><select id=snapSel>' + snaps + '</select>' +
+    '<p class=hint>Snapshot 是同一环境的一个时刻：历史邮件、当前来信和本轮可见源表会交给模型；工具由 Hermes 在同一真实 turn 中提供。' +
+    '页面不发送步骤提示、预设回信或预写结果。仅切换列表不会修改当前运行。</p>' +
+    '<button class=primary id=startBtn' + (ready ? '' : ' disabled') + '>交给模型</button>' +
+    (ready ? '' : '<p class=wait style="margin:10px 0 0">数据服务仍在启动；就绪后按钮会自动可用。</p>') +
+    '<p class=hint style="margin:10px 0 0">开始会隔离本轮状态：清空数据湖、治理库和邮箱，重启网关并清掉会话。' +
     '<b>源库永远只读，不会被清也不会被写。</b></p></div>';
 }
 
@@ -340,7 +485,12 @@ function brokenCard(s){
     (recovered ? '<p class=hint>顶栏现在显示模型在线 —— 网关后来自己好了，' +
        '但这一轮是在它起不来的时候开的，已经补不回来。直接重开一轮。</p>' : '') +
     '<p class=hint>怎么办：' + esc(m.next) + '</p>' +
-    '<button class=primary id=againBtn>重开一轮</button></div>';
+    '<button class=primary id=againBtn>选择新的 Snapshot</button></div>';
+}
+
+function newSnapshotControl(){
+  return '<p style="margin:12px 0 0"><button id=againBtn>开始新的 Snapshot Case</button> ' +
+    '<span class=hint>仅打开选择列表；当前运行不会被改动。</span></p>';
 }
 
 /* 审批卡直接建在真实邮件上 —— 令牌只在服务端，浏览器只有 link id。 */
@@ -353,47 +503,60 @@ function approvalCards(messages, approvals){
     seen.add(key);
     const sub = m.subject.replace(/^\[数据管家\]\s*请批准：\s*/, '');
     const parts = sub.split(' · ');
-    const tool = parts[0] || '', target = parts.slice(1).join(' · ');
+    const tool = parts[0] || '', mailedTarget = parts.slice(1).join(' · ');
     const reason = (m.body.match(/理由：(.*)/) || [,''])[1];
-    const row = (approvals || []).find(a => a.tool === tool && !a.used);
-    out.push({box: m.box, tool, target, reason, links: m.links,
+    /* 同一工具可以因「已决票不可复用」而有多张票。邮件正文带短 id，优先按它
+       关联；只按 tool 会把已经决定过的旧邮件也误画成当前待批。 */
+    const approvalId = (m.body.match(/\[id=([0-9a-f-]{8,36})\]/i) || [])[1];
+    const row = (approvals || []).find(a => approvalId
+      ? String(a.id).startsWith(approvalId) : a.tool === tool);
+    out.push({id: row ? row.id : approvalId, box: m.box, tool, at: mailAt(m),
+              target: (row && row.summary) || mailedTarget, reason, links: m.links,
               approver: row ? row.approver : m.box, decided: !!(row && row.used)});
   }
-  return out;
+  /* Historical approval mail remains in GreenMail for audit, but is not a
+     current decision request.  When a ticket id is unavailable in the mail
+     template, show only the newest real mail for a tool that still has a
+     pending ticket.  The human decision itself remains in the timeline. */
+  return out.filter(card => {
+    const rows = (approvals || []).filter(a => a.tool === card.tool);
+    if(!rows.some(a => !a.used)) return false;
+    const newest = out.filter(other => other.tool === card.tool)
+      .reduce((later, other) => other.at > later.at ? other : later, card);
+    return card === newest;
+  });
 }
 
 function approvalCard(cards){
   const live = cards.filter(c => !c.decided);
+  const fresh = live.some(c => isNewApproval(c.id));
   return '<h2><span class="dot" style="color:var(--accent)"></span>轮到你了：管家要做 ' +
-    live.length + ' 件需要授权的事</h2>' +
+    live.length + ' 件需要授权的事' + (fresh ? ' <span class="pill fresh">新</span>' : '') + '</h2>' +
     live.map(c =>
       '<div class=body><dl class=ask>' +
       '<dt>要做什么</dt><dd><b>' + esc(toolCN(c.tool)) + '</b></dd>' +
-      '<dt>对象</dt><dd><code>' + esc(c.target || '—') + '</code></dd>' +
+      '<dt>动作说明</dt><dd>' + esc(c.target || '—') + '</dd>' +
       (c.reason ? '<dt>它给的理由</dt><dd>' + esc(c.reason) + '</dd>' : '') +
-      '<dt>该谁批</dt><dd>' + esc(c.approver) + '</dd>' +
+      '<dt>该谁批</dt><dd>' + esc(personName(c.box)) +
+        (c.box && actor(c.box) !== actor(c.approver) ? '（' + esc(personName(c.approver)) + '）' : '') + '</dd>' +
       '</dl><div style="margin-top:10px">' +
       c.links.map(l => '<button class="' + (l.action === 'approve' ? 'primary' : 'danger') +
         '" data-approve="' + esc(l.id) + '">' +
         (l.action === 'approve' ? '批准' : l.action === 'deny' ? '拒绝' : '选择') +
         '</button> ').join('') +
       '</div><p class=hint style="margin:9px 0 0">点下去等于点邮件里那枚一次性链接：' +
-      '页面把令牌转给独立的审批进程，由它写决定。页面自己没有写审批的权限。</p></div>').join('');
+      '页面把令牌转给独立的审批进程，由它写决定。页面自己没有写审批的权限。</p></div>').join('') +
+    newSnapshotControl();
 }
 
 function replyCard(s, messages){
-  const c = caseById(s.run.case_id) || {};
   const lastMsg = messages.filter(m => m.origin === '模型邮件输出').slice(-1)[0];
-  const replies = c.replies || [];
   return '<h2><span class=spin></span> 管家在工作中</h2><div class=body>' +
-    (lastMsg ? '<p class=hint>它最近发出的一封信：<b>' + esc(lastMsg.subject) + '</b></p>' +
+    (lastMsg ? '<p class=hint>它最近发给 ' + esc(mailRecipient(lastMsg)) + ' 的一封信：<b>' + esc(lastMsg.subject) + '</b></p>' +
                '<p class=text style="white-space:pre-wrap;max-height:8em;overflow:auto">' +
                esc(lastMsg.body.slice(0, 600)) + '</p>' : '') +
-    '<p class=hint style="margin-top:12px"><b>它问你话的时候，用下面这个框回信。</b>没问就不用管，它会自己往下做。</p>' +
-    (replies.length ? '<div style="margin:6px 0">' + replies.map((r, i) =>
-        '<button class=chip data-reply="' + i + '">' + esc(r.label) + '</button>').join('') +
-      '</div><p class=hint style="margin:0 0 8px">这些是<b>人的台词</b>，一键填进下面的框，可以改，' +
-      '按了不会自动发。里面的 <code>&lt;口令&gt;</code> 要你自己填，演练口令在 infra/demo-init.sh。</p>' : '') +
+    '<p class=hint style="margin-top:12px">只有模型真的需要补充信息时，才在这里以相应人员身份写一封真实回信。' +
+    '没有预填台词；没有新输入时就留空。</p>' + newSnapshotControl() +
     '<form id=mailForm>' +
     '<select id=mailFrom>' + ['boss@acme.com','wang@acme.com','dba@acme.com']
       .map(x => '<option>' + x + '</option>').join('') + '</select>' +
@@ -402,10 +565,27 @@ function replyCard(s, messages){
     '<button class=primary>以这个身份发出去</button></form></div>';
 }
 
+function continuingCard(){
+  return '<h2><span class=spin></span> 审批已提交，管家正在继续</h2><div class=body>' +
+    '<p>' + esc(followUpText()) + '</p>' +
+    '<p class=hint>新回信和人工决定会在时间线标「新」；新后台动作会在「显示模型后台动作」按钮上提示数量。</p></div>' +
+    newSnapshotControl();
+}
+
+function completedCard(result){
+  return '<h2><span class="dot" style="color:var(--good)"></span> Snapshot 已完成</h2><div class=body>' +
+    '<p>本轮的预期结果已经由独立记录核对通过，不需要再发信、审批或继续调用工具。</p>' +
+    '<p class=hint>' + esc(result.summary || '所有预期结果均有独立证据。') + '</p></div>' +
+    newSnapshotControl();
+}
+
 function renderTurn(s, messages, st){
   const el = $('#turn');
-  if(!s.run){ el.className = 'card turn'; el.innerHTML = startCard(); return; }
-  if(st.i === -2){ el.className = 'card turn broken'; el.innerHTML = brokenCard(s); return; }
+  if(choosingNewCase || !s.run){ el.className = 'card turn'; el.innerHTML = startCard(); return; }
+  if(st.kind === 'failed'){ el.className = 'card turn broken'; el.innerHTML = brokenCard(s); return; }
+  if((s.case_result || {}).state === 'pass'){
+    el.className = 'card turn idle'; el.innerHTML = completedCard(s.case_result || {}); return;
+  }
   const cards = approvalCards(messages, Array.isArray(s.approvals) ? s.approvals : []);
   const live = cards.filter(c => !c.decided);
   if(live.length){ el.className = 'card turn'; el.innerHTML = approvalCard(live); return; }
@@ -415,14 +595,18 @@ function renderTurn(s, messages, st){
     el.innerHTML = '<h2><span class=spin></span> 审批申请已发出，邮件还在路上</h2><div class=body>' +
       '<p>' + pending.map(x => esc(toolCN(x.tool))).join('、') +
       '</p><p class=hint>等这封信落进 ' + esc(pending[0].approver) +
-      ' 的信箱，批准按钮就会出现在这里。</p></div>';
+      ' 的信箱，批准按钮就会出现在这里。</p></div>' + newSnapshotControl();
     return;
   }
-  if(RUN_STATE[s.run.state] && RUN_STATE[s.run.state].step === 0){
+  if(followUp){
+    el.className = 'card turn idle'; el.innerHTML = continuingCard(); return;
+  }
+  if(st.kind === 'preparing'){
     el.className = 'card turn idle';
     el.innerHTML = '<h2><span class=spin></span> 正在准备环境</h2><div class=body><p>' +
       esc(RUN_STATE[s.run.state].text) + '</p><p class=hint>' +
-      esc(RUN_STATE[s.run.state].next) + '。这一步不需要你做任何事。</p></div>';
+      esc(RUN_STATE[s.run.state].next) + '。这一步不需要你做任何事。</p></div>' +
+      newSnapshotControl();
     return;
   }
   el.className = 'card turn idle';
@@ -431,8 +615,35 @@ function renderTurn(s, messages, st){
 
 /* ---------- 时间线 ---------- */
 
-function actor(mail){ return String(mail || '').split('@')[0] || '未知'; }
+function actor(mail){
+  const raw = String(mail || '');
+  const address = raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return (address ? address[0] : raw).split('@')[0] || '未知';
+}
+function mailRecipient(m){
+  const address = String(m.to || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  if(!address) return '收件人未记录';
+  return personName(address[0]) + '（' + address[0] + '）';
+}
 function when(x){ const t = Date.parse(x.date || ''); return isNaN(t) ? 0 : t; }
+function mailAt(m){
+  const dated = when(m);
+  if(dated) return dated;
+  /* Some GreenMail deliveries omit Date.  Demo Message-IDs begin with the
+     send timestamp, which is sufficient to order otherwise identical mail. */
+  const stamp = String(m.id || '').match(/^<(\d{10,})/);
+  return stamp ? Number(stamp[1]) : 0;
+}
+function eventAt(e){
+  const raw = Number(e.time);
+  if(Number.isFinite(raw)) return raw > 1e12 ? raw : raw * 1000;
+  const parsed = Date.parse(e.time || '');
+  return isNaN(parsed) ? 0 : parsed;
+}
+function eventTime(e){
+  const at = eventAt(e);
+  return at ? new Intl.DateTimeFormat('zh-CN', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit'}).format(new Date(at)) : '';
+}
 
 /* 同一封信在发件人和收件人两个信箱各存一份，按 Message-ID 去重。 */
 function dedupe(messages){
@@ -458,42 +669,87 @@ function foldable(text, limit){
          esc(text.slice(0, limit)) + '…</div>';
 }
 
+function liveMailBubble(m){
+  /* 任务简报那封信正文很长（Case + Snapshot + 历史全在里面）。它是页面代投的，
+     origin 会是「演练人员输入」，但它不是你写的，所以先于 origin 判断。 */
+  const brief = m.body.indexOf('【演练 Case：') === 0;
+  if(brief && showBackend)
+    return bubble('sys', [['系统', 'sys']], m.subject,
+      'Snapshot 已投递给管家：历史邮件 + 本轮可见源表 + 当前来信；工具 schema 由 Hermes 运行时提供。' +
+      '<details><summary>看原文</summary><div class=text>' + esc(m.body) + '</div></details>');
+  if(brief) return '';
+  const fresh = isNewMail(m) ? [['新', 'fresh']] : [];
+  if(m.origin === '模型邮件输出')
+    return bubble('model', [['管家', 'model'], ['发给 ' + mailRecipient(m), 'human']].concat(fresh),
+      m.subject, foldable(m.body, 360));
+  if(m.origin === '演练人员输入')
+    return bubble('human', [['你发的', 'human'], [actor(m.from), 'human']].concat(fresh),
+      m.subject, foldable(m.body, 700));
+  const connectionOutcome = m.origin === '系统通知模板' &&
+    /^\[数据管家\].*连接(?:成功|失败)/.test(String(m.subject || ''));
+  if(connectionOutcome)
+    return bubble('sys', [['连接结果', 'sys'], ['发给 ' + mailRecipient(m), 'human']].concat(fresh),
+      m.subject, foldable(m.body, 700));
+  if(m.origin === '系统通知模板' && showBackend)
+    return bubble('sys', [['系统', 'sys']], m.subject, foldable(m.body, 400));
+  if(m.origin === '系统通知模板') return '';
+  return bubble('human', [['外部', 'human'], [actor(m.from), 'human']].concat(fresh),
+    m.subject, foldable(m.body, 700));
+}
+
 function renderTimeline(s, messages){
-  const c = caseById((s.run && s.run.case_id) || ($('#caseSel') && $('#caseSel').value));
+  const context = snapshotContext(s), c = context.case, snapshot = context.snapshot;
   const out = [];
-  if(!c){ $('#timeline').innerHTML = '<div class=empty>还没选 Case。</div>'; return; }
-  (c.history || []).forEach(h => out.push(bubble('preset',
-    [['Case 预设'], [actor(h.from), 'human']], h.subject, esc(h.body))));
-  if(!s.run){
-    out.push(bubble('preset', [['Case 预设'], [actor(c.opening.from), 'human']],
-      c.opening.subject, esc(c.opening.body)));
-    out.push(bubble('sys', [], '', '↑ 以上是这一轮开始前就存在的邮件历史。点上面的「开始这一轮」，最后这封会真的发进管家信箱。'));
+  if(!c || !snapshot){ $('#timeline').innerHTML = '<div class=empty>还没选 Snapshot。</div>'; return; }
+  (snapshot.history || c.history || []).forEach(h => out.push(bubble('preset',
+    [['Snapshot 历史'], [actor(h.from), 'human']], h.subject, esc(h.body))));
+  const opening = snapshot.opening || c.opening;
+  if(opening) out.push(bubble('preset', [['当前输入'], [actor(opening.from), 'human']],
+    opening.subject, esc(opening.body)));
+  if(!s.run || choosingNewCase){
     $('#timeline').innerHTML = out.join('');
     return;
   }
-  const items = dedupe(messages).map(m => {
-    /* 任务简报那封信正文很长（Case + Snapshot + 历史全在里面）。它是页面代投的，
-       origin 会是「演练人员输入」，但它不是你写的，所以先于 origin 判断。 */
-    const brief = m.body.indexOf('【演练 Case：') === 0;
-    if(brief)
-      return bubble('sys', [['系统', 'sys']], m.subject,
-        '任务简报已投递给管家：Case 背景 + 本轮可用源表 + ' + esc(actor(m.from)) + ' 的问题' +
-        '<details><summary>看原文</summary><div class=text>' + esc(m.body) + '</div></details>');
-    if(m.origin === '模型邮件输出')
-      return bubble('model', [['管家', 'model'], [actor(m.from), 'model']],
-        m.subject, foldable(m.body, 700));
-    if(m.origin === '演练人员输入')
-      return bubble('human', [['你发的', 'human'], [actor(m.from), 'human']],
-        m.subject, foldable(m.body, 700));
-    if(m.origin === '系统通知模板')
-      return bubble('sys', [['系统', 'sys']], m.subject, foldable(m.body, 400));
-    return bubble('human', [['外部', 'human'], [actor(m.from), 'human']],
-      m.subject, foldable(m.body, 700));
+  const items = dedupe(messages).map(m => ({at: mailAt(m), html: liveMailBubble(m)})).filter(x => x.html);
+  const evs = (Array.isArray(s.events) ? s.events : []).slice().reverse().flatMap(e => {
+    const decision = e.kind.startsWith('DECIDED_');
+    if(!decision && !showBackend) return [];
+    const tags = [[decision ? '人工审批' : e.kind === 'CRON_JOB_CREATED' ? '系统' : '模型后台',
+      decision ? 'human' : 'sys']];
+    if(isNewEvent(e)) tags.push(['新', 'fresh']);
+    return [{at: eventAt(e), html: bubble(decision ? 'human' : 'sys',
+      tags, '', esc(eventCN(e)))}];
   });
-  const evs = (Array.isArray(s.events) ? s.events : []).slice().reverse()
-    .map(e => bubble('sys', [], '', esc(eventCN(e))));
-  $('#timeline').innerHTML = out.concat(items, evs).join('') ||
+  const live = items.concat(evs).sort((a, b) => a.at - b.at).map(item => item.html);
+  $('#timeline').innerHTML = out.concat(live).join('') ||
     '<div class=empty>还没有任何邮件。</div>';
+}
+
+function renderActions(s){
+  $('#actionsCard').hidden = !showBackend;
+  if(!showBackend) return;
+  const events = (Array.isArray(s.events) ? s.events : []).filter(e =>
+    e.kind === 'APPROVAL_REQUESTED' || e.kind.startsWith('TOOL_') ||
+    e.kind.startsWith('BLOCKED_') || e.kind === 'SOURCE_CONNECT_FAILED' ||
+    e.kind === 'AMEND_PENDING' || e.kind === 'NEW_TICKET_AFTER_DECISION');
+  if(!s.run){
+    $('#actions').innerHTML = '<div class=empty>还没开始。这里会在模型真实调用工具后出现记录。</div>';
+    return;
+  }
+  $('#actions').innerHTML = events.length ? events.map(e =>
+    '<div class=check>' + (isNewEvent(e) ? '<span class="pill fresh">新</span> ' : '') +
+    '<b>' + esc(eventCN(e)) + '</b>' +
+    (e.time ? '<div class=hint>' + esc(eventTime(e)) + '</div>' : '') + '</div>').join('') :
+    '<div class=empty>当前还没有治理台账记录到模型动作。模型可能仍在读信、等待，或尚未开始处理。</div>';
+}
+
+function renderBackendToggle(){
+  const button = $('#backendToggle');
+  if(!button) return;
+  const human = followUp ? followUp.newDecisions.size : 0;
+  const backend = followUp ? followUp.newEvents.size - human : 0;
+  button.textContent = showBackend ? '隐藏模型后台动作'
+    : '显示模型后台动作' + (backend ? '（新 ' + backend + '）' : '');
 }
 
 /* ---------- 证据 ---------- */
@@ -567,9 +823,9 @@ function renderWork(s){
   const q = Array.isArray(s.queries) ? s.queries : [];
   let html = '<h3 style="margin-top:0">管家真正跑过的 SQL</h3>' +
     '<p class=hint>直接来自 query_ledger，不是页面编的。' +
-    (s.snapshot ? '本轮只放出 ' + (s.snapshot.source_tables || []).length +
-       ' 张源表：' + esc((s.snapshot.source_tables || []).join('、')) +
-       '，所以能出现的关联最多就这么多。' : '') + '</p>' +
+    (s.snapshot ? '本轮表范围：' + esc(s.snapshot.table_scope ||
+       ((s.snapshot.source_tables || []).length + ' 张源表：' +
+        (s.snapshot.source_tables || []).join('、'))) : '') + '</p>' +
     box(q.map(x => '<div class=check><div><span class=pill>' + esc(x.source) + '</span> ' +
         '<span class="' + (x.status === 'ok' ? 'pass' : 'fail') + '">' + esc(x.status) + '</span> · ' +
         esc(x.rows) + ' 行 · ' + esc(x.duration_ms) + 'ms' +
@@ -622,7 +878,6 @@ async function refresh(){
   busy = true;
   try{
     const s = await api('/api/status');
-    last = s;
     const a = s.agent || {};
     const gwOK = a.state === 'ready' && a.model_probe === 'pass';
     $('#gateway').innerHTML = '<span class="dot ' + (gwOK ? 'ok' : 'bad') + '"></span>' +
@@ -630,19 +885,22 @@ async function refresh(){
       (a.model ? ' · ' + esc(a.model) : '') +
       (a.model_expires_on ? ' · 额度到期 ' + esc(a.model_expires_on) : '') +
       (gwOK ? '' : ' · ' + esc(a.detail || a.state || ''));
-    $('#runline').textContent = s.run ? ('本轮 ' + s.run.id + ' · ' + s.run.case_title) : '未开始';
+    const activeSnapshot = s.run && snapById(s.run.snapshot_id);
+    $('#runline').textContent = s.run ? ('本轮 ' + s.run.id + ' · ' +
+      (activeSnapshot ? activeSnapshot.title : '已启动的 Snapshot')) : '未开始';
 
     let messages = [];
     try { messages = await api('/api/mail'); mailCache = messages; }
     catch(e){ messages = mailCache; }
+    observeFollowUp(s, messages);
+    last = s;
 
-    const st = renderSteps(s);
-    renderTurn(s, messages, st);
+    const phase = renderRunState(s);
+    renderCaseOutcome(s);
+    renderTurn(s, messages, phase);
     renderTimeline(s, messages);
-    $('#tab-proof').innerHTML = renderProof(s);
-    $('#tab-data').innerHTML  = renderData(s);
-    $('#tab-work').innerHTML  = renderWork(s);
-    $('#tab-cross').innerHTML = renderCross(s);
+    renderActions(s);
+    renderBackendToggle();
     $('#rawEvents').textContent = JSON.stringify(s.events, null, 2);
     $('#rawProv').textContent   = JSON.stringify(s.provenance, null, 2);
     $('#rawData').textContent   = JSON.stringify({source:s.source, lake:s.lake,
@@ -659,57 +917,66 @@ async function refresh(){
 /* ---------- 事件（委托，避免每次重绘丢绑定） ---------- */
 
 document.addEventListener('change', e => {
-  if(e.target.id === 'caseSel') renderTurn(last, mailCache, stepOf(last));
+  if(e.target.id === 'caseSel' || e.target.id === 'snapSel'){
+    const phase = renderRunState(last);
+    renderTurn(last, mailCache, phase);
+    renderTimeline(last, mailCache);
+  }
 });
 
 document.addEventListener('click', async e => {
   const t = e.target;
   if(t.id === 'startBtn' || t.id === 'againBtn'){
-    if(t.id === 'againBtn'){ renderTurn({}, [], {i:-1}); return; }
+    if(t.id === 'againBtn'){
+      choosingNewCase = true;
+      const phase = renderRunState(last);
+      renderCaseOutcome(last);
+      renderTurn(last, mailCache, phase);
+      renderTimeline(last, mailCache);
+      return;
+    }
     t.disabled = true;
     try{
+      followUp = null;
       const r = await api('/api/run/start', 'POST',
-        {case_id: $('#caseSel').value, snapshot_id: $('#snapSel').value});
+        {case_id: ($('#caseSel') || {value:(meta.cases[0] || {}).id}).value,
+         snapshot_id: $('#snapSel').value});
+      choosingNewCase = false;
       say('已开始 ' + r.id + '。正在清空环境并重启网关，页面每 5 秒自己刷新，不用手动刷。');
     }catch(err){ fail(err.message); t.disabled = false; }
-    refresh();
-  }
-  if(t.id === 'verifyBtn'){
-    t.disabled = true; t.textContent = '核对中…';
-    try{ await api('/api/verify', 'POST'); say('核对完成。'); }
-    catch(err){ fail(err.message); }
     refresh();
   }
   if(t.dataset.approve){
     t.disabled = true;
     try{
+      const before = {state: last, mail: mailCache};
       const r = await api('/api/approval', 'POST', {id: t.dataset.approve});
       const msg = String(r.message || '').replace(/\s+/g, ' ').trim().slice(0, 200);
       if(r.status === 409) say('审批进程拒绝了重复点击（HTTP 409）—— 一次性链接只认第一次。');
-      else if(r.status < 300) say('审批进程已记下你的决定（HTTP 200）。管家会在下次唤醒时继续。');
+      else if(r.status < 300){
+        beginFollowUp(before.state, before.mail);
+        say('审批已提交。管家会在下次唤醒时继续；之后新出现的内容会标「新」。');
+        const turn = $('#turn');
+        turn.className = 'card turn idle'; turn.innerHTML = continuingCard();
+      }
       else fail('审批进程返回 HTTP ' + r.status + ' · ' + msg);
     }catch(err){ fail(err.message); }
     refresh();
   }
-  if(t.dataset.reply !== undefined){
-    const c = caseById((last.run || {}).case_id) || caseById($('#caseSel') && $('#caseSel').value);
-    const r = ((c || {}).replies || [])[Number(t.dataset.reply)];
-    if(r){
-      $('#mailFrom').value = r.from; $('#mailSubject').value = r.subject;
-      $('#mailBody').value = r.body; $('#mailBody').focus();
-      say('已填进下面的框。检查一遍（尤其是 <口令>），确认无误再点发送。');
-    }
+  if(t.id === 'backendToggle'){
+    showBackend = !showBackend;
+    $('#timelineHint').textContent = showBackend
+      ? '已展开模型调用和系统事件；收起后只保留对话与人工审批。'
+      : '默认只看对话和人工审批；需要核对模型调用或系统事件时再展开。';
+    renderTimeline(last, mailCache);
+    renderActions(last);
+    renderBackendToggle();
   }
   if(t.id === 'modeToggle'){
     document.body.classList.toggle('devmode');
     const dev = document.body.classList.contains('devmode');
     t.textContent = dev ? '演示视图' : '调试视图';
     try{ localStorage.setItem('demoui.dev', dev ? '1' : '0'); }catch(_){}
-  }
-  if(t.dataset.tab){
-    document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b === t));
-    ['proof','data','work','cross'].forEach(n =>
-      $('#tab-' + n).hidden = (n !== t.dataset.tab));
   }
 });
 

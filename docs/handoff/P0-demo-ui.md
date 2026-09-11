@@ -2,41 +2,51 @@
 
 ## 目标与边界
 
-这是 Data Steward Claw 的展示和真测页面，不是第二个 Agent、前端工作流或
-预写结果演示。Hermes Gateway 仍负责模型、会话、工具选择、审批申请与恢复；
+这是 Data Steward Claw 的 Snapshot Case 展示和真测页面，不是第二个 Agent、前端工作流或
+预写结果演示。每个 Snapshot 只提供既有邮件、当前来信与可见源表；Hermes Gateway 仍负责模型、会话、工具选择、审批申请与恢复；
 `data-steward` 仍通过原有确定性 gate、callback、数据库权限和 Connector 执行。
 
-页面仅能：选择固定 Case/Snapshot、发送模拟人员邮件、读取 GreenMail/治理库/
+页面仅能：选择固定 Case/Snapshot、发送人的入站邮件、读取 GreenMail/治理库/
 Trino 证据、把用户点击的真实审批令牌转发给 callback、启动隔离 Snapshot，和
 执行独立只读真测。它没有治理工具 API，也没有写审批决定的身份。
 
 ## 当前实现
 
-- `demo/cases.json`：固定 Northwind Case 与兼容 Snapshot。Case 只包含人写的
-  业务背景与邮件历史，不含工具序列、SQL 或模型答案。
+- `demo/cases.json`：当前展示是一个固定的 `Northwind：连接交接` 环境（人、职责、数据源及
+  权限边界），下面有两个可独立启动的 Snapshot：老板指向数据库管理员后，模型登记联系人并向
+  数据库管理员索取连接信息；以及数据库管理员已发来运行时凭证后，模型走受控接入。Snapshot 是环境在不同时间点的
+  冻结状态，不依赖前一个 Snapshot 刚刚执行完成。复杂 Northwind 剧本留在 `staging_cases`，
+  不会返回浏览器或进入模型上下文。每个 Snapshot 的 `expected_outcome` 只给独立判分器读取，
+  不含工具序列或模型答案。
+- `source_contacts` + `register_contact`：联系人目录与 `role_assignment` 分表；登记只保存
+  数据源的联络线索，绝不改变角色、审批资格或数据权限。`send_contact_email` 只能投递给
+  已登记联系人，拒绝连接串、口令、token 与审批链接，并按联系人+主题去重。
 - `services/demo_ui.py` + `services/demo_ui.html`：单页工作台。页面标记拆成独立文件，
   按请求读取（`services/` 是只读 bind mount，改完刷新即可，不必重建镜像），
   同时去掉了原先内联字符串必须的两处 `str.replace` 转义补丁 —— 任一处不再匹配时
-  整段脚本会静默失效。页面中的 SQL 来自实际 `query_ledger`；
-  跨表结果必须由模型邮件/`answer_with_link` 台账产生，旁边的九行销售表由页面
-  独立只读源库计算，不能替代模型答案。
-- 页面结构面向「第一次打开的人」：顶栏网关灯 → 可折叠说明条 → 五步进度条 →
-  **全页唯一的「现在轮到你」蓝框**（未开始 / 环境准备中 / 待你审批 / 回信 / 已卡住，
-  同一时刻只出一种）→ 人在左管家在右的对话时间线 → 四个证据 tab → 调试视图。
+  整段脚本会静默失效。浏览器只得到 Snapshot 的历史邮件、当前来信与可选源表；模型在
+  Hermes 运行时另行拿到真实工具 schema。页面默认按时间只展示 Snapshot 对话与人工审批；
+  模型调用和系统事件由「显示模型后台动作」按需展开，不预排后续步骤，也不预写模型答案。
+- 当前状态卡用 Snapshot 当前来信和真实台账事件生成一条确定性经过摘要；审批卡只显示
+  服务端从已存参数提取的安全动作说明，不返回原始 `args_json`、DSN 或审批 token。开始前先
+  只读探测 Trino 与治理库，未就绪时不创建 run、不清任何数据，避免冷启动留下伪失败记录。
+- 人点击真实审批链接后，页面保留点击瞬间的邮件、事件和票据基线；后续轮询到的真实回信、
+  人工决定、模型后台动作和新票均标「新」，并在后台动作开关上显示新增数量。它只做前后
+  记录差异，不预判模型接下来会走哪一步。
+- 每个 Snapshot 的 `expected_outcome` 不进入公开 metadata 或 `case_packet()`；页面只在模型
+  实际执行后，以数据库事件、lake 实物、provenance 和独立源库直算判 `pass` / `fail` / `pending`。
+  缺证据只能 `pending`，相反的实际结果才 `fail`。
+- 页面结构面向「第一次打开的人」：顶栏网关灯 → 可折叠说明条 → 当前 Snapshot 状态 →
+  真实审批或真实回信入口 → 邮件与模型动作时间线 → 本轮已记录工具调用 → 调试视图。
   右上角「调试视图」切换（`localStorage` 记住）才展开 events、provenance 和原始 JSON。
-- **机器码不再直接示人**：`run.state`、event kind、工具名、真测 check 名各有一张
-  确定性中文映射表，写在页面里；check 额外给一句「为什么这条重要」。
-  `pending` 显示成「还没走到这步」、`n/a` 显示成「本 Case 不涉及」，都不再像失败。
-- **空面板必须说明为什么空**：本 Case 的 `expects` 不含该项 → 「这个剧本本来就不做这件事」；
-  run 处于失败态 → 「这一轮卡在 X，模型没跑到这一步」；否则 → 「管家还没走到这一步」。
-  「管家做过什么」tab 顶部固定显示本轮 snapshot 放出了几张源表，
-  解释为什么某些剧本里不会出现 join。
+- **机器码不再直接示人**：`run.state`、event kind 和工具名都有确定性中文映射表，写在页面里。
+  Snapshot 视图不展示泛化「通过率」；只展示当前 Snapshot 的预期结果、每条独立证据和终态判定。
 - 顶栏读的是网关此刻的状态，`run.state` 记的是这一轮开始时的状态。两者可以同时为真
   （网关后来自己好了），页面在故障卡里直接说破，不让它看起来像自相矛盾。
-- `demo/cases.json` 每个 Case 增加 `you_play` / `steps` / `replies`。`replies` 是**人的台词**，
-  一键填进回信框、可改、不会自动发送；口令一律写成 `<口令>` 占位符，
-  演练口令仍只在 `infra/demo-init.sh`。这三个字段**不进 `case_packet()`**，
-  模型永远看不到剧本步骤（`tests/test_demo_ui.py` 有断言）。
+- `demo/cases.json` 保留 `you_play` / `steps` / `replies` 作为以后完整模拟视图的后台素材。
+  Snapshot 视图既不向浏览器返回这些字段，也不把它们送进 `case_packet()`；模型永远看不到
+  剧本步骤（`tests/test_demo_ui.py` 有断言）。回信框不再预填台词，只有人在模型真实来信后
+  才能自行写入新的邮件。
 - 运行数据采用 `run_id`：每次开始会清 demo lake、治理运行态和 GreenMail，随后
   通过共享 control volume 让 agent entrypoint 重启 Hermes 并清除会话，再投递
   Case 邮件。源库永远不被清或写入；Snapshot 指向预置只读源表。
@@ -117,6 +127,11 @@ Hermes source-build 镜像没有官方 s6 入口，demo overlay 显式设
 采用保守截止：到期日前一天即停止使用；仍安全的候选按到期日升序优先使用，主模型进入截止日时再选下一个；
 缺少日期或全部候选过期则状态为 `blocked`，不会发起 chat completion。页面状态同时
 展示实际选择的 `model` 与 `model_expires_on`，便于核对。
+
+2026-09-11 用 Playwright 真实点击两个最小 Case：`northwind-contact-a` 中模型实际调用
+`register_contact`，A 的 GreenMail 收件箱实际收到模型邮件，Case 判定 `pass`；
+`northwind-a-credentials` 中 A 的运行时 DSN 邮件只以脱敏形式返回网页，模型实际调用
+`connect_source` 并生成真实 `sponsor` 审批票，Case 判定 `pass`。第二条停在审批，未自动批准或执行接入。
 
 静态契约（仅用于接手时快速检查，不代替真模型验收）：
 

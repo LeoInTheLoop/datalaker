@@ -3,7 +3,7 @@
 
 This is deliberately a thin adapter.  It never imports a data-steward tool,
 never writes a decision, and never chooses a model action.  Its only writes
-are human simulation mail, isolated demo snapshot reset requests, and its own
+are human inbound mail, isolated demo snapshot reset requests, and its own
 read-only run history.
 """
 from __future__ import annotations
@@ -46,6 +46,7 @@ MAIL_LINK_RE = re.compile(
     r"https?://127\.0\.0\.1:\d+/(approve|deny|choose)\?t=([\w.\-]+)")
 APPROVAL_URL_RE = re.compile(
     r"https?://[^/\s]+/(?:approve|deny|choose)\?t=[\w.\-]+")
+DSN_RE = re.compile(r"postgres(?:ql)?://[^\s'\"<>]+", re.IGNORECASE)
 MAX_OBSERVATIONS = 120
 
 
@@ -53,8 +54,7 @@ def redact(text: str) -> str:
     """Credentials and one-time approval tokens never leave the adapter."""
     value = str(text or "")
     value = APPROVAL_URL_RE.sub("[审批链接已隐藏]", value)
-    return re.sub(r"(postgres(?:ql)?://[^:\s/]+:)[^@\s/]+@",
-                  r"\1<已隐藏>@", value)
+    return DSN_RE.sub("[数据库连接串已隐藏]", value)
 
 
 def body_of(msg) -> str:
@@ -285,6 +285,37 @@ def cases() -> tuple[dict[str, dict], dict[str, dict]]:
             {item["id"]: item for item in raw["snapshots"]})
 
 
+def public_cases() -> list[dict]:
+    """Return only the Snapshot Case state the browser may render.
+
+    Staging fields such as ``steps`` and canned ``replies`` remain in the case
+    source for a later full-simulation view, but are neither model input nor
+    browser data in the Snapshot view.  The real Hermes turn receives its tool
+    schemas from the runtime, not from this adapter.
+    """
+    case_map, _ = cases()
+    visible = ("id", "title", "environment", "snapshots")
+    return [{key: case[key] for key in visible if key in case}
+            for case in case_map.values()]
+
+
+def public_snapshot(snapshot: dict | None) -> dict | None:
+    """Return browser-safe Snapshot state, excluding judge and gate metadata."""
+    if not isinstance(snapshot, dict):
+        return None
+    visible = ("id", "database", "title", "source_tables", "table_scope", "note", "history", "opening")
+    return {key: snapshot[key] for key in visible if key in snapshot}
+
+
+def public_snapshots() -> list[dict]:
+    """Expose only a selectable Snapshot's human state, never its judge input."""
+    case_map, snapshot_map = cases()
+    selectable = {snapshot_id for case in case_map.values()
+                  for snapshot_id in case.get("snapshots", [])}
+    return [public_snapshot(snapshot) for snapshot_id, snapshot in snapshot_map.items()
+            if snapshot_id in selectable]
+
+
 def active_snapshot() -> dict | None:
     current = RUNS.current()
     if not current:
@@ -345,28 +376,281 @@ def _answer_row(row) -> tuple[str, ...]:
     return tuple(out)
 
 
+class DemoNotReady(RuntimeError):
+    """The isolated Snapshot planes have not all become available yet."""
+
+
+def snapshot_dependencies_ready() -> bool:
+    """Check reset planes before making a run id, without changing either."""
+    try:
+        trino("SELECT 1")
+        admin_rows("SELECT 1")
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+def approval_summary(tool_name: str, raw_args) -> str:
+    """Return a small, safe approval explanation; never return raw args/DSNs."""
+    try:
+        args = raw_args if isinstance(raw_args, dict) else json.loads(raw_args or "{}")
+    except (TypeError, json.JSONDecodeError):
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+
+    asset = str(args.get("asset") or args.get("table") or args.get("source_id") or "当前数据")
+    asset = re.sub(r"[^A-Za-z0-9_.-]", "", asset)[:160] or "当前数据"
+    if tool_name == "define_semantics":
+        allowed = args.get("allowed_values")
+        values = ([str(value)[:40] for value in allowed
+                   if re.fullmatch(r"[A-Za-z0-9_. -]+", str(value))]
+                  if isinstance(allowed, list) else [])
+        if values:
+            return (f"为 {asset} 登记发布口径：gold 只保留 {' / '.join(values)}，"
+                    "原始值留在 silver。")
+        return f"为 {asset} 登记业务口径。"
+    if tool_name == "connect_source":
+        return f"使用已提供的连接信息接入 {asset}。"
+    if tool_name == "ingest_table":
+        return f"把 {asset} 复制进 bronze 层。"
+    if tool_name == "apply_cleaning_rule":
+        return f"按已确认规则清洗 {asset}，并保留原始值。"
+    if tool_name == "publish_gold":
+        return f"将 {asset} 发布到 gold 层供业务使用。"
+    return f"确认「{tool_name or '当前动作'}」的执行范围。"
+
+
+def _result_check(name: str, state: str, evidence: str) -> dict:
+    return {"name": name, "state": state, "evidence": evidence}
+
+
+def _event_payload(event: dict) -> dict:
+    try:
+        value = json.loads(event.get("payload") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        value = {}
+    return value if isinstance(value, dict) else {}
+
+
+def evaluate_case(case: dict | None, snapshot: dict | None = None, *, events: list[dict], lake: dict,
+                  lake_columns: dict, silver: dict, provenance: list[dict],
+                  answer_comparison: dict, messages: list[dict] | None = None,
+                  contacts: list[dict] | None = None) -> dict:
+    """Judge only the Case's declared terminal result from independent records.
+
+    ``expected_outcome`` is intentionally absent from both public Case metadata
+    and ``case_packet()``.  This evaluator sees recorded events/data after the
+    model acted; it never supplies an answer or a tool sequence to the model.
+    """
+    expected = (snapshot or {}).get("expected_outcome") or (case or {}).get("expected_outcome") or {}
+    if not expected:
+        return {"state": "pending", "expected": "本 Case 尚未定义预期结果。", "checks": []}
+
+    messages, contacts = messages or [], contacts or []
+    kind = expected.get("kind")
+    checks: list[dict] = []
+    if kind == "sales_leader":
+        target = _answer_row(expected.get("row") or ())
+        model_rows = [_answer_row(row) for row in answer_comparison.get("model_rows", [])]
+        if not model_rows:
+            checks.append(_result_check("模型最终答案", "pending", "还没有记录到 answer_with_link 的结果。"))
+        elif target in model_rows:
+            checks.append(_result_check("模型最终答案", "pass", expected["answer"]))
+        else:
+            checks.append(_result_check("模型最终答案", "fail", "模型已给出结果，但不含预期第一名及数值。"))
+        if not model_rows:
+            checks.append(_result_check("逐行独立核对", "pending", "等待模型结果后与源库九行直算核对。"))
+        elif answer_comparison.get("matched") and len(answer_comparison.get("source_rows", [])) == 9:
+            checks.append(_result_check("逐行独立核对", "pass", "模型结果与源库九行直算逐行相等。"))
+        else:
+            checks.append(_result_check("逐行独立核对", "fail", "模型结果与源库九行直算不一致。"))
+
+    elif kind == "clean_publish":
+        asset = str(expected.get("asset") or "")
+        allowed = {str(value) for value in expected.get("allowed_values", [])}
+        semantics = [item for item in provenance
+                     if item.get("event") == "semantics_defined"
+                     and str(item.get("detail", {}).get("asset") or item.get("asset")) == asset]
+        if not semantics:
+            checks.append(_result_check("已确认发布口径", "pending", "尚未记录该资产的已确认口径。"))
+        else:
+            actual = set(str(value) for value in semantics[0].get("detail", {}).get("allowed_values", []))
+            checks.append(_result_check("已确认发布口径", "pass" if actual == allowed else "fail",
+                                        "允许值：" + " / ".join(sorted(actual)) if actual
+                                        else "记录里缺少结构化允许值。"))
+        bronze_rows = sum(int(value) for value in lake.get("bronze", {}).values())
+        checks.append(_result_check("bronze 实际接入", "pass" if bronze_rows else "pending",
+                                    f"bronze 共 {bronze_rows} 行。" if bronze_rows else "尚未落下 bronze。"))
+        checks.append(_result_check("silver 保留原值", "pass" if silver.get("samples") else "pending",
+                                    "已找到 raw 与清洗后值不同的样本。" if silver.get("samples")
+                                    else "尚未找到可核对的 silver raw 样本。"))
+        gold_tables = lake.get("gold", {})
+        if not gold_tables:
+            checks.append(_result_check("gold 发布结果", "pending", "尚未发布 gold。"))
+        else:
+            raw_columns = [f"{table}.{column}" for table in gold_tables
+                           for column in lake_columns.get("gold", {}).get(table, [])
+                           if column.endswith("_raw")]
+            checks.append(_result_check("gold 发布结果", "fail" if raw_columns else "pass",
+                                        "gold 含原始列：" + ", ".join(raw_columns)
+                                        if raw_columns else "gold 已发布，未发现 _raw 列。"))
+
+    elif kind == "recovery":
+        failed = [event for event in events if event.get("kind") == "SOURCE_CONNECT_FAILED"]
+        notices = [event for event in events if event.get("kind") == "SOURCE_CONNECT_NOTICE_SENT"]
+        checks.append(_result_check("坏账号连接失败被记录", "pass" if failed else "pending",
+                                    "已记录失败连接。" if failed else "尚未触发坏账号连接失败分支。"))
+        if not notices:
+            checks.append(_result_check("失败通知到 DBA", "pending", "尚未记录失败通知。"))
+        else:
+            recipients = " ".join(str(event.get("payload") or "") for event in notices).lower()
+            checks.append(_result_check("失败通知到 DBA", "pass" if "dba@acme.com" in recipients else "fail",
+                                        "通知收件人包含 DBA。" if "dba@acme.com" in recipients
+                                        else "失败通知没有发给 DBA。"))
+        transitions = [event.get("kind") for event in events
+                       if event.get("kind") in ("AMEND_PENDING", "NEW_TICKET_AFTER_DECISION")]
+        checks.append(_result_check("新账号后的恢复分支", "pass" if transitions else "pending",
+                                    " → ".join(transitions) if transitions else "等待新账号后的真实恢复分支。"))
+        bronze_rows = sum(int(value) for value in lake.get("bronze", {}).values())
+        checks.append(_result_check("bronze 实际接入", "pass" if bronze_rows else "pending",
+                                    f"bronze 共 {bronze_rows} 行。" if bronze_rows else "尚未落下 bronze。"))
+    elif kind == "contact_request":
+        source_id = str(expected.get("source_id") or "").lower()
+        email = str(expected.get("email") or "").lower()
+        source_contacts = [item for item in contacts
+                           if str(item.get("source_id") or "").lower() == source_id]
+        correct_contact = any(str(item.get("email") or "").lower() == email
+                              for item in source_contacts)
+        if correct_contact:
+            checks.append(_result_check("联系人目录落库", "pass",
+                                        f"{email} 已登记为 {source_id} 的联系人。"))
+        elif source_contacts:
+            checks.append(_result_check("联系人目录落库", "fail",
+                                        f"{source_id} 已登记联系人，但不是 {email}。"))
+        else:
+            checks.append(_result_check("联系人目录落库", "pending",
+                                        "等待模型调用联系人登记工具。"))
+        delivered = [item for item in messages
+                     if str(item.get("box") or "").lower() == email
+                     and CLAW in str(item.get("from") or "").lower()]
+        other_outbound = [item for item in messages
+                          if CLAW in str(item.get("from") or "").lower()]
+        if delivered:
+            checks.append(_result_check("给数据库管理员的真实邮件", "pass",
+                                        "数据库管理员的真实 GreenMail 收件箱已收到模型邮件。"))
+        elif other_outbound:
+            checks.append(_result_check("给数据库管理员的真实邮件", "fail",
+                                        "模型已发出邮件，但数据库管理员的收件箱没有收到。"))
+        else:
+            checks.append(_result_check("给数据库管理员的真实邮件", "pending",
+                                        "等待模型向数据库管理员发邮件。"))
+
+    elif kind == "credential_received":
+        source_id = str(expected.get("source_id") or "").lower()
+        email = str(expected.get("email") or "").lower()
+        credential_mail = [item for item in messages
+                           if str(item.get("box") or "").lower() == CLAW
+                           and email in str(item.get("from") or "").lower()
+                           and "[数据库连接串已隐藏]" in str(item.get("body") or "")]
+        checks.append(_result_check("数据库管理员的凭证安全到达", "pass" if credential_mail else "pending",
+                                    "凭证邮件已进模型收件箱；网页中的口令始终隐藏。"
+                                    if credential_mail else "等待数据库管理员的运行时凭证邮件。"))
+        connect_events = [event for event in events
+                          if _event_payload(event).get("tool") == "connect_source"]
+        if any(event.get("kind") in ("BLOCKED_PENDING_APPROVAL", "TOOL_ok")
+               for event in connect_events):
+            checks.append(_result_check("按凭证发起受控连接", "pass",
+                                        f"模型以 {source_id} 发起 connect_source，已进入审批/受控执行。"))
+        elif any(event.get("kind") == "BLOCKED_NEED_DSN" for event in connect_events):
+            checks.append(_result_check("按凭证发起受控连接", "fail",
+                                        "模型已尝试接入，却没有使用数据库管理员邮件中的连接信息。"))
+        else:
+            checks.append(_result_check("按凭证发起受控连接", "pending",
+                                        "等待模型读取邮件后决定是否发起受控接入。"))
+        notices = [(_event_payload(event), event) for event in events
+                   if event.get("kind") == "SOURCE_CONNECT_NOTICE_SENT"]
+        successful = [payload for payload, _ in notices
+                      if str(payload.get("source_id") or "").lower() == source_id
+                      and not payload.get("failed")]
+        failed = [payload for payload, _ in notices
+                  if str(payload.get("source_id") or "").lower() == source_id
+                  and payload.get("failed")]
+        def outcome_mail_delivered(payload: dict) -> bool:
+            targets = payload.get("to") or []
+            if isinstance(targets, str):
+                targets = [targets]
+            subject = str(payload.get("subject") or "")
+            return any(
+                str(message.get("box") or "").lower() in {str(x).lower() for x in targets}
+                and (str(message.get("subject") or "") == subject
+                     or str(message.get("subject") or "").startswith(subject + " [#"))
+                and CLAW in str(message.get("from") or "").lower()
+                for message in messages)
+        delivered_success = [payload for payload in successful if outcome_mail_delivered(payload)]
+        if delivered_success:
+            checks.append(_result_check("Northwind 实际连接成功", "pass",
+                                        "连接成功，且数据库管理员/数据负责人的收件箱已收到结果。"))
+        elif successful:
+            checks.append(_result_check("Northwind 实际连接成功", "pending",
+                                        "已记录连接成功，但尚未观察到对应的结果邮件。"))
+        elif failed:
+            checks.append(_result_check("Northwind 实际连接成功", "fail",
+                                        "连接已执行但失败；等待新的连接信息，不应重复接入。"))
+        else:
+            checks.append(_result_check("Northwind 实际连接成功", "pending",
+                                        "等待负责人批准后由真实 Connector 完成连接。"))
+
+    else:
+        checks.append(_result_check("Case 判据", "fail", f"未知 expected_outcome.kind：{kind}"))
+
+    states = {check["state"] for check in checks}
+    state = "fail" if "fail" in states else "pass" if states == {"pass"} else "pending"
+    summary = ("Case 正确：所有预期结果均有独立证据。" if state == "pass" else
+               "Case 不正确：至少一项实际结果与预期冲突。" if state == "fail" else
+               "Case 尚未判完：等待剩余真实动作或数据证据。")
+    return {"state": state, "expected": str(expected.get("answer") or ""),
+            "checks": checks, "summary": summary}
+
+
 def status() -> dict:
+    current = RUNS.current()
     snapshot = active_snapshot()
+    # The demo run id controls isolated reset/session hand-off.  Governance
+    # records use Hermes task/action ids (one session may contain several), so
+    # they cannot be equated.  The demo clears every evidence plane after the
+    # reset acknowledgement; its start time is the read-only current-window
+    # boundary for those nested task records.
+    started_at = float((current or {}).get("started_at") or time.time())
 
     def approval_data():
         rows = db_rows(
-            "SELECT a.id, a.tool_name, a.approver, a.created_at, a.expires_at, "
+            "SELECT a.id, a.tool_name, a.args_json, a.approver, a.created_at, a.expires_at, "
             "a.used_at, max(d.decided_at) "
             "FROM approvals a LEFT JOIN decisions d ON d.approval_id=a.id "
-            "GROUP BY a.id, a.tool_name, a.approver, a.created_at, a.expires_at, a.used_at "
-            "ORDER BY a.created_at DESC LIMIT 40")
-        return [{"id": str(r[0]), "tool": r[1], "approver": r[2],
-                 "created": str(r[3]), "expires": str(r[4]),
+            "WHERE a.created_at >= to_timestamp(%s) "
+            "GROUP BY a.id, a.tool_name, a.args_json, a.approver, a.created_at, a.expires_at, a.used_at "
+            "ORDER BY a.created_at DESC LIMIT 40", (started_at,))
+        return [{"id": str(r[0]), "tool": r[1], "summary": approval_summary(r[1], r[2]),
+                 "approver": r[3], "created": str(r[4]), "expires": str(r[5]),
                  # Callback is the sole writer of decisions; older callback
                  # paths may not update approvals.used_at.  A decision row is
                  # still terminal and must not render as pending.
-                 "used": str(r[5] or r[6]) if (r[5] or r[6]) else None}
+                 "used": str(r[6] or r[7]) if (r[6] or r[7]) else None}
                 for r in rows]
 
     def events_data():
-        rows = db_rows("SELECT kind, payload, ts FROM events ORDER BY seq DESC LIMIT 60")
+        rows = db_rows("SELECT kind, payload, ts FROM events WHERE ts >= %s "
+                       "ORDER BY seq DESC LIMIT 60", (started_at,))
         return [{"kind": r[0], "payload": redact(str(r[1] or ""))[:700],
                  "time": str(r[2])} for r in rows]
+
+    def contacts_data():
+        rows = db_rows("SELECT source_id, email, display_name, relationship, recorded_at "
+                       "FROM source_contacts WHERE recorded_at >= %s "
+                       "ORDER BY recorded_at DESC LIMIT 40", (started_at,))
+        return [{"source_id": str(r[0]), "email": str(r[1]), "display_name": str(r[2]),
+                 "relationship": str(r[3]), "recorded_at": str(r[4])} for r in rows]
 
     def query_data():
         rows = db_rows("SELECT source_id, purpose, sql_text, rows_out, duration_ms, status, ts "
@@ -442,26 +726,49 @@ def status() -> dict:
         return {"matched": False, "model_rows": [], "source_rows": source,
                 "question": ""}
 
+    approvals = safe(approval_data, lambda error: {"error": error})
+    events = safe(events_data, lambda error: {"error": error})
+    contacts = safe(contacts_data, lambda error: [])
+    messages = safe(mailboxes, lambda error: [])
+    provenance = safe(provenance_data, lambda error: {"error": error})
     lake = safe(lake_data, lambda error: {"error": error})
     lake_columns = safe(lambda: lake_columns_data(lake), lambda error: {})
     direct = safe(sales_direct, lambda error: [])
+    silver = safe(lambda: silver_samples(lake), lambda error: {"error": error})
+    gold = safe(lambda: gold_data(lake), lambda error: {"error": error})
+    comparison = safe(lambda: answer_comparison(direct), lambda error: {"matched": False,
+                                                                          "model_rows": [],
+                                                                          "source_rows": direct,
+                                                                          "question": ""})
+    case_map, _ = cases()
+    case_result = safe(lambda: evaluate_case(case_map.get(str((current or {}).get("case_id") or "")),
+                                              snapshot,
+                                              events=events if isinstance(events, list) else [],
+                                              lake=lake if isinstance(lake, dict) else {},
+                                              lake_columns=lake_columns if isinstance(lake_columns, dict) else {},
+                                              silver=silver if isinstance(silver, dict) else {},
+                                              provenance=provenance if isinstance(provenance, list) else [],
+                                              answer_comparison=comparison if isinstance(comparison, dict) else {},
+                                              messages=messages if isinstance(messages, list) else [],
+                                              contacts=contacts if isinstance(contacts, list) else []),
+                       lambda error: {"state": "pending", "expected": "", "checks": [],
+                                      "summary": "Case 判据暂不可读。"})
     return {
-        "agent": agent_state(), "run": RUNS.current(), "snapshot": snapshot,
-        "approvals": safe(approval_data, lambda error: {"error": error}),
-        "events": safe(events_data, lambda error: {"error": error}),
+        "agent": agent_state(), "run": current, "snapshot": public_snapshot(snapshot),
+        "environment": {"snapshot_ready": snapshot_dependencies_ready()},
+        "approvals": approvals,
+        "events": events,
+        "contacts": contacts,
         "queries": safe(query_data, lambda error: {"error": error}),
-        "provenance": safe(provenance_data, lambda error: {"error": error}),
+        "provenance": provenance,
         "source": safe(source_data, lambda error: {"error": error}),
         "lake": lake,
         "lake_columns": lake_columns,
-        "silver": safe(lambda: silver_samples(lake), lambda error: {"error": error}),
-        "gold": safe(lambda: gold_data(lake), lambda error: {"error": error}),
+        "silver": silver,
+        "gold": gold,
         "source_sales": direct,
-        "answer_comparison": safe(lambda: answer_comparison(direct),
-                                   lambda error: {"matched": False,
-                                                  "model_rows": [],
-                                                  "source_rows": direct,
-                                                  "question": ""}),
+        "answer_comparison": comparison,
+        "case_result": case_result,
         "updated_at": int(time.time()),
     }
 
@@ -510,6 +817,19 @@ def clear_governance() -> None:
         admin_exec(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE")
 
 
+def ensure_demo_schema() -> None:
+    """Apply the small, idempotent demo schema migration before a new run.
+
+    Docker's initdb hook only runs for a brand-new named volume. A developer
+    keeping a demo volume therefore needs this migration before the source
+    connection idempotency gate can read the non-secret connection identity.
+    The migration executes with the demo admin account, never in the browser
+    or the Agent role.
+    """
+    migration = ROOT / "infra" / "migrations" / "20260911_source_secret_identity.sql"
+    admin_exec(migration.read_text(encoding="utf-8"))
+
+
 def clear_lake() -> None:
     for schema in ("gold", "silver", "bronze"):
         tables = trino("SELECT table_name FROM iceberg.information_schema.tables "
@@ -536,15 +856,34 @@ def reset_acknowledged(run_id: str) -> bool:
 def case_packet(case: dict, snapshot: dict) -> dict:
     history = "\n\n".join(
         f"--- 已发生邮件 · {item['from']} · {item['subject']} ---\n{item['body']}"
-        for item in case.get("history", []))
-    opening = case["opening"]
+        for item in snapshot.get("history", case.get("history", [])))
+    opening = snapshot.get("opening") or case.get("opening")
+    if not isinstance(opening, dict):
+        raise ValueError("Snapshot is missing opening mail")
+    opening_body = str(opening["body"])
+    # Credentials belong to the isolated runtime, never to cases.json or the
+    # browser metadata.  GreenMail receives the complete email for Hermes;
+    # fetch()/public_mail() redact the password before any page response.
+    if snapshot.get("private_opening") == "demo_source_dsn":
+        dsn = os.environ.get("DEMO_SOURCE_DSN", "").strip()
+        if not dsn.startswith(("postgres://", "postgresql://")):
+            raise RuntimeError("DEMO_SOURCE_DSN is unavailable for credential Case")
+        opening_body += "\n\n连接串（仅按受控接入流程使用，不要复述）：\n" + dsn
+    table_scope = str(snapshot.get("table_scope") or
+                      (", ".join(snapshot["source_tables"])
+                       if snapshot.get("source_tables")
+                       else "本轮未指定任何业务表。"))
     body = (
         f"【演练 Case：{case['title']}】\n"
         f"【数据库 Snapshot：{snapshot['title']} / {snapshot['database']}】\n"
-        f"可用的本轮源表：{', '.join(snapshot['source_tables'])}\n"
+        f"本轮表范围：{table_scope}\n"
         f"说明：{snapshot['note']}\n\n"
+        f"【本 Snapshot 的受控范围】\n"
+        f"仅可执行：{', '.join(snapshot.get('tool_scope', [])) or '无'}。"
+        f"达到「{snapshot.get('terminal_condition') or '本轮预期'}」后停止，"
+        "不要延伸到后续流程。\n\n"
         f"【此前人员邮件记录】\n{history}\n\n"
-        f"【当前邮件 · {opening['from']}】\n{opening['body']}"
+        f"【当前邮件 · {opening['from']}】\n{opening_body}"
     )
     return {"from": opening["from"], "subject": opening["subject"], "body": body}
 
@@ -561,6 +900,7 @@ def deliver_after_gateway(run_id: str, case: dict, snapshot: dict) -> None:
                 # the agent acknowledges termination is it safe to clean the
                 # mail, governance, and lake planes for this exact run.
                 try:
+                    ensure_demo_schema()
                     clear_lake()
                     clear_governance()
                     clear_mail()
@@ -591,11 +931,10 @@ def start_run(case_id: str, snapshot_id: str) -> dict:
     case, snapshot = case_map.get(case_id), snapshot_map.get(snapshot_id)
     if not case or not snapshot or snapshot_id not in case.get("snapshots", []):
         raise ValueError("invalid case / snapshot combination")
+    if not snapshot_dependencies_ready():
+        raise DemoNotReady
     run = RUNS.begin(case, snapshot)
     try:
-        clear_lake()
-        clear_governance()
-        clear_mail()
         request_agent_reset(run["id"])
     except Exception as exc:  # noqa: BLE001
         RUNS.update_current(state="snapshot_failed", error=type(exc).__name__)
@@ -634,6 +973,7 @@ def verification() -> list[dict]:
     active_case = case_map.get(str((current or {}).get("case_id") or ""), {})
     expected = set(active_case.get("expects", []))
     run_id = str((current or {}).get("id") or "")
+    started_at = float((current or {}).get("started_at") or time.time())
     model_ready = (state.get("state") == "ready"
                    and state.get("model_probe") == "pass"
                    and bool(run_id) and state.get("run_id") == run_id)
@@ -671,7 +1011,8 @@ def verification() -> list[dict]:
                        "pass" if not source_can_write else "fail",
                        "evidence": f"ops_reader INSERT orders = {source_can_write}"})
     event_rows = safe(lambda: db_rows(
-        "SELECT kind, payload FROM events ORDER BY seq DESC LIMIT 160"),
+        "SELECT kind, payload FROM events WHERE ts >= %s ORDER BY seq DESC LIMIT 160",
+        (started_at,)),
         lambda error: [])
     event_data = []
     for kind, payload in event_rows:
@@ -684,9 +1025,14 @@ def verification() -> list[dict]:
     for kind, payload in event_data:
         if kind != "SOURCE_CONNECT_NOTICE_SENT" or not payload.get("failed"):
             continue
+        targets = payload.get("to") or []
+        if isinstance(targets, str):
+            targets = [targets]
         for message in messages:
-            if (message.get("box") == payload.get("to")
-                    and message.get("subject") == payload.get("subject")
+            if (message.get("box") in targets
+                    and (message.get("subject") == payload.get("subject")
+                         or str(message.get("subject") or "").startswith(
+                             str(payload.get("subject") or "") + " [#"))
                     and ("失败" in message.get("body", "")
                          or "连不上" in message.get("body", ""))):
                 bound_notice = payload
@@ -788,9 +1134,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/":
             return self.reply(200, page(), "text/html; charset=utf-8")
         if self.path == "/api/meta":
-            case_map, snapshot_map = cases()
-            return self.reply(200, {"cases": list(case_map.values()),
-                                    "snapshots": list(snapshot_map.values())})
+            return self.reply(200, {"cases": public_cases(),
+                                    "snapshots": public_snapshots()})
         if self.path == "/api/status":
             return self.reply(200, status())
         if self.path == "/api/mail":
@@ -818,6 +1163,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, {"error": "not found"})
         except (ValueError, json.JSONDecodeError) as exc:
             return self.reply(400, {"error": type(exc).__name__})
+        except DemoNotReady:
+            return self.reply(503, {"error": "演练环境仍在准备，请等数据服务就绪后再试"})
         except Exception as exc:  # noqa: BLE001
             return self.reply(503, {"error": type(exc).__name__})
 
