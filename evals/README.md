@@ -1,8 +1,12 @@
 # R5 Eval —— 体外判分
 
+> **术语以 [docs/eval-model.md](../docs/eval-model.md) 为准**（Case / Snapshot / Trajectory / max_turn / Expected Outcome / Evaluator），
+> 两层共用同一套定义；本文只讲这一层的判分与取证。
+
 > **这一份测的是「跑一趟下来机制有没有失守」。** 另有一层
-> [行为 eval](behavior/README.md)：不跑流程，直接构造脏局面
-> （挂两天的线、过期票、换过的负责人），只判终态与副作用。
+> [行为 eval](behavior/README.md)：从实测中提取局面，独立还原快照回放
+> （首次登记、挂两天的线、过期票、换过的负责人），只判终态与副作用。
+> 具体案例在 [Case / Snapshot 编写目录](behavior/cases/README.md) 维护。
 > 两层的体外/体内分界线相同 —— 判分器与取证在 `evals/`，
 > 驱动与状态注入在 `tests/`，`test_isolation.py` 一起管。
 

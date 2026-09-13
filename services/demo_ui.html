@@ -5,6 +5,7 @@
       --ok:#087443;--bad:#b42318;--wait:#a15c00;--accent:#1d4ed8;--accent-bg:#eef4ff}
 *{box-sizing:border-box}
 body{font:14px/1.6 system-ui,-apple-system,"PingFang SC",sans-serif;background:var(--bg);color:var(--ink);margin:0}
+[hidden]{display:none!important}
 main{max-width:1180px;margin:auto;padding:0 20px 60px}
 h1,h2,h3{margin:0}
 h2{font-size:16px;margin-bottom:10px}
@@ -91,6 +92,17 @@ th{color:var(--dim);font-weight:500;background:#fafbfc}
 .check:last-child{border-bottom:0}
 .check .why{color:var(--dim);font-size:12.5px}
 .check pre{max-height:130px;font-size:12px}
+.state-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px}
+.state-grid .card{margin:0;min-width:0}
+.state-grid .check{overflow-wrap:anywhere}
+.record-list{max-height:260px;overflow:auto}
+.func-note{border-top:1px solid var(--line);padding-top:10px;margin:12px 0 0;color:var(--dim);font-size:12px}
+.func-note code{display:block;color:var(--ink);font-size:12px;overflow-wrap:anywhere}
+.task-input{border-left:3px solid #4f8cc9;padding:10px 13px;background:#f7faff;margin:12px 0}
+.task-input .text{white-space:pre-wrap;overflow-wrap:anywhere}
+.task-scope{margin:8px 0;color:var(--dim);font-size:13px}
+#runstate{margin:10px 0;color:var(--dim);font-size:13px}
+@media(max-width:900px){.state-grid{grid-template-columns:1fr}}
 .dev{display:none}
 body.devmode .dev{display:block}
 body.devmode .devhide{display:none}
@@ -108,8 +120,46 @@ body.devmode .devhide{display:none}
 
 <main>
 
+<section class=card id=taskBrief hidden></section>
+
+<section class=card id=resultCard hidden>
+  <h2 id=resultTitle>本轮测评</h2>
+  <div id=runstate></div>
+  <div id=caseOutcome></div>
+</section>
+
+<section class="card turn" id=turn>
+  <div id=turnContent></div>
+  <div class=body id=replyArea hidden>
+    <form id=mailForm>
+      <label class=hint for=mailFrom>回信身份</label>
+      <select id=mailFrom>
+        <option value="boss@acme.com">老板 · boss@acme.com</option>
+        <option value="wang@acme.com">王工 · wang@acme.com</option>
+        <option value="dba@acme.com">数据库管理员 · dba@acme.com</option>
+      </select>
+      <input id=mailSubject placeholder="主题" aria-label="回信主题" required>
+      <textarea id=mailBody rows=4 placeholder="正文" aria-label="回信正文" required></textarea>
+      <button class=primary id=sendMailBtn>以这个身份发出去</button>
+      <span class=hint>自动刷新会保留尚未发送的内容。</span>
+    </form>
+  </div>
+</section>
+
+<section class=state-grid aria-label="场景与登记状态">
+  <article class=card id=scenarioContacts></article>
+  <article class=card id=registeredContacts></article>
+  <article class=card id=registeredCatalog></article>
+</section>
+
+<section class=card>
+  <h2>对话时间线 <button id=backendToggle>显示模型后台动作</button></h2>
+  <p class=hint id=timelineHint style="margin:-4px 0 10px">默认只看对话和人工审批；需要核对模型调用或系统事件时再展开。</p>
+  <div class=tl id=timeline></div>
+</section>
+
 <details class="card intro" id=intro>
-  <summary>这个页面是什么？第一次来先看这三句</summary>
+  <summary>页面说明与运行机制</summary>
   <ol>
     <li><b>这是什么。</b>Case 是固定环境：谁负责什么、有哪些数据和权限边界。Snapshot 是这个
         环境的一个时刻：此前邮件、本轮可见源表和一封当前来信。模型会在真实 Hermes 运行时拿到
@@ -122,22 +172,6 @@ body.devmode .devhide{display:none}
   <p class=hint>页面没有治理权限：它只能投递人的真实回信、把审批链接转给独立 callback，
      并只读展示记录。工具 schema 由 Hermes 运行时提供，不由网页伪造。</p>
 </details>
-
-<section class=card>
-  <div id=runstate></div>
-</section>
-
-<section class=card>
-  <div id=caseOutcome></div>
-</section>
-
-<section class="card turn" id=turn></section>
-
-<section class=card>
-  <h2>对话时间线 <button id=backendToggle>显示模型后台动作</button></h2>
-  <p class=hint id=timelineHint style="margin:-4px 0 10px">默认只看对话和人工审批；需要核对模型调用或系统事件时再展开。</p>
-  <div class=tl id=timeline></div>
-</section>
 
 <section class=card id=actionsCard hidden>
   <h2>模型实际调用</h2>
@@ -164,6 +198,24 @@ const CLAW = 'claw@acme.test';
 let meta = {cases: [], snapshots: []}, last = {}, mailCache = [], busy = false,
     showBackend = false, followUp = null;
 let choosingNewCase = false;
+const mailDrafts = new Map();
+let mailDraftRun = null, sendingMail = false;
+
+function readMailDraft(){
+  return {from:$('#mailFrom').value, subject:$('#mailSubject').value, body:$('#mailBody').value};
+}
+function setMailDraft(draft = {}){
+  $('#mailFrom').value = draft.from || 'boss@acme.com';
+  $('#mailSubject').value = draft.subject || '';
+  $('#mailBody').value = draft.body || '';
+}
+function syncMailDraft(s){
+  const runId = !choosingNewCase && s.run ? s.run.id : null;
+  if(runId === mailDraftRun) return;
+  if(mailDraftRun) mailDrafts.set(mailDraftRun, readMailDraft());
+  mailDraftRun = runId;
+  setMailDraft(mailDrafts.get(runId));
+}
 
 async function api(path, method='GET', body){
   const r = await fetch(path, {method, headers:{'Content-Type':'application/json'},
@@ -231,7 +283,7 @@ const RUN_STATE = {
   reset_acknowledged: {step:0, text:'网关已确认停机，正在重启并清掉旧会话',
                        next:'等它重新连上邮箱'},
   case_delivered:     {step:1, text:'任务邮件已经送进管家的信箱',
-                       next:'管家开始读信、查源库、按需要发审批'},
+                       next:'等待本轮后续记录'},
   gateway_blocked:    {step:-1, text:'网关起不来，这一轮没有模型在跑',
                        next:'多半是模型端点不可用或免费额度到期。看顶栏的模型名和到期日，换一个再重开一轮'},
   snapshot_failed:    {step:-1, text:'清空 / 还原环境时出错',
@@ -331,19 +383,27 @@ function runPhase(s){
   if(choosingNewCase) return {kind:'not_started', text:'正在选择下一份 Snapshot；当前运行不会被改变。'};
   if(!s.run) return {kind:'not_started', text:'还没有把 Snapshot 交给模型。'};
   if((s.case_result || {}).state === 'pass')
-    return {kind:'complete', text:'Snapshot 已完成：预期结果已由独立记录核对通过。'};
+    return {kind:'complete', text:'本轮预期已核对通过，无需继续发信或审批。'};
   const m = RUN_STATE[s.run.state];
-  if(m && m.step === -1) return {kind:'failed', text:m.text, next:m.next};
+  if(m && m.step === -1) return {kind:'failed', text:'本轮已中断。' + m.text, next:m.next};
+  /* 结束只认记录，不靠「好久没动静了」去猜 —— 猜出来的「已结束」会把还在跑的
+     一轮说成收口了。没达成目标的那一轮由 turn 预算从外部停止（门禁数的，不是
+     页面猜的）；达成目标的那一轮走上面的 complete。 */
+  const turns = s.turns || {};
+  if(turns.exhausted)
+    return {kind:'ended', text:'本轮已用满 ' + turns.budget + ' 个 turn 的执行预算，已由门禁停止。',
+      next:'预算内没达到预期即为未通过。按下方核对结果看它走到了哪一步。'};
   const pending = (Array.isArray(s.approvals) ? s.approvals : []).filter(x => !x.used);
-  if(pending.length) return {kind:'approval', text:'模型已申请 ' + pending.length + ' 个受控动作，正在等真实审批。'};
+  if(pending.length) return {kind:'approval', text:'等待人工审批，共 ' + pending.length + ' 个受控动作。',
+    next:'请在下方查看具体申请，决定是否批准。'};
   if(m && m.step === 0) return {kind:'preparing', text:m.text + '。' + m.next};
-  if(m && m.step === 1){
-    const events = Array.isArray(s.events) ? s.events.length : 0;
-    return {kind:'running', text:events
-      ? 'Snapshot 已交给模型；它正在根据当前状态和运行时工具决定下一动作。'
-      : m.text + '。' + m.next};
-  }
-  return {kind:'running', text:'正在等待模型或外部状态带来下一动作。'};
+  if(s.agent && s.agent.state && s.agent.state !== 'ready')
+    return {kind:'unavailable', text:'模型当前不可用；尚未收到本轮结束记录。',
+      next:'等待模型恢复后，再核对后续记录。'};
+  return {kind:'observing', text:'尚未收到本轮结束记录，无法确认模型此刻是否仍在执行。',
+    next:(s.case_result || {}).state === 'fail'
+      ? '先查看未通过项和最近回信；有补充信息时再回复。'
+      : '页面会继续更新；模型来信要求补充信息时，再在下方回信。'};
 }
 
 function personName(identity){
@@ -368,45 +428,57 @@ function snapshotContext(s){
   return {case:c, snapshot:snapshot};
 }
 
-function currentStory(s){
-  const context = snapshotContext(s), c = context.case, snapshot = context.snapshot;
-  if(!c || !snapshot) return '选定 Snapshot 后，模型只会看到这个时刻的邮件、状态和本轮可见源表。';
-  if(!s.run || choosingNewCase)
-    return '固定环境不变；当前预览「' + snapshot.title + '」，模型只会从这个时刻的邮件、状态和本轮可见源表继续判断。';
-  if((s.case_result || {}).state === 'pass')
-    return '起因是' + personName((snapshot.opening || {}).from) + '提供了当前连接信息；'
-      + '连接已在负责人批准后成功完成，本 Snapshot 已在终点收口。';
-  const events = Array.isArray(s.events) ? s.events : [];
-  const has = kind => events.some(e => e.kind === kind);
-  const hasTool = tool => events.some(e => {
-    try { return e.kind === 'TOOL_ok' && JSON.parse(e.payload || '{}').tool === tool; }
-    catch(_) { return false; }
-  });
-  const opening = snapshot.opening || {};
-  const cause = personName(opening.from) + '因「' + (opening.subject || '当前来信') + '」要求处理这份数据';
-  const inspected = hasTool('profile_table') || hasTool('list_source_tables');
-  const pending = (Array.isArray(s.approvals) ? s.approvals : []).filter(a => !a.used);
-  if(pending.length)
-    return '起因是' + cause + '；模型' + (inspected ? '已查看源表和数据画像' : '已收到请求') +
-      (has('BLOCKED_NEED_DSN') ? '，但缺少可用连接信息，数据尚未落湖' : '') +
-      '，现正等待' + personName(pending[0].approver) + '审批「' + toolCN(pending[0].tool) + '」。';
-  if(has('BLOCKED_NEED_DSN'))
-    return '起因是' + cause + '；模型' + (inspected ? '已查看源表和数据画像' : '正在核对输入') +
-      '，但缺少可用连接信息，数据尚未落湖；它会根据后续真实回信决定下一步。';
-  if(inspected)
-    return '起因是' + cause + '；模型已查看源表和数据画像，正根据已有邮件与真实工具结果决定下一步。';
-  return '起因是' + cause + '；Snapshot 已交给模型，正等待它的第一条真实动作或回信。';
+function taskContent(c, snapshot){
+  const opening = snapshot.opening || c.opening || {};
+  return '<div class=task-input><h3>当前来信 · ' + esc(personName(opening.from)) + '</h3>' +
+    '<p style="margin:5px 0"><b>' + esc(opening.subject || '主题未提供') + '</b></p>' +
+    '<div class=text>' + esc(opening.body || '当前来信尚未提供。') + '</div></div>' +
+    '<p><b>本轮测什么：</b>' + esc(snapshot.note || '测评说明尚未提供。') + '</p>' +
+    '<p><b>通过长什么样：</b>' + esc(snapshot.expected_summary ||
+      '这个 Snapshot 还没写预期结果。') + '</p>' +
+    '<p class=task-scope><b>本轮范围：</b>' + esc(snapshot.table_scope ||
+      (snapshot.source_tables || []).join('、') || '未指定业务表。') +
+    (snapshot.max_turn ? ' · 执行预算 ' + snapshot.max_turn + ' 个 turn' : '') + '</p>';
+}
+
+function renderTaskBrief(s){
+  const el = $('#taskBrief'), context = snapshotContext(s);
+  el.hidden = !s.run || choosingNewCase || !context.case || !context.snapshot;
+  if(el.hidden) return;
+  el.innerHTML = '<h2>' + esc(context.case.title) + ' · ' + esc(context.snapshot.title) + '</h2>' +
+    taskContent(context.case, context.snapshot);
+}
+
+/* 中断这一轮的原因要留在页面上：`run.error` 记的是当时网关报的 detail，
+   只说「本轮已中断」等于把唯一的线索丢了。 */
+function failureDetail(s){
+  const run = s.run || {}, a = s.agent || {};
+  /* 顶栏读的是网关此刻的状态，run 记的是这一轮开始时的状态。两者可以同时为真
+     （网关后来自己好了），摆在一起像自相矛盾，所以这里直接说破。 */
+  const recovered = a.state === 'ready' && a.model_probe === 'pass';
+  return (run.error ? '<p class=hint style="margin:5px 0 0">当时的错误记录：' +
+           esc(run.error) + '</p>' : '') +
+    (recovered ? '<p class=hint style="margin:5px 0 0">顶栏现在显示模型在线 —— ' +
+      '网关后来自己好了，但这一轮是在它起不来的时候开的，补不回来。直接重开一轮。</p>' : '');
+}
+
+/* 预算是测试窗口，照着说清楚：模型不知道终点在哪，它只有这么多 turn。 */
+function turnBudget(s){
+  const turns = s.turns || {};
+  if(turns.error) return '<p class=hint style="margin:5px 0 0">turn 计数暂不可读。</p>';
+  if(!turns.budget) return '';
+  return '<p class=hint style="margin:5px 0 0"><b>执行预算：</b>已用 ' + turns.spent +
+    ' / ' + turns.budget + ' 个 turn' + (turns.exhausted ? '（已停止）' : '') + '。</p>';
 }
 
 function renderRunState(s){
   const phase = runPhase(s);
-  const cls = phase.kind === 'failed' ? 'bad' : phase.kind === 'approval' ? 'wait' :
-    phase.kind === 'complete' ? 'pass' : 'hint';
-  const afterApproval = followUpText();
-  $('#runstate').innerHTML = '<h2>' + (phase.kind === 'failed' ? '这份 Snapshot 已中断' :
-    phase.kind === 'complete' ? '这份 Snapshot 已完成' : '当前状态') +
-    '</h2><p class="' + cls + '" style="margin:0">' + esc(phase.text) + '</p>' +
-    '<p class=hint style="margin:9px 0 0">' + esc(currentStory(s)) + '</p>' +
+  $('#resultCard').hidden = phase.kind === 'not_started';
+  const afterApproval = ['complete', 'ended', 'failed'].includes(phase.kind) ? '' : followUpText();
+  $('#runstate').innerHTML = '<p style="margin:0"><b>运行状态：</b>' + esc(phase.text) + '</p>' +
+    (phase.kind === 'failed' ? failureDetail(s) : '') +
+    (phase.next ? '<p style="margin:5px 0 0">' + esc(phase.next) + '</p>' : '') +
+    turnBudget(s) +
     (afterApproval ? '<p class=wait style="margin:9px 0 0"><span class="pill fresh">新</span> ' +
       esc(afterApproval) + '</p>' : '');
   return phase;
@@ -415,19 +487,22 @@ function renderRunState(s){
 function renderCaseOutcome(s){
   const el = $('#caseOutcome'), result = s.case_result || {};
   if(!s.run || choosingNewCase){
-    el.innerHTML = '<h2>Snapshot 判定</h2><p class=hint>模型执行后，会用当前 Snapshot 的隐藏预期结果与真实记录核对；预期结果不会发送给模型。</p>';
+    el.innerHTML = '';
     return;
   }
-  const state = result.state || 'pending';
-  const label = state === 'pass' ? 'Snapshot 正确' : state === 'fail' ? 'Snapshot 不正确' : '尚未判完';
+  const state = result.state || 'pending', phase = runPhase(s);
+  const label = state === 'pass' ? '本轮测评通过' : state === 'fail' ? '本轮测评未通过'
+    : phase.kind === 'ended' ? '本轮测评超预算未通过'
+    : phase.kind === 'failed' ? '本轮测评未完成' : '本轮测评待判定';
+  $('#resultTitle').textContent = label;
+  $('#resultTitle').className = state === 'pass' ? 'pass' : state === 'fail' ? 'fail' : 'pending';
   const checks = Array.isArray(result.checks) ? result.checks : [];
-  el.innerHTML = '<h2>Snapshot 判定</h2><p class="' + (state === 'pass' ? 'pass' : state === 'fail' ? 'fail' : 'pending') + '">' +
-    '<b>' + esc(label) + '</b> · ' + esc(result.summary || '') + '</p>' +
-    '<p class=hint><b>预期结果：</b>' + esc(result.expected || '—') + '</p>' +
+  el.innerHTML = '<p class=hint><b>核对目标：</b>' + esc(result.expected || '等待判分记录。') + '</p>' +
     (checks.length ? checks.map(check => '<div class=check><div class="' + esc(check.state) + '"><b>' +
       esc(STATE_ICON[check.state] || '○') + ' ' + esc(check.name) + '</b> · ' +
-      esc(STATE_CN[check.state] || check.state) + '</div><div class=hint>' +
-      esc(check.evidence) + '</div></div>').join('') : '<div class=empty>暂时没有可判的记录。</div>');
+      esc(check.state === 'pending' ? '等待证据' : STATE_CN[check.state] || check.state) + '</div><div class=hint>' +
+      esc(check.evidence) + '</div></div>').join('') : '<div class=empty>暂时没有可判的记录。</div>') +
+    (['complete', 'ended', 'failed'].includes(phase.kind) ? newSnapshotControl() : '');
 }
 
 /* ---------- 「现在轮到你」 ---------- */
@@ -437,14 +512,73 @@ function snapById(id){ return meta.snapshots.find(x => x.id === id); }
 
 function environmentCard(c){
   const environment = c.environment || {};
-  const people = (environment.people || []).map(person =>
-    esc(person.name) + '：' + esc(person.responsibility) +
-    (person.email ? '（' + esc(person.email) + '）' : '')).join('；');
   const assets = (environment.assets || []).map(asset =>
     esc(asset.name) + '（' + esc(asset.kind || '') + '，' + esc(asset.tables || '') + '）').join('；');
   return '<h3>固定环境</h3><p class=hint>' + esc(environment.summary || '—') + '</p>' +
-    (people ? '<p class=hint><b>人：</b>' + people + '</p>' : '') +
     (assets ? '<p class=hint><b>数据：</b>' + assets + '</p>' : '');
+}
+
+/* ---------- 场景设定与本轮实际登记 ---------- */
+
+function funcNote(name, description){
+  return '<p class=func-note><code>' + esc(name) + '</code>' + esc(description) + '</p>';
+}
+
+function renderRegistrationState(s){
+  const context = snapshotContext(s), c = context.case, snapshot = context.snapshot;
+  const preview = !s.run || choosingNewCase;
+  const people = ((c || {}).environment || {}).people || [];
+  const empty = text => '<div class=empty>' + esc(text) + '</div>';
+  const record = (title, detail) => '<div class=check><b>' + esc(title) + '</b>' +
+    '<div class=hint>' + esc(detail) + '</div></div>';
+  const observedAt = value => value
+    ? ' · 记录于 ' + new Date(Number(value) * 1000).toLocaleString('zh-CN', {hour12:false}) : '';
+
+  $('#scenarioContacts').innerHTML = '<h2>场景联系人</h2><div class=record-list>' +
+    (people.length ? people.map(person => record(person.name || '姓名未提供',
+      (person.responsibility || '职责未提供') + ' · ' + (person.email || '邮箱未提供'))).join('')
+      : empty('场景尚未提供联系人。')) + '</div>' +
+    funcNote('public_cases()', '输入场景配置，返回人物及职责，用于展示场景已知联系人。');
+
+  const contacts = Array.isArray(s.contacts) ? s.contacts.filter(person =>
+    person.source_id === (snapshot || {}).database) : [];
+  const contactsBody = preview ? empty('本轮未开始，暂无登记记录。')
+    : !Array.isArray(s.contacts) ? empty('联系人记录暂不可读。')
+    : contacts.length ? contacts.map(person => record(
+      (person.display_name || person.email) + ' · 已登记',
+      person.email + ' · ' + person.source_id + ' · ' + person.relationship)).join('')
+    : empty('尚未登记联系人。');
+  $('#registeredContacts').innerHTML = '<h2>已登记联系人</h2><div class=record-list>' +
+    contactsBody + '</div>' + funcNote('register_contact(source_id, email, …)',
+      '输入数据源、邮箱及联系人信息，保存并返回登记结果，不授予审批权限。');
+
+  const catalog = s.catalog || {};
+  const inScope = !!(snapshot && (snapshot.source_tables || []).length);
+  let catalogBody;
+  if(!snapshot) catalogBody = empty('选定 Snapshot 后显示本轮登记范围。');
+  else if(!inScope) catalogBody = empty('本轮不涉及表格与关系登记。');
+  else if(preview) catalogBody = empty('本轮未开始，暂无登记记录。');
+  else if(catalog.error || !Array.isArray(catalog.tables) || !Array.isArray(catalog.relationships))
+    catalogBody = empty('表格与关系记录暂不可读。');
+  else {
+    catalogBody = '<h3>表格</h3>' + (catalog.tables.length ? catalog.tables.map(item => record(
+      item.asset + ' · ' + (item.registered ? '已登记' : '未登记'),
+      item.registered ? item.columns + ' 列' + observedAt(item.observed_at) : '尚无表结构登记记录。')).join('')
+      : empty('尚未登记表格。'));
+    const relationState = {observed:'已观测外键', inferred:'待确认', confirmed:'已确认', refuted:'已否定'};
+    catalogBody += '<h3 style="margin-top:12px">关系</h3>' +
+      (catalog.relationships.length ? catalog.relationships.map(item => record(item.label,
+        (relationState[item.state] || '状态未知') + (item.note ? ' · ' + item.note : '') +
+        observedAt(item.observed_at))).join('')
+        : empty('尚无关系登记记录。'));
+  }
+  $('#registeredCatalog').innerHTML = '<h2>已登记表格与关系</h2><div class=record-list>' +
+    catalogBody + '</div>' + funcNote('describe_asset(source, table, refresh?)',
+      '输入数据源和表名，返回结构及关系档案；无档或指定刷新时采集并登记。') +
+    funcNote('propose_link(asset_a, asset_b, …)',
+      '输入两张表，返回带证据的候选关系，默认登记为待确认。') +
+    funcNote('confirm_link(asset, link_key, …)',
+      '输入资产和候选关系标识，经负责人批准后返回已确认的关系。');
 }
 
 function startCard(){
@@ -453,10 +587,11 @@ function startCard(){
   const sel = $('#caseSel') ? $('#caseSel').value : cs[0].id;
   const c = caseById(sel) || cs[0];
   const selectedSnapshot = ($('#snapSel') && $('#snapSel').value) || c.snapshots[0];
+  const snapshot = snapById(selectedSnapshot) || snapById(c.snapshots[0]);
   const snaps = c.snapshots.map(id => {
     const x = snapById(id);
-    return '<option value="' + esc(id) + '"' + (id === selectedSnapshot ? ' selected' : '') + '>' + esc(x ? x.title : id) +
-           ' · ' + esc(x ? (x.table_scope || x.source_tables.join('、')) : '') + '</option>';
+    return '<option value="' + esc(id) + '"' + (id === selectedSnapshot ? ' selected' : '') + '>' +
+      esc(x ? x.title : id) + '</option>';
   }).join('');
   const ready = !last.environment || last.environment.snapshot_ready !== false;
   const caseControl = cs.length === 1
@@ -464,28 +599,16 @@ function startCard(){
     : '<h2>选一个 Case</h2><label class=hint>Case</label><select id=caseSel>' +
       cs.map(x => '<option value="' + esc(x.id) + '"' +
         (x.id === c.id ? ' selected' : '') + '>' + esc(x.title) + '</option>').join('') + '</select>';
-  return caseControl + '<div class=body>' + environmentCard(c) +
+  return caseControl + '<div class=body>' +
     '<label class=hint>Snapshot（选择当前时刻）</label><select id=snapSel>' + snaps + '</select>' +
-    '<p class=hint>Snapshot 是同一环境的一个时刻：历史邮件、当前来信和本轮可见源表会交给模型；工具由 Hermes 在同一真实 turn 中提供。' +
-    '页面不发送步骤提示、预设回信或预写结果。仅切换列表不会修改当前运行。</p>' +
-    '<button class=primary id=startBtn' + (ready ? '' : ' disabled') + '>交给模型</button>' +
+    (snapshot ? taskContent(c, snapshot) : '<p>快照信息暂不可读。</p>') +
+    '<button class=primary id=startBtn' + (ready ? '' : ' disabled') + '>开始本轮测评</button> ' +
+    (last.run ? '<button id=cancelPreviewBtn>返回当前运行</button>' : '') +
     (ready ? '' : '<p class=wait style="margin:10px 0 0">数据服务仍在启动；就绪后按钮会自动可用。</p>') +
-    '<p class=hint style="margin:10px 0 0">开始会隔离本轮状态：清空数据湖、治理库和邮箱，重启网关并清掉会话。' +
-    '<b>源库永远只读，不会被清也不会被写。</b></p></div>';
-}
-
-function brokenCard(s){
-  const m = RUN_STATE[s.run.state] || {text:s.run.state, next:''};
-  const a = s.agent || {};
-  /* 顶栏读的是网关此刻的状态，run 记的是这一轮开始时的状态。两者可以同时为真，
-     但摆在一起像自相矛盾，所以这里直接说破。 */
-  const recovered = a.state === 'ready' && a.model_probe === 'pass';
-  return '<h2><span class="dot bad"></span>这一轮跑不下去了</h2><div class=body>' +
-    '<p><b>' + esc(m.text) + '</b>' + (s.run.error ? '（' + esc(s.run.error) + '）' : '') + '</p>' +
-    (recovered ? '<p class=hint>顶栏现在显示模型在线 —— 网关后来自己好了，' +
-       '但这一轮是在它起不来的时候开的，已经补不回来。直接重开一轮。</p>' : '') +
-    '<p class=hint>怎么办：' + esc(m.next) + '</p>' +
-    '<button class=primary id=againBtn>选择新的 Snapshot</button></div>';
+    '<p class=hint style="margin:10px 0 0">开始新一轮会清空上一轮的演练数据和邮箱；源库保持只读。</p>' +
+    '<details class=hint><summary>场景背景与启动说明</summary>' + environmentCard(c) +
+    funcNote('start_run(case_id, snapshot_id)',
+      '输入场景与快照标识，还原独立环境并投递当前来信，返回本轮运行记录。') + '</details></div>';
 }
 
 function newSnapshotControl(){
@@ -544,73 +667,63 @@ function approvalCard(cards){
         '" data-approve="' + esc(l.id) + '">' +
         (l.action === 'approve' ? '批准' : l.action === 'deny' ? '拒绝' : '选择') +
         '</button> ').join('') +
-      '</div><p class=hint style="margin:9px 0 0">点下去等于点邮件里那枚一次性链接：' +
-      '页面把令牌转给独立的审批进程，由它写决定。页面自己没有写审批的权限。</p></div>').join('') +
+      '</div><details class=hint style="margin:9px 0 0"><summary>审批如何提交</summary>' +
+      '页面把邮件中的一次性令牌转给独立审批进程，由它记录决定。</details></div>').join('') +
     newSnapshotControl();
 }
 
 function replyCard(s, messages){
-  const lastMsg = messages.filter(m => m.origin === '模型邮件输出').slice(-1)[0];
-  return '<h2><span class=spin></span> 管家在工作中</h2><div class=body>' +
+  const lastMsg = dedupe(messages).filter(m => m.origin === '模型邮件输出').slice(-1)[0];
+  return '<h2>回信与补充信息</h2>' +
     (lastMsg ? '<p class=hint>它最近发给 ' + esc(mailRecipient(lastMsg)) + ' 的一封信：<b>' + esc(lastMsg.subject) + '</b></p>' +
                '<p class=text style="white-space:pre-wrap;max-height:8em;overflow:auto">' +
                esc(lastMsg.body.slice(0, 600)) + '</p>' : '') +
-    '<p class=hint style="margin-top:12px">只有模型真的需要补充信息时，才在这里以相应人员身份写一封真实回信。' +
-    '没有预填台词；没有新输入时就留空。</p>' + newSnapshotControl() +
-    '<form id=mailForm>' +
-    '<select id=mailFrom>' + ['boss@acme.com','wang@acme.com','dba@acme.com']
-      .map(x => '<option>' + x + '</option>').join('') + '</select>' +
-    '<input id=mailSubject placeholder="主题" required>' +
-    '<textarea id=mailBody rows=4 placeholder="正文" required></textarea>' +
-    '<button class=primary>以这个身份发出去</button></form></div>';
+    '<p class=hint style="margin-top:12px">模型需要补充信息时，以对应身份回信；没有新输入时留空。</p>' +
+    newSnapshotControl();
 }
 
+/* 审批提交后的那一段：点击时立刻写一次，随后每次轮询也要重画出来 ——
+   只在点击处理里写等于下一次 refresh 就把它抹掉。它不独占这张卡，
+   回信入口照常留着，模型后面还可能来信要补充信息。 */
 function continuingCard(){
-  return '<h2><span class=spin></span> 审批已提交，管家正在继续</h2><div class=body>' +
+  return '<h2>审批已提交，等待后续记录</h2><div class=body>' +
     '<p>' + esc(followUpText()) + '</p>' +
-    '<p class=hint>新回信和人工决定会在时间线标「新」；新后台动作会在「显示模型后台动作」按钮上提示数量。</p></div>' +
-    newSnapshotControl();
-}
-
-function completedCard(result){
-  return '<h2><span class="dot" style="color:var(--good)"></span> Snapshot 已完成</h2><div class=body>' +
-    '<p>本轮的预期结果已经由独立记录核对通过，不需要再发信、审批或继续调用工具。</p>' +
-    '<p class=hint>' + esc(result.summary || '所有预期结果均有独立证据。') + '</p></div>' +
-    newSnapshotControl();
+    '<p class=hint>新回信和人工决定会在时间线标「新」；新后台动作会在「显示模型后台动作」按钮上提示数量。</p></div>';
 }
 
 function renderTurn(s, messages, st){
-  const el = $('#turn');
-  if(choosingNewCase || !s.run){ el.className = 'card turn'; el.innerHTML = startCard(); return; }
-  if(st.kind === 'failed'){ el.className = 'card turn broken'; el.innerHTML = brokenCard(s); return; }
-  if((s.case_result || {}).state === 'pass'){
-    el.className = 'card turn idle'; el.innerHTML = completedCard(s.case_result || {}); return;
+  const shell = $('#turn'), el = $('#turnContent');
+  syncMailDraft(s);
+  shell.hidden = false;
+  $('#replyArea').hidden = !['observing', 'unavailable'].includes(st.kind);
+  if(choosingNewCase || !s.run){ shell.className = 'card turn'; el.innerHTML = startCard(); return; }
+  if(['complete', 'ended', 'failed'].includes(st.kind)){
+    shell.hidden = true;
+    return;
   }
   const cards = approvalCards(messages, Array.isArray(s.approvals) ? s.approvals : []);
   const live = cards.filter(c => !c.decided);
-  if(live.length){ el.className = 'card turn'; el.innerHTML = approvalCard(live); return; }
+  if(live.length){ shell.className = 'card turn'; el.innerHTML = approvalCard(live); return; }
   const pending = (Array.isArray(s.approvals) ? s.approvals : []).filter(x => !x.used);
   if(pending.length){
-    el.className = 'card turn';
+    shell.className = 'card turn';
     el.innerHTML = '<h2><span class=spin></span> 审批申请已发出，邮件还在路上</h2><div class=body>' +
       '<p>' + pending.map(x => esc(toolCN(x.tool))).join('、') +
       '</p><p class=hint>等这封信落进 ' + esc(pending[0].approver) +
       ' 的信箱，批准按钮就会出现在这里。</p></div>' + newSnapshotControl();
     return;
   }
-  if(followUp){
-    el.className = 'card turn idle'; el.innerHTML = continuingCard(); return;
-  }
   if(st.kind === 'preparing'){
-    el.className = 'card turn idle';
+    shell.className = 'card turn idle';
     el.innerHTML = '<h2><span class=spin></span> 正在准备环境</h2><div class=body><p>' +
       esc(RUN_STATE[s.run.state].text) + '</p><p class=hint>' +
       esc(RUN_STATE[s.run.state].next) + '。这一步不需要你做任何事。</p></div>' +
       newSnapshotControl();
     return;
   }
-  el.className = 'card turn idle';
-  el.innerHTML = replyCard(s, messages);
+  shell.className = 'card turn idle';
+  el.innerHTML = (followUp ? continuingCard() : '') + replyCard(s, messages);
+  $('#replyArea').hidden = false;
 }
 
 /* ---------- 时间线 ---------- */
@@ -896,8 +1009,10 @@ async function refresh(){
     last = s;
 
     const phase = renderRunState(s);
+    renderTaskBrief(s);
     renderCaseOutcome(s);
     renderTurn(s, messages, phase);
+    renderRegistrationState(s);
     renderTimeline(s, messages);
     renderActions(s);
     renderBackendToggle();
@@ -919,7 +1034,10 @@ async function refresh(){
 document.addEventListener('change', e => {
   if(e.target.id === 'caseSel' || e.target.id === 'snapSel'){
     const phase = renderRunState(last);
+    renderTaskBrief(last);
+    renderCaseOutcome(last);
     renderTurn(last, mailCache, phase);
+    renderRegistrationState(last);
     renderTimeline(last, mailCache);
   }
 });
@@ -930,8 +1048,10 @@ document.addEventListener('click', async e => {
     if(t.id === 'againBtn'){
       choosingNewCase = true;
       const phase = renderRunState(last);
+      renderTaskBrief(last);
       renderCaseOutcome(last);
       renderTurn(last, mailCache, phase);
+      renderRegistrationState(last);
       renderTimeline(last, mailCache);
       return;
     }
@@ -946,6 +1066,15 @@ document.addEventListener('click', async e => {
     }catch(err){ fail(err.message); t.disabled = false; }
     refresh();
   }
+  if(t.id === 'cancelPreviewBtn'){
+    choosingNewCase = false;
+    const phase = renderRunState(last);
+    renderTaskBrief(last);
+    renderCaseOutcome(last);
+    renderTurn(last, mailCache, phase);
+    renderRegistrationState(last);
+    renderTimeline(last, mailCache);
+  }
   if(t.dataset.approve){
     t.disabled = true;
     try{
@@ -956,8 +1085,9 @@ document.addEventListener('click', async e => {
       else if(r.status < 300){
         beginFollowUp(before.state, before.mail);
         say('审批已提交。管家会在下次唤醒时继续；之后新出现的内容会标「新」。');
-        const turn = $('#turn');
-        turn.className = 'card turn idle'; turn.innerHTML = continuingCard();
+        $('#turn').hidden = false;
+        $('#turn').className = 'card turn idle';
+        $('#turnContent').innerHTML = continuingCard();
       }
       else fail('审批进程返回 HTTP ' + r.status + ' · ' + msg);
     }catch(err){ fail(err.message); }
@@ -983,12 +1113,25 @@ document.addEventListener('click', async e => {
 document.addEventListener('submit', async e => {
   if(e.target.id !== 'mailForm') return;
   e.preventDefault();
+  if(sendingMail || !mailDraftRun || choosingNewCase) return;
+  sendingMail = true;
+  $('#sendMailBtn').disabled = true;
+  const runId = mailDraftRun, sent = readMailDraft();
   try{
-    await api('/api/send', 'POST', {from: $('#mailFrom').value,
-      subject: $('#mailSubject').value, body: $('#mailBody').value});
+    await api('/api/send', 'POST', sent);
     say('已经真的发进 GreenMail。管家下次收信时会看到。');
-    $('#mailSubject').value = ''; $('#mailBody').value = '';
+    const current = mailDraftRun === runId ? readMailDraft() : mailDrafts.get(runId);
+    // Only clear the submitted draft. New typing or another run's draft stays.
+    if(current && Object.keys(sent).every(key => current[key] === sent[key])){
+      const cleared = {from:sent.from, subject:'', body:''};
+      mailDrafts.set(runId, cleared);
+      if(mailDraftRun === runId) setMailDraft(cleared);
+    }
   }catch(err){ fail(err.message); }
+  finally{
+    sendingMail = false;
+    $('#sendMailBtn').disabled = false;
+  }
   refresh();
 });
 
@@ -1000,11 +1143,7 @@ document.addEventListener('submit', async e => {
       document.body.classList.add('devmode');
       $('#modeToggle').textContent = '演示视图';
     }
-    if(localStorage.getItem('demoui.intro') !== 'seen') $('#intro').open = true;
-    $('#intro').addEventListener('toggle', () => {
-      try{ if(!$('#intro').open) localStorage.setItem('demoui.intro', 'seen'); }catch(_){}
-    });
-  }catch(_){ $('#intro').open = true; }
+  }catch(_){}
   try{ meta = await api('/api/meta'); }
   catch(e){ fail('读不到 Case 列表：' + e.message); }
   await refresh();

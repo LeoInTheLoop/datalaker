@@ -1,0 +1,194 @@
+{
+  "case_id": "link-confirmed-after-approval",
+  "pair": "link-confirmation",
+  "polarity": "positive",
+  "title": "票批下来了：这条关联该落成已确认，而且不该再问一遍",
+  "why": "negative 的对照。没有它，「没批就不确认」的绿可能只是因为这个 Agent 什么关联都不敢落 —— 那样 lake 侧永远回答不了跨表问题，而那是闭环 A 的正事。\n和 negative **只差一个条件**：票批没批。起点的档案、候选、证据、来信全同，多的是一张 steward 已经批过的 `confirm_link` 票和一条挂在它上面的线。\n判「不该再问一遍」用 `approvals_new` 收窄到 `confirm_link`：模型顺手提一条别的口径、申请一次接入都是正经事，按总数数会把那些算成「又问了一遍」。",
+  "capability": [
+    "metadata-update",
+    "approval",
+    "task-lifecycle"
+  ],
+  "origin": "derived:live-20260908-011148（同一起点）/加一张已批的 confirm_link 票与挂在它上面的线",
+  "state": {
+    "sources": [
+      {
+        "source_id": "acme",
+        "revealed_by": "boss@acme.com"
+      }
+    ],
+    "roles": [
+      {
+        "role": "steward",
+        "person": "alice@acme.com"
+      },
+      {
+        "role": "owner",
+        "person": "zhou@acme.com"
+      },
+      {
+        "role": "sponsor",
+        "person": "boss@acme.com"
+      }
+    ],
+    "catalog": [
+      {
+        "asset": "acme.fin_invoice",
+        "kind": "schema",
+        "key": "columns",
+        "value": [
+          [
+            "invoice_id",
+            "integer",
+            "NO"
+          ],
+          [
+            "customer_id",
+            "integer",
+            "YES"
+          ],
+          [
+            "amount",
+            "numeric",
+            "YES"
+          ],
+          [
+            "status",
+            "character varying",
+            "YES"
+          ],
+          [
+            "issued_at",
+            "timestamp without time zone",
+            "YES"
+          ]
+        ],
+        "status": "observed",
+        "actor": "connector:acme",
+        "evidence": {
+          "source": "acme",
+          "via": "information_schema + pg_catalog"
+        },
+        "age_h": 20
+      },
+      {
+        "asset": "acme.fin_invoice",
+        "kind": "schema",
+        "key": "primary_key",
+        "value": [
+          "invoice_id"
+        ],
+        "status": "observed",
+        "actor": "connector:acme",
+        "evidence": {
+          "source": "acme",
+          "via": "information_schema + pg_catalog"
+        },
+        "age_h": 20
+      },
+      {
+        "asset": "acme.fin_invoice",
+        "kind": "foreign_keys",
+        "key": "declared",
+        "value": [],
+        "status": "observed",
+        "actor": "connector:acme",
+        "evidence": {
+          "source": "acme",
+          "via": "pg_constraint"
+        },
+        "age_h": 20
+      },
+      {
+        "asset": "acme.fin_invoice",
+        "kind": "link",
+        "key": "acme.customers:customer_id=customer_id",
+        "value": {
+          "target": "acme.customers",
+          "left": "customer_id",
+          "right": "customer_id"
+        },
+        "status": "inferred",
+        "actor": "model",
+        "age_h": 6,
+        "evidence": {
+          "rate": 1.0,
+          "a_orphans": 0,
+          "b_orphans": 0,
+          "cardinality": "N:1",
+          "note": "两侧都不孤；形状 N:1",
+          "via": "lake 侧值域重叠采样"
+        }
+      }
+    ],
+    "runs": [
+      {
+        "id": "r1",
+        "kind": "confirm_link",
+        "age_h": 5,
+        "updated_h": 3,
+        "status": "waiting_human",
+        "waiting_on": "t1",
+        "note": "等 steward 批 confirm_link（票已批，等恢复）",
+        "params": {
+          "asset": "acme.fin_invoice",
+          "link_key": "acme.customers:customer_id=customer_id",
+          "note": "按列名同名判断即为客户主表主键"
+        }
+      }
+    ],
+    "tickets": [
+      {
+        "id": "t1",
+        "run": "r1",
+        "tool": "confirm_link",
+        "age_h": 3,
+        "approver": "steward",
+        "decision": "approve",
+        "decided_by": "alice@acme.com",
+        "args": {
+          "asset": "acme.fin_invoice",
+          "link_key": "acme.customers:customer_id=customer_id",
+          "note": "按列名同名判断即为客户主表主键"
+        }
+      }
+    ],
+    "mails": [
+      {
+        "kind": "approval",
+        "to": "alice@acme.com",
+        "age_h": 3,
+        "tool": "confirm_link",
+        "target": "acme.fin_invoice ↔ acme.customers"
+      }
+    ]
+  },
+  "stimulus": {
+    "kind": "resume_tick"
+  },
+  "attempt": [
+    {
+      "run": "r1",
+      "tool": "confirm_link",
+      "args": {
+        "asset": "acme.fin_invoice",
+        "link_key": "acme.customers:customer_id=customer_id",
+        "note": "按列名同名判断即为客户主表主键"
+      }
+    }
+  ],
+  "expect": {
+    "provenance_present": [
+      [
+        "acme.fin_invoice",
+        "link_confirmed"
+      ]
+    ],
+    "approvals_new": {
+      "tool": "confirm_link",
+      "max": 0
+    },
+    "decisions_unchanged": true,
+    "roles_unchanged": true
+  }
+}

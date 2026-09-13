@@ -86,7 +86,11 @@ services:
       # 不是被授权人：能给 steward 写信，但审批资格仍只看 role_assignment，
       # 正文里写「同意」照样不作数。
       EMAIL_ALLOWED_USERS: boss@acme.com,wang@acme.com,dba@acme.com,orders-owner@acme.com,employees-owner@acme.com
-      CLAW_RESUME_UNIT_SECONDS: "60"
+      # 不设 CLAW_RESUME_UNIT_SECONDS：用 ops/resumable.py 的生产值 3600。
+      # 这里原先留着调试值 60，而那一格正是 monitor 抑制重复唤醒的慢变量 ——
+      # 设成 60 它每分钟变一次，哈希每次都不同，抑制永远失效。实测 2026-09-13：
+      # 被 WIP 挡回的 ingest_table 每 2 分钟被唤醒重试一次，29 个 turn 里 16 个
+      # 白烧在同一堵墙上。要快速看重试就临时在命令行设，别写死在演示环境里。
       CLAW_NO_BOOTSTRAP_SOURCES: "1"
       TRINO_URL: https://trino:8443
       TRINO_WRITE_USER: claw

@@ -126,8 +126,8 @@ def _budget_exceeded():
     return over
 
 
-def _demo_snapshot_scope() -> tuple[str, tuple[str, ...], str] | None:
-    """Return the selected demo Snapshot's bounded tool scope, if enabled.
+def _demo_snapshot_scope() -> dict | None:
+    """Return the selected demo Snapshot's bounded tool scope and turn budget.
 
     A Snapshot is an isolated, fixed moment in a Case, not a miniature copy of
     the whole governance programme. Its permitted side effects therefore
@@ -153,8 +153,15 @@ def _demo_snapshot_scope() -> tuple[str, tuple[str, ...], str] | None:
                          if isinstance(item, dict) and item.get("id") == snapshot_id), None)
         scope = tuple(str(name) for name in (snapshot or {}).get("tool_scope", [])
                       if str(name))
-        terminal = str((snapshot or {}).get("terminal_condition") or "")
-        return (snapshot_id, scope, terminal) if scope else None
+        # `terminal_condition` is deliberately NOT read here: it belongs to the
+        # evaluator, and every string this function returns can end up in a
+        # block message, which is model context.
+        max_turn = int((snapshot or {}).get("max_turn") or 0)
+        started_at = float(run.get("started_at") or 0)
+        if not scope and max_turn <= 0:
+            return None
+        return {"id": snapshot_id, "scope": scope,
+                "max_turn": max_turn, "started_at": started_at}
     except (OSError, json.JSONDecodeError, TypeError):
         # A demo presentation constraint must never relax normal governance
         # policy merely because its observer files are temporarily unavailable.
@@ -164,14 +171,60 @@ def _demo_snapshot_scope() -> tuple[str, tuple[str, ...], str] | None:
 def _snapshot_scope_block(tool_name: str):
     """Keep a selected demo Snapshot from spilling into later workflow steps."""
     context = _demo_snapshot_scope()
-    if context is None or tool_name not in POLICY:
+    if context is None or not context["scope"] or tool_name not in POLICY:
         return None
-    snapshot_id, allowed, terminal = context
+    snapshot_id, allowed = context["id"], context["scope"]
     if tool_name in allowed:
         return None
-    end = f"；终点是{terminal}" if terminal else ""
+    # `terminal_condition` 不进 block message：被拦的文本也是模型上下文，
+    # 在这里写终点等于绕个弯泄题（docs/eval-model.md 红线 2）。
     return (f"[SNAPSHOT_SCOPE] 当前 Snapshot（{snapshot_id}）只允许："
-            f"{', '.join(allowed)}。{tool_name} 属于后续流程，本轮不执行{end}。")
+            f"{', '.join(allowed)}。{tool_name} 本轮不执行。")
+
+
+# The turn budget is a test window, not a governance level: it is the only
+# thing that stops a Run that never reaches its endpoint.  See
+# docs/eval-model.md -- "目标达成即止" lives in the cron wake side and reads a
+# real success event; this is the other half, "没达成也必须停".
+TURN_BLOCK_CODE = "SNAPSHOT_TURNS"
+
+
+def _spends_turn(kind: str) -> bool:
+    """Whether one recorded event means the model spent a turn."""
+    if kind == f"BLOCKED_{TURN_BLOCK_CODE}":
+        return False            # this guard's own events must not self-inflate
+    return kind.startswith("TOOL_") or kind.startswith("BLOCKED_")
+
+
+def _snapshot_turn_block(st, tool_name: str):
+    """Hard stop once this Run has spent its ``max_turn`` budget.
+
+    A turn is one tool call that reached the gate, blocked ones included: the
+    model really did spend a call, and counting only successful handlers lets
+    it loop forever against the same block.  This guard's own events are
+    excluded, or the count would grow on every call after the budget is gone.
+
+    Failing to read the count must not lift the budget -- an unreadable ledger
+    is the case where an unbounded Run is most likely, so it blocks.
+    """
+    context = _demo_snapshot_scope()
+    if context is None or context["max_turn"] <= 0 or tool_name not in POLICY:
+        return None
+    budget = context["max_turn"]
+    # Count in Python, not in SQL: `rows_of` hands one statement to both
+    # backends, and a `LIKE 'TOOL_%'` pattern carries a `%` that psycopg reads
+    # as a placeholder.  The filter is also easier to assert this way.
+    try:
+        rows = rows_of(st, "SELECT kind FROM events WHERE ts >= {0}",
+                       (context["started_at"],))
+        spent = sum(1 for row in rows if _spends_turn(str(row[0] or "")))
+    except Exception as exc:                                 # noqa: BLE001
+        return (f"[{TURN_BLOCK_CODE}] 读不到本轮 turn 计数（{type(exc).__name__}），"
+                f"按 fail-closed 停止：无法证明还在预算内。")
+    if spent < budget:
+        return None
+    return (f"[{TURN_BLOCK_CODE}] 本轮已用满 {budget} 个 turn 的执行预算，"
+            f"外部停止，不再执行 {tool_name}。判分以已发生的记录为准。")
 
 
 def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
@@ -223,6 +276,12 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     # 在建票和工具 handler 之前收口，避免一次连接成功后继续查表、提阶段
     # 问题或再次接入。正常部署不启用这条 demo-only scope。
     why = _snapshot_scope_block(tool_name)
+    if why:
+        return {"action": "block", "message": why}
+
+    # The turn budget closes last among the Snapshot guards: a call that is out
+    # of scope should read as out of scope, not as out of budget.
+    why = _snapshot_turn_block(st, tool_name)
     if why:
         return {"action": "block", "message": why}
 
@@ -1021,16 +1080,35 @@ def _wip_exceeded(st, approver_role):
     try:
         if st.open_count() >= glob:
             return (f"[WIP_LIMIT] 全局在办已达上限 {glob} 件，暂不发起新事项。"
-                    f"请先推进其他不受阻塞的任务线。")
+                    f"**在有人处理掉待办之前，同样的请求会得到同样的回答，当前不要重试**；"
+                    f"请先推进其他不受阻塞的任务线，或者把现状告诉提出需求的人。")
         # 按**角色**计数：approvals.approver 存的是角色（readme 10.4 绑角色不绑人）。
         # 解析成真人再计数会永远匹配不上——换人时在办事项也不该被清零。
         if st.open_count(approver_role) >= per:
             who = st.resolve_role(approver_role) or approver_role
-            return (f"[WIP_LIMIT] {who} 当前已有 {per} 件待办，暂不发起新事项。"
-                    f"请先推进其他不受阻塞的任务线。")
+            # 说清「等谁、等什么、什么时候会变」。只说"请先推进其他任务线"时，
+            # 唯一那条线就是被挡住这条的场景下，模型只能反复重试 ——
+            # 实测 2026-09-13：16 次 WIP 拦截全是同一个 ingest_table。
+            # 这段话是**解释**，不是限制：真限制是上面的计数本身（执行边界 1）。
+            pending = _wip_pending(st, approver_role)
+            return (f"[WIP_LIMIT] {who} 当前已有 {per} 件待办{pending}，暂不发起新事项。"
+                    f"**在 TA 处理掉待办之前，同样的请求会得到同样的回答，当前不要重试**；"
+                    f"请先推进其他不受阻塞的任务线，或者把现状告诉提出需求的人。")
     except Exception:
         return None                       # 计数失败不阻断正常审批
     return None
+
+
+def _wip_pending(st, approver_role: str) -> str:
+    """把「在等哪几件」摆出来，模型才知道该等什么、该跟谁说。"""
+    try:
+        rows = rows_of(st, "SELECT tool_name FROM approvals WHERE approver = {0}"
+                           " AND used_at IS NULL ORDER BY created_at LIMIT 5",
+                       (approver_role,))
+    except Exception:                                        # noqa: BLE001
+        return ""
+    tools = [str(r[0]) for r in rows if r and r[0]]
+    return f"（在等：{'、'.join(tools)}）" if tools else ""
 
 
 def _runs():

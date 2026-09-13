@@ -113,7 +113,7 @@ L4 照旧不自动执行。扣住的信落在审批表里，由 callback 进程�
 | 变化发现 | 独立巡检（`metadata_watch.sweep`）比对五项观测事实，标记受影响结论为待复核并按人通知；覆盖 `sync._schema_hash` 认不出的可空性变化与外键删除 | 已确认的连接被结构变化标记后，只能人拍，尚无真实性复算；重洗待办未接 |
 | 领域记忆 | 外键推断落档案 inferred 层、审批统计等函数 | 部分主要由测试调用，尚未接成日常取回和定期维护机制 |
 | 运维 | 事件、用量账本、状态面板 | 体外 supervisor 尚未完成 |
-| Eval | 注入数据判分、机制测试、桩与真模型驱动入口；另有一层[行为 eval](evals/behavior/README.md)：直接构造脏局面（挂两天的线、过期票、换过的负责人），只判终态与副作用，positive/negative 配对，判据**三态**（读不到证据判 INCONCLUSIVE，绝不退化成通过），**拆掉护栏跑一遍验判据有没有牙齿**，`raw.json` 可单独重判不必重跑模型 | 跨表业务价值对照尚未建立；lake 侧终态只有代理证据 |
+| Eval | 注入数据判分、机制测试、桩与真模型驱动入口；术语与起点构造规则见 [eval-model](docs/eval-model.md)；演练台 Snapshot 可声明 `state` 注入起点事实并用 `max_turn` 从 `pre_tool_call` 外部停止；另有一层[行为 eval](evals/behavior/README.md)：直接构造脏局面（挂两天的线、过期票、换过的负责人），只判终态与副作用，positive/negative 配对，判据**三态**（读不到证据判 INCONCLUSIVE，绝不退化成通过），**拆掉护栏跑一遍验判据有没有牙齿**，`raw.json` 可单独重判不必重跑模型 | 跨表业务价值对照尚未建立；lake 侧终态只有代理证据 |
 
 关键代码入口：[工具](.hermes/plugins/data-steward/tools.py)、[策略](plugins/datasteward_gate/policy.py)、
 [调度](.hermes/plugins/data-steward/cron.py)、[知识存储](plugins/datasteward_gate/approvals.py)、
@@ -176,6 +176,17 @@ L4 照旧不自动执行。扣住的信落在审批表里，由 callback 进程�
 positive 必配 negative；模拟用户只用来**发现** case，发现后固化成 snapshot。
 配对判据（negative 单独绿判 `INCONCLUSIVE`）和 `xfail` 比那份规范更严，
 judge 那一档是**有意不做**（CLAUDE.md 形态先定：判分器必须离线跑，不依赖模型端点）。
+
+两层共用的术语、起点构造规则与不泄题红线收在
+[docs/eval-model.md](docs/eval-model.md)。其中有两条是后来逐字核对规范才补上的，
+原先这里只写了一半：
+
+- **前置条件进 `state`，不靠历史消息表达**（规范原话：earlier turns are for state
+  the behavior itself carries, **and for nothing else**）。「已连接、已登记、已批准」
+  要写成库里的事实，不是构造一串邮件往来演出来。
+- **路径判据只用在路径本身就是被测行为的地方**；实测走了意料外的路而结果是对的，
+  **要放宽 case 到可接受集合，不是把 case 钉到刚观测到的那条路上**。
+  后者是 case 烂掉的主要方式。
 
 逐条比下来缺的是下面三样，按「拿到什么 ÷ 改动风险」排序。
 

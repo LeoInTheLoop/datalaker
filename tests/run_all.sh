@@ -27,6 +27,9 @@ export APPROVAL_PORT=${APPROVAL_PORT:-8787}
 rc=0
 PY=./.venv/bin/python; [ -x "$PY" ] || PY=python3
 
+echo "########## 0.1 Snapshot 来信边界 ##########"
+$PY tests/test_demo_ui.py || rc=1
+
 echo "########## 0. L0 平台冒烟（datalake 独立可用） ##########"
 if docker ps --format '{{.Names}}' | grep -q datalaker-trino-1; then
   python3 tests/test_lakehouse_smoke.py || rc=1
