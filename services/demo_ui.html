@@ -390,9 +390,9 @@ function runPhase(s){
      一轮说成收口了。没达成目标的那一轮由 turn 预算从外部停止（门禁数的，不是
      页面猜的）；达成目标的那一轮走上面的 complete。 */
   const turns = s.turns || {};
-  if(turns.exhausted)
-    return {kind:'ended', text:'本轮已用满 ' + turns.budget + ' 个 turn 的执行预算，已由门禁停止。',
-      next:'预算内没达到预期即为未通过。按下方核对结果看它走到了哪一步。'};
+  if(turns.closed)
+    return {kind:'ended', text:'本轮固定观察窗口已结束，Hermes 进程已停止。',
+      next:'缺少证据的项目保持未判定；可查看实际输入与运行记录。'};
   const pending = (Array.isArray(s.approvals) ? s.approvals : []).filter(x => !x.used);
   if(pending.length) return {kind:'approval', text:'等待人工审批，共 ' + pending.length + ' 个受控动作。',
     next:'请在下方查看具体申请，决定是否批准。'};
@@ -438,7 +438,7 @@ function taskContent(c, snapshot){
       '这个 Snapshot 还没写预期结果。') + '</p>' +
     '<p class=task-scope><b>本轮范围：</b>' + esc(snapshot.table_scope ||
       (snapshot.source_tables || []).join('、') || '未指定业务表。') +
-    (snapshot.max_turn ? ' · 执行预算 ' + snapshot.max_turn + ' 个 turn' : '') + '</p>';
+    (snapshot.window_seconds ? ' · 观察窗口 ' + snapshot.window_seconds + ' 秒' : '') + '</p>';
 }
 
 function renderTaskBrief(s){
@@ -465,10 +465,10 @@ function failureDetail(s){
 /* 预算是测试窗口，照着说清楚：模型不知道终点在哪，它只有这么多 turn。 */
 function turnBudget(s){
   const turns = s.turns || {};
-  if(turns.error) return '<p class=hint style="margin:5px 0 0">turn 计数暂不可读。</p>';
-  if(!turns.budget) return '';
-  return '<p class=hint style="margin:5px 0 0"><b>执行预算：</b>已用 ' + turns.spent +
-    ' / ' + turns.budget + ' 个 turn' + (turns.exhausted ? '（已停止）' : '') + '。</p>';
+  if(!turns.deadline) return '';
+  return '<p class=hint style="margin:5px 0 0"><b>观察窗口：</b>' + turns.window_seconds +
+    ' 秒' + (turns.closed ? '（已停止）' : '（与判分结果无关）') +
+    (turns.budget ? '；工具调用 ' + turns.spent + ' / ' + turns.budget : '') + '。</p>';
 }
 
 function renderRunState(s){
@@ -479,6 +479,7 @@ function renderRunState(s){
     (phase.kind === 'failed' ? failureDetail(s) : '') +
     (phase.next ? '<p style="margin:5px 0 0">' + esc(phase.next) + '</p>' : '') +
     turnBudget(s) +
+    '<p class=hint><a href="/api/inputs" target="_blank">查看实际模型输入与运行配置（凭证脱敏）</a></p>' +
     (afterApproval ? '<p class=wait style="margin:9px 0 0"><span class="pill fresh">新</span> ' +
       esc(afterApproval) + '</p>' : '');
   return phase;

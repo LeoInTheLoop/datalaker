@@ -35,3 +35,6 @@ hooks:
   - post_tool_call
   - pre_approval_request
   - post_llm_call
+  - pre_api_request
+  - post_api_request
+  - api_request_error

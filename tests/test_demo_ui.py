@@ -47,40 +47,17 @@ class DemoUIContracts(unittest.TestCase):
             self.assertNotIn(leaked, packet["body"])
         self.assertNotIn("answer_with_link(", packet["body"])
 
-    def test_all_snapshot_opening_mail_excludes_harness_metadata(self):
-        """新增 Snapshot 时，测试说明不能悄悄变成模型输入。"""
-        raw = json.loads(ui.CASES_FILE.read_text(encoding="utf-8"))
-        self.assertEqual(ui.snapshot_mail_violations(raw), [])
-
-        broken = json.loads(json.dumps(raw, ensure_ascii=False))
-        broken["snapshots"][0]["opening"] = {
-            "from": "boss@acme.com", "subject": "接入数据",
-            "body": "本轮判断模型是否登记联系人，完成后通过。",
-        }
-        violations = ui.snapshot_mail_violations(broken)
-        self.assertTrue(violations)
-        self.assertIn("本轮", violations[0])
-        with self.assertRaises(ValueError):
-            ui.validate_snapshot_mail_contract(broken)
-
-    def test_history_is_delivered_as_real_mail_not_quoted_into_one_letter(self):
-        """邮箱里躺着四封信，和一封信里引用了三封信，是两种不同的输入。"""
+    def test_history_cannot_be_replayed_as_extra_new_events(self):
         cases, snapshots = ui.cases()
         case = cases["northwind-connection-handoff"]
         snapshot = dict(snapshots["northwind-boss-points-dba"])
-        snapshot["history"] = [
-            {"from": "wang@acme.com", "subject": "第一封", "body": "最早的来信。"},
-            {"from": "boss@acme.com", "subject": "第二封", "body": "追问一次。"},
-        ]
-        box = ui.snapshot_mailbox(case, snapshot)
-        self.assertEqual([mail["subject"] for mail in box],
-                         ["第一封", "第二封", snapshot["opening"]["subject"]])
-        # 历史不进当前来信的正文 —— 那一拼就成了我们写的摘要。
-        self.assertNotIn("最早的来信", box[-1]["body"])
-        self.assertNotIn("追问一次", box[-1]["body"])
-        # 每封都要过 send_mail 的发件人校验，否则投不进 GreenMail。
-        for mail in box:
-            self.assertIn(mail["from"], ui.PEOPLE)
+        snapshot["history"] = [{"from": "boss@acme.com", "subject": "old", "body": "old"}]
+        # 钉类型和关键字段，不钉具体文案 —— 文案会改，「被拒绝且说得出是哪一项」不会。
+        for call in (lambda: ui.snapshot_mailbox(case, snapshot),
+                     lambda: ui.validate_snapshot(case, snapshot)):
+            with self.assertRaises(ui.SnapshotUnsupported) as caught:
+                call()
+            self.assertIn("history", str(caught.exception))
 
     def test_snapshot_view_only_receives_snapshot_state(self):
         """Full-simulation staging remains server-side until that view exists."""
@@ -284,7 +261,7 @@ class DemoUIContracts(unittest.TestCase):
             provenance=[], answer_comparison={},
             contacts=[{"source_id": "northwind", "email": "dba@acme.com"}],
             messages=[{"box": "dba@acme.com", "from": "claw@acme.test"}])
-        self.assertEqual(result["state"], "pass")
+        self.assertEqual(result["state"], "pending")  # Delivery is not semantic correctness.
 
     def test_credential_case_requires_a_real_successful_connection(self):
         cases, snapshots = ui.cases()
@@ -342,7 +319,7 @@ class DemoUIContracts(unittest.TestCase):
                  "subject": "Re: 按客户把发票汇总一下", "body": "不建议按 ship_name 汇总"}],
             **common)
         asked = next(c for c in with_reply["checks"] if c["name"] == "拿不准的对应交给了人")
-        self.assertEqual(asked["state"], "pass")
+        self.assertEqual(asked["state"], "pending")  # Free text requires semantic review.
 
     def test_a_precondition_is_injected_as_state_not_narrated_as_mail(self):
         """已连接/已建档是注入的事实，不是一串邮件往来演出来的。
@@ -458,33 +435,20 @@ class DemoUIContracts(unittest.TestCase):
         self.assertNotIn(snapshot["terminal_condition"], body)
         self.assertNotIn("后停止", body)
         # 白名单也不说：只剩两个工具时，边界几乎就是答案。边界由门禁在它
-        # 真撞上来时告知，那才是生产里它会遇到的形状。
+        # 正常生产规则决定，不受测试 tool_scope 影响。
         for tool in snapshot["tool_scope"]:
             self.assertNotIn(tool, body)
         self.assertNotIn("仅可执行", body)
         self.assertNotIn("terminal_condition", ui.public_snapshot(snapshot))
 
-    def test_the_turn_budget_is_declared_per_snapshot_and_shown_as_a_window(self):
+    def test_window_is_independent_of_snapshot_tool_and_turn_hints(self):
         _, snapshots = ui.cases()
-        for snapshot_id in ("northwind-boss-points-dba", "northwind-dba-sent-credentials"):
-            budget = snapshots[snapshot_id]["max_turn"]
-            self.assertGreater(budget, 0)
-            self.assertEqual(ui.public_snapshot(snapshots[snapshot_id])["max_turn"], budget)
-        page = ui.page()
-        self.assertIn("执行预算", page)
-        self.assertIn("turns.exhausted", page)
-        # 计数规则只有一份，在真正拦人的那一侧；页面只读它。
-        self.assertIn("from datasteward_gate import _spends_turn",
-                      (ROOT / "services/demo_ui.py").read_text(encoding="utf-8"))
-
-    def test_a_turn_is_any_gate_call_including_a_blocked_one(self):
-        from datasteward_gate import _spends_turn, TURN_BLOCK_CODE
-        self.assertTrue(_spends_turn("TOOL_ok"))
-        self.assertTrue(_spends_turn("TOOL_error"))
-        self.assertTrue(_spends_turn("BLOCKED_L2"))
-        self.assertFalse(_spends_turn(f"BLOCKED_{TURN_BLOCK_CODE}"))
-        self.assertFalse(_spends_turn("MAIL_SENT"))
-        self.assertFalse(_spends_turn("DECIDED_approve"))
+        for snapshot in snapshots.values():
+            altered = dict(snapshot, max_turn=1, tool_scope=["answer_with_link"])
+            public = ui.public_snapshot(altered)
+            self.assertEqual(public["window_seconds"], ui.WINDOW_SECONDS)
+            self.assertNotIn("max_turn", public)
+        self.assertIn("turns.closed", ui.page())
 
     def test_interrupted_run_keeps_its_error_and_says_the_contradiction_out_loud(self):
         page = ui.page()

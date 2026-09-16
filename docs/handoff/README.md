@@ -13,6 +13,7 @@
 | [R6.md](R6.md) | 认知维护闭环（档案 / 巡检 / 跨系统关联）| 🟡 闭环 A 完成，B / C 未开工 |
 | [P0-demo-ui.md](P0-demo-ui.md) | 独立真模型演练展示页 | 🟢 Docker 真启动，完整治理闭环待人工互动真测 |
 | [R7.md](R7.md) | 第一批：单表审批、复制与评估登记 | 🟡 A 组（指令与契约）完成，B 组未开工 |
+| [R8-snapshot-integrity.md](R8-snapshot-integrity.md) | Snapshot 输入隔离与一次 Docker 真模型验证 | 输入证据完整；联系人 Case 内容判据 FAIL |
 
 阶段跨越多个会话时，**进行中也要写**——会话可能中断，状态不能只存在上下文里。
 

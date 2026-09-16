@@ -60,9 +60,12 @@ def register(ctx):
     """
     _ensure_path()
     from datasteward_gate import audit, gate, notify
+    from snapshot_runner.input_audit import on_pre_tool_call, on_post_tool_call
 
+    ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("pre_tool_call", gate)      # 唯一能否决的挂载点
     ctx.register_hook("post_tool_call", audit)    # 观察者：event log + 账本
+    ctx.register_hook("post_tool_call", on_post_tool_call)
     ctx.register_hook("pre_approval_request", notify)  # observer-only，不能否决
 
     # Agent 自己的 token 花销记进 usage_ledger。
@@ -70,6 +73,13 @@ def register(ctx):
     # 预算兜底（5.6）读到的永远是 0，看着像没超，其实是没数。
     from .usage import on_post_llm_call
     ctx.register_hook("post_llm_call", on_post_llm_call)
+
+    # Read-only request evidence; no case data, prompt mutation or decisions.
+    from snapshot_runner.input_audit import (on_pre_api_request, on_post_api_request,
+                                             on_api_request_error)
+    ctx.register_hook("pre_api_request", on_pre_api_request)
+    ctx.register_hook("post_api_request", on_post_api_request)
+    ctx.register_hook("api_request_error", on_api_request_error)
 
     # 工具在这里注册。manifest 的 `provides_tools` + `tools.py` 那条路
     # 只对 kind: platform 生效（网关启动时预加载），standalone 插件

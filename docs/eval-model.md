@@ -56,14 +56,31 @@ debug 和 audit，**不重新塞给 Hermes**。Snapshot 关联 old trajectory �
 但真正恢复的是 old trajectory 执行到那一刻后形成的完整 State。
 
 **Run —— 从某个 Snapshot 开始的一次新执行。** 一次 Run 是一个 trial。
+**被测对象是整套 agent**（gateway ＋ 插件 ＋ Skills ＋ 门禁 ＋ Connector ＋ 治理库
+＋ 邮件链路），不是其中那个模型 —— 失败落在 Skill、门禁、工具签名还是模型判断上，
+都是这套系统的缺陷，不能因为「那是 prompt 的问题」就不算。跑一次 Run 的那套东西叫
+**Snapshot Runner**：isolate run、过程记录、max time、max turn、final state dump。
+两者都见 [snapshot-testing.md](snapshot-testing.md)。
 
 **New Trajectory —— 这次执行实际走了什么路径。** 模型输出、tool call、tool 结果、
 审批、邮件、block、数据库变化。**必须和 Snapshot 分开**：Snapshot 是起点，
 New Trajectory 是这次怎么走的。
 
 **Tool Scope / Gate —— 规定 Hermes 允许做什么。** **安全边界，不是测试答案。**
-由 `pre_tool_call` 等确定性代码执行，Hermes 即使想越权也被挡住。
-**白名单本身不告诉模型** —— 见红线 2。
+使用正常生产配置和 `pre_tool_call` 治理规则。Case 的 `tool_scope` 不得改变
+这些规则，也不得通过错误消息告诉模型「本轮只能调用哪些工具」。
+
+**当前实现约定（2026-09-15）**：演练网关有**两道外部停止**，都不依赖模型自觉：
+
+- **固定时间窗**（`DEMO_WINDOW_SECONDS`，默认 900 秒）：到点停网关及其进程组。
+- **硬 turn**（`CLAW_MAX_TURN`）：由 `pre_tool_call` 计数，**一次 turn = 一次进
+  gate 的工具调用，被 block 的也算**；到线后一律不放行（连读元数据也不放），
+  计数范围是这一轮的 run id（`CLAW_TURN_SCOPE`，由容器 entrypoint 传）。
+  **不设 = 不限**，生产默认就是不限。数不出来按停止处理 —— 数不清的窗口等于没有窗口。
+
+上限值来自部署配置，**不来自 case 文件**：Agent 容器不挂载 `demo/`，门禁不该认识
+Snapshot。Snapshot 里的旧 `max_turn` / `tool_scope` 字段仍不参与执行，只作旧材料记录。
+下文的 Calibration 仍是测评设计，不是已实现的东西。具体输入隔离、触发与证据边界见 [Snapshot 测试契约](snapshot-testing.md)。
 
 **Expected Outcome —— 隐藏的目标状态，也就是 Oracle。** 只给 Evaluator，不给 Hermes。
 浏览器可以展示一句人话版「怎样算通过」，**机器判据不进模型上下文**。

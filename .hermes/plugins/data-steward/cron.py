@@ -231,6 +231,12 @@ def ensure_jobs(root: str) -> dict:
         out["skipped"] = f"list_jobs: {e}"
         return out
 
+    if os.environ.get("DATASTEWARD_RESTORE_CRON") == "1":
+        # A restored empty schedule is also state. Do not create jobs, rewrite
+        # next_run_at, re-enable paused jobs or reset monitor suppression hashes.
+        out["existing"] = sorted(str(name) for name in have)
+        return out
+
     model, provider = _current_model(os.environ.get("HERMES_HOME", ""))
     for name, job in JOBS.items():
         job = dict(job, _model=model)      # pin 到当前配置，见 _current_model

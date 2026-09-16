@@ -20,9 +20,14 @@ services:
 
   greenmail:
     profiles: [mail, demo]
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap -Dgreenmail.setup.api
+        -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled
     ports: !override
       - "127.0.0.1:13025:3025"
       - "127.0.0.1:13143:3143"
+      - "127.0.0.1:18080:8080"
 
   approval-callback:
     profiles: [agent, demo]
@@ -60,9 +65,7 @@ services:
       CLAW_ROOT: /app
       DEMO_AGENT_STATUS_DIR: /status
       DEMO_CONTROL_DIR: /control
-      DEMO_RUN_DIR: /runs
-      DEMO_SNAPSHOT_GUARD: "1"
-      DEMO_CASES_FILE: /app/demo/cases.json
+      DATASTEWARD_INPUT_AUDIT_DIR: /audit
       NOTIFY_CHANNEL: email
       MAIL_TRANSPORT: smtp
       SMTP_HOST: greenmail
@@ -95,19 +98,27 @@ services:
       # 设成 60 它每分钟变一次，哈希每次都不同，抑制永远失效。实测 2026-09-13：
       # 被 WIP 挡回的 ingest_table 每 2 分钟被唤醒重试一次，29 个 turn 里 16 个
       # 白烧在同一堵墙上。要快速看重试就临时在命令行设，别写死在演示环境里。
+      # 硬 turn：一次演练最多让它动手多少次。产品要求是「一直推进」，
+      # 所以没有这道闸就只剩固定时间窗 —— 而窗口里它可能什么都没干，
+      # 也可能把同一堵墙撞了 20 次。一次 turn = 一次进 gate 的工具调用，
+      # 被 block 的也算。计数范围是这一轮的 run id（entrypoint 传）。
+      # 要看「它对最近这个任务的第一反应」就调小；不设 = 不限。
+      CLAW_MAX_TURN: "${CLAW_MAX_TURN:-40}"
       CLAW_NO_BOOTSTRAP_SOURCES: "1"
       TRINO_URL: https://trino:8443
       TRINO_WRITE_USER: claw
       TRINO_PASSWORD: claw_pw_change_me
-    volumes:
-      - ../.hermes/plugins:/app/.hermes/plugins
+    volumes: !override
+      - ../plugins:/app/plugins:ro
+      - ../services:/app/services:ro
+      - ../.hermes/plugins:/app/.hermes/plugins:ro
       - ../.hermes/skills:/app/.hermes/skills:ro
       - ../infra/claw.yaml:/app/infra/claw.yaml:ro
       - hermes_demo_state:/state/hermes
       - demo_agent_status:/status
       - demo_control:/control
-      - demo_runs:/runs:ro
-      - ../demo:/app/demo:ro
+      - demo_input_audit:/audit
+      - ../infra/hermes/config.yaml:/app/infra/hermes/config.yaml:ro
       - ../ops:/app/ops:ro
 
   demo-ui:
@@ -132,6 +143,8 @@ services:
       DEMO_AGENT_STATUS_DIR: /status
       DEMO_CONTROL_DIR: /control
       DEMO_RUN_DIR: /runs
+      DEMO_WINDOW_SECONDS: ${DEMO_WINDOW_SECONDS:-900}
+      DATASTEWARD_INPUT_AUDIT_DIR: /audit
       TRINO_URL: https://trino:8443
       TRINO_WRITE_USER: claw
       TRINO_PASSWORD: claw_pw_change_me
@@ -146,6 +159,7 @@ services:
       - demo_agent_status:/status:ro
       - demo_control:/control
       - demo_runs:/runs
+      - demo_input_audit:/audit:ro
     command: python /app/services/demo_ui.py
     ports: ["127.0.0.1:8088:8088"]
 
@@ -154,3 +168,4 @@ volumes:
   demo_agent_status:
   demo_control:
   demo_runs:
+  demo_input_audit:

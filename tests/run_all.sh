@@ -27,9 +27,6 @@ export APPROVAL_PORT=${APPROVAL_PORT:-8787}
 rc=0
 PY=./.venv/bin/python; [ -x "$PY" ] || PY=python3
 
-echo "########## 0.1 Snapshot 来信边界 ##########"
-$PY tests/test_demo_ui.py || rc=1
-
 echo "########## 0. L0 平台冒烟（datalake 独立可用） ##########"
 if docker ps --format '{{.Names}}' | grep -q datalaker-trino-1; then
   python3 tests/test_lakehouse_smoke.py || rc=1
@@ -73,6 +70,9 @@ echo ""
 echo "########## 0.10 硬 turn（测完一定会停） ##########"
 ( unset DATASTEWARD_DSN; $PY tests/test_turn_limit.py ) || rc=1
 
+echo "########## 0.95 Snapshot 输入隔离与真实触发契约 ##########"
+( unset DATASTEWARD_DSN; $PY -m unittest discover -s tests -p 'test_snapshot*.py' -q ) || rc=1
+( unset DATASTEWARD_DSN; $PY -m unittest discover -s tests -p 'test_demo*.py' -q ) || rc=1
 
 echo ""
 echo "########## 1. 治理 Plugin 拦截 ##########"

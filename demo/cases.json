@@ -261,6 +261,8 @@
   "snapshots": [
     {
       "id": "northwind-boss-points-dba",
+      "baseline": {"kind": "empty", "origin": "empty:northwind-first-contact", "empty_planes": ["session", "memory", "lake", "cron"]},
+      "origin": "derived:empty:northwind-first-contact/northwind-boss-points-dba",
       "database": "northwind",
       "title": "① 老板指向数据库管理员",
       "source_tables": [],
@@ -284,6 +286,8 @@
     },
     {
       "id": "northwind-dba-sent-credentials",
+      "baseline": {"kind": "empty", "origin": "empty:northwind-first-contact", "empty_planes": ["session", "memory", "lake", "cron"]},
+      "origin": "derived:empty:northwind-first-contact/northwind-dba-sent-credentials",
       "database": "northwind",
       "title": "② 数据库管理员发来账号密码",
       "source_tables": [],
@@ -308,6 +312,8 @@
     },
     {
       "id": "northwind-connected-needs-link",
+      "baseline": {"kind": "empty", "origin": "empty:northwind-first-contact", "empty_planes": ["session", "memory", "lake", "cron"]},
+      "origin": "derived:empty:northwind-first-contact/northwind-connected-needs-link",
       "database": "northwind",
       "title": "③ 已接上库，要按客户汇总对账",
       "source_tables": ["orders", "customers"],
