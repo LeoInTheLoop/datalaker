@@ -128,9 +128,16 @@ class HoldNotifier(Notifier):
                 self.approver)
             if created:
                 # 审批信走**内层通道**，绕过这道闸 —— 见上面的套娃那段。
-                who = (st.resolve_role(self.approver)
-                       or cfg(f"MAIL_{self.approver.upper().replace(':', '_')}")
-                       or cfg("MAIL_OWNER") or "")
+                who = st.resolve_role(self.approver)
+                if not who:
+                    # 同 plugins/datasteward_gate/__init__.py 的那一处：
+                    # 回退到 env 可以，但不能不出声 —— 否则「没人被指派」
+                    # 和「指派好了」在日志里长得一模一样。
+                    who = (cfg(f"MAIL_{self.approver.upper().replace(':', '_')}")
+                           or cfg("MAIL_OWNER") or "")
+                    st.append_event(aid, "APPROVER_FALLBACK_ENV",
+                                    f"{self.approver} 在 role_assignment 里没有持有人，"
+                                    f"退回 .env：{who or '也没有'}")
                 if who:
                     self.inner.send_approval(
                         who, aid, "send_notice", f"发给 {to}：{subject}",

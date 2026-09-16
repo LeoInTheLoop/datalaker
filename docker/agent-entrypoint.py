@@ -145,6 +145,52 @@ def config() -> dict:
     }
 
 
+def claw_preflight() -> list[str]:
+    """Refuse to start unless the system was actually initialised.
+
+    ``infra/claw.yaml`` names the agent, its mailbox and -- the part that
+    matters -- who may approve.  Those role rows live in the governance
+    database and are written once by ``ops/claw-init.py`` under an admin
+    account; this container only holds ``agent_role``, so here we only read
+    them back.
+
+    **An empty role table must stop the gateway.**  Without this check the
+    approval mail simply falls back to ``MAIL_OWNER`` from the environment
+    (plugins/datasteward_gate/__init__.py, services/notify/__init__.py), so a
+    deployment where nobody was ever appointed looks exactly like a deployment
+    where somebody was.  That is the silent-fallback shape this project has
+    already been bitten by three times.
+
+    Derived values (``MAIL_FROM`` / ``EMAIL_ADDRESS``, and the approval dial
+    translated into the existing ``MANUAL_MODE`` / ``REQUIRE_DOUBLE_CONFIRM``)
+    are written into this process' environment, which the gateway inherits.
+    Anything already set explicitly wins -- ops outranks the file.
+    """
+    # Import it as the top-level ``claw_init``, the same name the plugin and
+    # the demo adapter use.  ``services.claw_init`` would be a *second* module
+    # object with its own ``ClawInitError`` class, so an ``except`` on one side
+    # would not catch the other's -- the repo already has that bug once, with
+    # the two top-level ``plugins`` packages.
+    root = str(pathlib.Path(__file__).resolve().parent.parent)
+    for path in (root, root + "/services", root + "/plugins"):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    import claw_init
+    from datasteward_gate.approvals import open_store
+
+    settings = claw_init.load()
+    applied = claw_init.derive_env(settings)
+    store = open_store(readonly=True, init_schema=False)
+    try:
+        roles = claw_init.verify(store, settings)
+    finally:
+        store.close()
+    return [f"claw.yaml: {settings['agent']['name']} @ "
+            f"{settings['organization']['name']} · {settings['approval']['level']}",
+            "roles: " + "、".join(roles),
+            "derived: " + (", ".join(sorted(applied)) or "none (all set explicitly)")]
+
+
 def preflight() -> None:
     missing = [k for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL")
                if not os.environ.get(k)]
@@ -242,6 +288,16 @@ def run_gateway() -> str:
         except (OSError, json.JSONDecodeError):
             CURRENT_RUN = ""
     install_project_scripts()
+    # Initialisation is checked before a model is even selected: a deployment
+    # with nobody appointed should not burn a probe call to find that out.
+    try:
+        for line in claw_preflight():
+            print(f"[claw-init] {line}")
+    except Exception as exc:                                  # noqa: BLE001
+        write_status("blocked", f"{type(exc).__name__}: {str(exc)[:300]}")
+        print(f"gateway refused to start, system not initialised: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return "blocked"
     # 到期日挑一个 → 真打一次 → 不行就排除它再挑下一个。
     # 只挑不试的话，额度耗尽的模型照样通过纸面检查，然后在第一次真实
     # 对话时 403 且不可重试，整轮无声死掉（R6 演练实测撞到）。

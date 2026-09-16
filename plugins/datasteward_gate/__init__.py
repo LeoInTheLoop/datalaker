@@ -1233,10 +1233,18 @@ def _notify_async(approval_id, tool_name, args, approver_role):
                 os.path.dirname(os.path.abspath(__file__)))), "services"))
             import notify
             n = notify.get()
-            # 角色 → 当前持有人（readme 10.4）；未配置角色表时回退到 .env
-            to = (st.resolve_role(approver_role)
-                  or notify.cfg(f"MAIL_{approver_role.upper()}")
-                  or notify.cfg("MAIL_OWNER") or "")
+            # 角色 → 当前持有人（readme 10.4）；未配置角色表时回退到 .env。
+            # **回退要留痕。** 治理库才是审批资格的来源（docs/config-contract.md
+            # 四：通知对象在治理库，不是 env）；悄悄用 env 里的兜底地址发出去，
+            # 「没人被指派」和「指派好了」在日志里就是同一个样子。
+            # 装机时跑过 ops/claw-init.py 的环境走不到这一支。
+            to = st.resolve_role(approver_role)
+            if not to:
+                to = (notify.cfg(f"MAIL_{approver_role.upper()}")
+                      or notify.cfg("MAIL_OWNER") or "")
+                st.append_event(approval_id, "APPROVER_FALLBACK_ENV",
+                                f"{approver_role} 在 role_assignment 里没有持有人，"
+                                f"退回 .env：{to or '也没有'}")
             # `endswith`：手动模式下通道被闸门包了一层（`hold:email`），
             # 写死相等的话这条「没配收件人就别发」的分支会失效，
             # 于是拿空收件人去发信，报错长得像 SMTP 坏了。

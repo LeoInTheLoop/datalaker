@@ -92,6 +92,25 @@ def clear_state() -> str:
     return f"清了 {n} 项"
 
 
+def bootstrap_roles() -> str:
+    """清完库把 `infra/claw.yaml` 的角色写回去。
+
+    **这不是「还原上一轮」，是「这套系统本来就装好了」。** 演练的起点是
+    一个已经装机、已经指派过审批人的公司，不是一台刚拆封的机器 ——
+    后者在生产里根本不会有 Agent 在跑。
+    """
+    import claw_init
+    from datasteward_gate.approvals import open_store
+
+    settings = claw_init.load()
+    store = open_store()
+    try:
+        claw_init.bootstrap(store, settings)
+        return "、".join(claw_init.verify(store, settings))
+    finally:
+        store.close()
+
+
 def check() -> list:
     """**验证真的清干净了。** 返回残留项，空 = 干净。"""
     bad = []
@@ -108,7 +127,19 @@ def check() -> list:
 
     db = os.environ.get("DATASTEWARD_DB", "/tmp/live.db")
     if pathlib.Path(db).exists():
-        bad.append(f"治理库还在：{db}（审批与口径都是历史，必须清）")
+        # **装机写的角色行不是残留。** 审批、口径、任务线是上一轮的产物，
+        # 必须清；「谁能批」是这套系统装在这儿的前提，清完要重来一遍
+        # （`bootstrap_roles`），否则审批通知会一路退回 .env 兜底地址，
+        # 而那条路和「指派好了」长得一模一样。
+        import sqlite3
+        with sqlite3.connect(db) as conn:
+            names = [t for (t,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")
+                if t != "role_assignment" and not t.startswith("sqlite_")]
+            left = [t for t in names
+                    if conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0]]
+        if left:
+            bad.append(f"治理库还有历史：{db} → {'、'.join(left[:4])}")
 
     for f in TMP_FILES:
         if pathlib.Path(f).exists():
@@ -152,6 +183,7 @@ def main(argv=None) -> int:
         print("  邮箱     ", clear_mail())
         print("  库与状态 ", clear_state())
         print("  源库      保持原样（那是公司已有的生产库，不是产物）")
+        print("  装机      ", bootstrap_roles())
 
     print("\n=== 验证起点干净 ===\n")
     bad = check()

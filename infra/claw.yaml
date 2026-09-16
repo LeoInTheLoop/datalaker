@@ -1,0 +1,48 @@
+# 系统初始化 —— 第一次启动定掉，运行时不再问。
+#
+# 这份文件回答的是「这套系统装在谁家、叫什么、谁能批」，
+# 不是「这一次动作怎么办」。后者仍按 docs/config-contract.md 的三层走：
+# 审批表单 > Asset Policy > 项目配置。
+#
+# **roles 是审批资格，写进治理库的 role_assignment，不是 .env。**
+# 落库由 `ops/claw-init.py` 用 admin 账号执行一次；Agent 容器只有读权限，
+# 角色表为空时网关拒绝启动（docker/agent-entrypoint.py）。
+
+agent:
+  # 进 system prompt 的自称。职责边界不在这里 —— 那段硬编码在插件里，
+  # 配置文件改不动（执行边界 1）。
+  name: Claw
+  # concise_professional | concise_direct | warm_professional
+  tone: concise_professional
+  # zh | en
+  language: zh
+
+organization:
+  name: ACME
+
+email:
+  # Hermes 自己的信箱。唯一源：MAIL_FROM（本项目发信）与 EMAIL_ADDRESS
+  # （Hermes 收信）都从它派生，不再各写一遍。
+  agent_email: claw@acme.test
+
+# 审批资格。角色名只认：admin / sponsor / steward / owner / owner:<数据线>。
+# 至少要有一个 admin —— 它是 role_assignment 里所有初始指派的 granted_by，
+# 也是唯一能改角色表的人（modify_role_assignment 是 L4，永不自动）。
+roles:
+  - email: boss@acme.com
+    role: admin
+  - email: boss@acme.com
+    role: sponsor
+  - email: wang@acme.com
+    role: steward
+  - email: wang@acme.com
+    role: owner
+
+approval:
+  # standard      策略表原样（plugins/datasteward_gate/policy.py）
+  # strict        每个动作和每封对外的信都要人点头（= MANUAL_MODE）
+  # strict_double 再加一道：第一次点链接只发确认信，第二次才生效
+  #
+  # **只能往严格走。** 没有「把 L3 降成 L1」这一档 —— 那等于让配置文件
+  # 关掉审批，而级别表是执行边界，不接受配置覆盖。
+  level: standard

@@ -68,11 +68,15 @@ services:
       SMTP_HOST: greenmail
       SMTP_PORT: "3025"
       SMTP_SECURITY: plain
-      MAIL_FROM: claw@acme.test
+      # MAIL_FROM 与 EMAIL_ADDRESS **不在这里设** —— 由 infra/claw.yaml 的
+      # email.agent_email 派生（services/claw_init.derive_env）。同一个信箱
+      # 原先在本文件里写两遍（发信一次、收信一次），改一个忘一个就是单向失联。
+      # 下面三个是**回退兜底**，不是审批资格来源：真正的来源是治理库的
+      # role_assignment，由 ops/claw-init.py 写入。走到回退会记
+      # APPROVER_FALLBACK_ENV 事件。
       MAIL_SPONSOR: boss@acme.com
       MAIL_OWNER: wang@acme.com
       MAIL_STEWARD: wang@acme.com
-      EMAIL_ADDRESS: claw@acme.test
       EMAIL_PASSWORD: claw
       EMAIL_IMAP_HOST: greenmail
       EMAIL_IMAP_PORT: "3143"
@@ -98,6 +102,7 @@ services:
     volumes:
       - ../.hermes/plugins:/app/.hermes/plugins
       - ../.hermes/skills:/app/.hermes/skills:ro
+      - ../infra/claw.yaml:/app/infra/claw.yaml:ro
       - hermes_demo_state:/state/hermes
       - demo_agent_status:/status
       - demo_control:/control

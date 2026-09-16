@@ -81,7 +81,13 @@ def register(ctx):
     # 这一段告诉模型「什么时候该停下来问人」，它是**建议**：
     # 模型可以不听，而门禁照样拦得住（铁律 1）。
     # 反过来，不该把限制写进这里 —— 提示词层的东西证明不了绕不过。
-    ctx.register_system_prompt_section("data-steward-stop-points", _STOP_POINT_GUIDE)
+    #
+    # 前面再拼一段**可配置**的称呼（`infra/claw.yaml`）。分界是死的：
+    # 名字、组织、信箱、语气从配置来；交付物、停止点、源只读留在下面的
+    # 常量里。一个配置文件能改掉「业务分析不是你的交付物」的话，
+    # 那段话就不再是边界，只是建议。
+    ctx.register_system_prompt_section("data-steward-stop-points",
+                                       _identity_prefix() + _STOP_POINT_GUIDE)
 
     # 定时任务交给 Hermes 的 cron（M4 删重复）。**失败不能拖垮注册** ——
     # 门禁比定时催办重要得多；cron 起不来是运维问题，门禁挂不上是安全问题。
@@ -98,6 +104,24 @@ def register(ctx):
     except Exception as e:                                    # noqa: BLE001
         _announce(f"定时作业登记失败（不影响门禁）：{type(e).__name__}: {e}",
                   "CRON_JOB_ERROR")
+
+
+def _identity_prefix():
+    """装机时定下的称呼段；读不到就不拼，但要**留下痕迹**。
+
+    这里刻意不抛异常：身份不是约束，缺了只是没名字，而 `register()` 里
+    抛异常会连门禁一起挂掉 —— 门禁比自我介绍重要得多。真正会拒绝启动的
+    是网关那一侧的角色表自检（`docker/agent-entrypoint.py`），那条缺了
+    就没人能批，必须停。
+    """
+    try:
+        import claw_init
+        return claw_init.identity(claw_init.load()) + "\n\n"
+    except Exception as e:                                   # noqa: BLE001
+        # 沉默地少一段身份 = 模型突然不知道自己叫什么，而日志里一切正常。
+        _announce(f"身份段未加载，使用无名默认：{type(e).__name__}: {str(e)[:160]}",
+                  "IDENTITY_MISSING")
+        return ""
 
 
 def _announce(msg, kind):

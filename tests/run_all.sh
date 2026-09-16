@@ -50,6 +50,10 @@ echo "########## 0.5 工具白名单（安全主防线） ##########"
 python3 tests/test_toolset_whitelist.py || rc=1
 
 echo ""
+echo "########## 0.65 装机初始化（infra/claw.yaml） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_claw_init.py ) || rc=1
+
+echo ""
 echo "########## 1. 治理 Plugin 拦截 ##########"
 ( unset DATASTEWARD_DSN; DATASTEWARD_DB=/tmp/dl_gate.db $PY tests/test_gate.py ) || rc=1
 

@@ -11,7 +11,10 @@
 FROM python:3.13-slim AS base
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
-RUN pip install --no-cache-dir "psycopg[binary]==3.*" "sqlglot>=25" openpyxl
+# PyYAML：读装机配置 infra/claw.yaml（services/claw_init.py）。
+# agent 那层跟着 Hermes 装会有，但 callback / demo-ui 走的是这一层 ——
+# 少了它 bootstrap_roles 在重置时就抛 ModuleNotFoundError。
+RUN pip install --no-cache-dir "psycopg[binary]==3.*" "sqlglot>=25" openpyxl PyYAML
 COPY infra/trino/certs/trino.pem /app/infra/trino/certs/trino.pem
 
 # ---------------------------------------------------------------- callback
@@ -47,6 +50,9 @@ COPY .hermes/plugins/data-steward/ /app/.hermes/plugins/data-steward/
 COPY .hermes/skills/ /app/.hermes/skills/
 COPY .hermes/home/scripts/ /app/.hermes/home/scripts/
 COPY infra/hermes/config.yaml /app/infra/hermes/config.yaml
+# 装机配置：名字、组织、信箱、审批人、审批档位。缺了网关拒绝启动
+# （docker/agent-entrypoint.py 的 claw_preflight）。
+COPY infra/claw.yaml /app/infra/claw.yaml
 COPY docker/agent-entrypoint.py /app/docker/agent-entrypoint.py
 # Hermes 自己有顶层 `plugins` 包 —— 把我们的目录也入路径，
 # 以 `datasteward_gate` 顶层名导入，避开同名冲突（见 R1 handoff）

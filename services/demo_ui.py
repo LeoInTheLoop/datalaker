@@ -1064,6 +1064,59 @@ def clear_governance() -> None:
         admin_exec(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE")
 
 
+def bootstrap_roles() -> list[str]:
+    """Re-apply ``infra/claw.yaml``'s role assignments after the wipe.
+
+    **System initialisation is not a Snapshot field.**  There is no "not
+    initialised but the agent is running" branch in the real world -- before
+    initialisation the product has not entered ACTIVE, so nobody is running.
+    It is therefore an unconditional per-run prerequisite that no case file
+    can switch off, which is exactly what lets the gateway treat "role table
+    empty" as a hard refusal to start (``claw_preflight``).
+
+    Written with the demo admin account, for the same reason as
+    ``restore_snapshot_state``: a fixture restoring a start state is not the
+    Agent acquiring a write it does not have.  The Agent still cannot appoint
+    its own approver -- ``modify_role_assignment`` is L4, never automatic.
+    """
+    from datasteward_gate.approvals import PgStore
+    import claw_init
+
+    settings = claw_init.load()
+    store = PgStore(os.environ["DEMO_ADMIN_DSN"])
+    try:
+        claw_init.bootstrap(store, settings)
+        return claw_init.verify(store, settings)
+    finally:
+        store.close()
+
+
+def _run_restorer(state: dict, baseline: dict, origin: str) -> dict:
+    """把治理状态交给独立还原器进程，失败就让这一轮起不来。"""
+    import subprocess
+    import tempfile
+    dsn = (os.environ.get("SNAPSHOT_RESTORE_DSN")
+           or os.environ.get("DEMO_ADMIN_DSN") or "")
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                     encoding="utf-8") as handle:
+        json.dump({"baseline": baseline, "origin": origin, "state": state}, handle, ensure_ascii=False)
+        path = handle.name
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "services" / "snapshot_runner" / "restore.py"), path],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "SNAPSHOT_RESTORE_DSN": dsn})
+    finally:
+        pathlib.Path(path).unlink(missing_ok=True)
+    try:
+        report = json.loads(result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise RuntimeError(f"还原器没有返回结果：{result.stderr[-300:]}") from None
+    if result.returncode or not report.get("ok"):
+        raise RuntimeError(f"起点还原失败：{report.get('error')}")
+    return report
+
+
 def restore_snapshot_state(snapshot: dict | None) -> dict:
     """Write this Snapshot's starting facts into the database, as facts.
 
@@ -1212,6 +1265,10 @@ def deliver_after_gateway(run_id: str, case: dict, snapshot: dict) -> None:
                     clear_lake()
                     clear_governance()
                     clear_mail()
+                    # 清库把 role_assignment 也清了。装机配置不是本轮的
+                    # 业务起点，是这套系统存在的前提 —— 所以放在还原起点
+                    # 事实**之前**无条件重来一遍，不看 Snapshot 声明了什么。
+                    bootstrap_roles()
                 except Exception as exc:                    # noqa: BLE001
                     RUNS.update_current(state="snapshot_failed",
                                         error=type(exc).__name__)

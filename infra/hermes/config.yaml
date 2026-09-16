@@ -46,3 +46,19 @@ agent:
     - context_engine
     - coding
     - debugging
+
+# 首次对话不做自我介绍、不建个人画像。
+#
+# Hermes 的首条消息 onboarding 触发条件是 `not history and
+# not has_any_sessions()`（gateway/run.py），而 `profile_build` 默认 `"ask"`，
+# 于是史上第一次对话会换成一条 consent-gated 的「我给你建个画像」长指令。
+#
+# 关掉它是**产品决定**：身份、组织、信箱和审批人在 `infra/claw.yaml` 里
+# 装机时就定死了，数据管家不需要也不该去给老板建画像。要知道的环境事实
+# 它查得到，不靠在对话里问出来。
+#
+# **引号是必须的。** YAML 会把裸 off 读成布尔 False，而 Hermes 那边判的是
+# `isinstance(mode, str) and mode.strip().lower() == "off"` —— 写成 off
+# 等于没关，还看不出来。
+onboarding:
+  profile_build: "off"
