@@ -1,0 +1,293 @@
+# 2 实现方法 checklist
+
+## 使用方式
+
+2026-09-14 更新：已依据[当前代码对照](4_当前代码对照.md)映射现有实现。下面区分“代码已有、继续复用”“在已有能力上补齐”“组件接通”和“机制待审”，不再把全部空框理解为从零开发。
+
+- `[x] 代码已有·复用`：静态检查找到实现；不表示本轮开发完成或真实模型验收通过。
+- `[ ] Ixx.yy`：保留原设计细节的实施/验收项。标“补齐”表示已有部分基础；标“接通”表示需要把现有组件接入正式路径；标“新增”表示尚缺对应契约或机制。
+- `R01—R16`：集中给你审阅的机制差异和政策空缺。“建议处理”是待审方案，最后一列留给你决定；没有填决定的地方不当作已授权实施。
+- `D01—D25`：保留原对话冲突、后续修正及来源，作为审阅依据，不另维护一套决定。
+
+Hermes 继续负责 loop、工具调用、Session 和 cron；复用现有治理库、State 能力、Harness、审批 callback 和 Eval。模块名、表名、Tool 名可以映射现有实现，不要求照原示例重建。
+
+模型负责相关性、语义、按需检索、提案与摘要；确定性代码负责权限、状态有效性、事件幂等、执行窗口、预算、准入与审计。当前文档更新没有改变任何运行政策。
+
+<a id="review"></a>
+## 机制审阅表
+
+已明确的方向继续保留：**治理定位；新资产必做关联评估；关键结论由有资格的人确认；深度工作默认在 Lake；Scope 扩张由原发起人决定且披露检查在前；到线立即报告；SQL/State 为事实源。** 下表审的是它们与现有实现如何衔接，以及原讨论尚未决定的具体政策。
+
+| 编号 / 机制 | 当前实现或原文冲突 | 已定方向 / 待定问题 | 建议处理（未批准） | 你的决定 |
+|---|---|---|---|---|
+| <a id="r01"></a>**R01 分析职责** | README 与 `answer_with_link` 支持跨表业务回答；后期设计排除分析 | 治理定位已定；审工具与交付边界如何迁移 | 保留湖内查询和核验能力；对外只回答授权范围内的治理准备度，业务分析交下游；收敛该工具的对外用途 | 待填写迁移方式 |
+| <a id="r02"></a>**R02 Bronze → Silver** | 现有 `start_silver` 偏整轮，且发过提案才启用；设计允许按 Task 成熟度推进 | 是否保留每批阶段批准？批准作用于哪个项目/批次、何时失效？ | 初次/新批次由 Sponsor 批准进入 Silver；批内成熟 Task 可独立推进，规则和发布仍各自审批；阶段门显式启用并绑定批次 | 待填写 |
+| <a id="r03"></a>**R03 样例复核** | 有 `before_after` 和停点纯函数，但未形成发布前必经路径 | 首次规则、重大变化、稳定重复任务分别由谁复核？ | 首次规则/重大变化必须留样例、差异与有效复核；同规则同范围重复执行可按已批准策略自动质量校验；超阈值重开复核 | 待填写 |
+| <a id="r04"></a>**R04 Cycle 时间/token/信任** | 每日预算、15 天 Bronze 报告、周一周报都不能等同独立 Cycle | 时间计墙钟还是活跃时间？调用计量、报告预留、周期升降如何定？ | 用持久化 Cycle 墙钟与全调用 token 双边界，等待也计墙钟；报告留独立预算；Sponsor 明确批准周期升降，信任不扩动作权限 | 待填写周期与预算政策 |
+| <a id="r05"></a>**R05 到线后的排期与在途动作** | 原文建议夜间已批准任务可执行，又要求到线直接报告 | 立即报告已定；已排期 copy 可否继续、在途动作如何收口仍待定 | 报告与在途收口独立；只允许经 Cycle policy 明确豁免且仍有效的已排期动作，结果只落状态/评估待办，不自动启动后续 Session | 待填写 |
+| <a id="r06"></a>**R06 确认通道与跨域结论** | 代码认签名决定；旧邮件有“说可以即批准”“unless misunderstood”；跨域双边/领域 authority 口径不统一 | 执行审批继续认正式事件；语义确认通道与跨域所需确认人待定 | 业务邮件先记 claim/evidence，核验资格后通过受控确认事件升级；跨域需双方有效确认或目录明确授予跨域裁决权的人；沉默不作批准 | 待填写语义确认政策 |
+| <a id="r07"></a>**R07 找人、来信与审批资格** | 联系人目录、入站名单、角色表分别存在；有表名前缀/通用角色回退 | 谁可介绍可联络对象？未知 authority 时如何升级？ | 联系线索先 candidate；联络许可与入站准入分别管理，均不赋数据/审批权；未知 authority 只发资格澄清，不能把通用收件人当有效批准者 | 待填写 |
+| <a id="r08"></a>**R08 Visibility 与 Scope 汇报** | 现有分类/权限没有覆盖所有收件人的元数据披露；旧抽象拒绝也可能泄露存在性 | 可知、可说、可纳入 Scope 分开；待定未知/无权时措辞及扩展提问频率 | 按存在性/元数据/统计/raw 分级校验所有收件人；无披露权或未知时不透露受限域；允许披露的候选按紧急阻塞即时问、其他汇总 review | 待填写 |
+| <a id="r09"></a>**R09 Task Session / Router** | 当前按人建 Session；有邮件归属函数但未接正式任务路由 | 任务连续性依赖 State；如何复用 Session、如何处理混答置信度？ | Hermes 统一收件入口，后台按 Task 关联 Session；精确线程先匹配，再拆混答；不确定内容进入复核，不能自动关闭 Task 或决定授权 | 待填写路由政策 |
+| <a id="r10"></a>**R10 人的注意力与静默** | WIP 实按审批角色计数；普通问题与同人多角色未统一；无多人静默合并 | 每人问题上限、合并/抄送计数、催办 SLA、quiet window 待定 | 保留角色审批 WIP，叠加按真人的未解问题队列；结束/撤销释放；多人默认静默，必要时介入或合并总结；数值参数另填 | 待填写上限与时限 |
+| <a id="r11"></a>**R11 源画像与 Lake 工作** | 源采样/DQ 已有，清洗提案仍可能回源；蓝图要求入湖后主要在 Lake | 初步源检查可保留，深度湖内画像已定；受控重采范围待定 | 接入前只做获准的元数据与必要轻量检查；入湖后的深度统计/清洗依据用 Lake；新鲜度与 schema 观测按 policy 受控回源 | 待填写重采政策 |
+| <a id="r12"></a>**R12 夜间复制与执行通知** | Connector 有窗口但实际 Trino copy 没经过；“已排队”报错没有排期状态 | 白天审批、窗口内执行已定；窗口归属、通知对象与提前量待定 | 在真实 copy 路径执行窗口准入；持久化排期并在执行前复查，通知受影响的 System/Data Owner；提前 10 分钟仅作配置示例 | 待填写窗口与通知政策 |
+| <a id="r13"></a>**R13 Knowledge / Memory 刷新** | catalog、语义、runs 已持久化，但项目摘要及统一恢复读取未齐 | SQL/State 优先已定；摘要刷新/失效与组织知识结构待定 | 扩展现有 SQL 知识与状态；事实变化即写库，Session/Cycle 收尾或重大变更刷新摘要，恢复按相关版本校验，低频 reconcile 作补偿 | 待填写刷新政策 |
+| <a id="r14"></a>**R14 旧审批恢复与最新状态** | 参数回放保证执行批准内容；蓝图又要求恢复时检查目标/schema/问题变化 | 两者应同时成立；何种变化使原批准失效、何时重批？ | 先复查相关任务/范围/版本/资格；仍适用则原参数回放，已完成则不重做，实质变化则停止并重提；不让模型改旧票据的参数 | 待填写失效/重批条件 |
+| <a id="r15"></a>**R15 新资产评估与同步去重** | 有同步/关联工具，无自动评估触发；每次源刷新不应无限造相同任务 | 新资产必评估已定；重同步/版本变化是否重评、如何去重待定 | 首次成功 Bronze 幂等登记评估；schema/关键语义/相关范围变化再开新评估，普通刷新更新验证；Cycle 停止时只登记，启动服从 R05 | 待填写重评触发条件 |
+| <a id="r16"></a>**R16 规则确认与部分交付** | 已有技术证据；原文建议先处理 99%+，尚未给验收批准 | 规则 confirmed 不等于全量验证通过；异常隔离/披露/接受人待定 | 保留异常子集与血缘，明确分母、采样和版本；仅在验收范围获明确批准后交付无歧义部分；不把 99.2% 写成通用阈值 | 待填写验收政策 |
+
+审阅时可以直接填“同意建议”或写修改后的规则；涉及时间、阈值、适用范围、确认人时一并写清。这里只整理可审阅方案，不通过改代码替你定政策。
+
+<a id="i01"></a>
+## I01 Identity / Mission
+
+- [x] **代码已有·复用**：插件已经注入 Data Steward 身份、源只读/审批说明、知识落库规则；联系人登记与角色授权分开。
+
+代码入口：[插件入口](../.hermes/plugins/data-steward/__init__.py)、[联系人工具](../.hermes/plugins/data-steward/tools.py)。
+
+**落实与验收**：在现有系统提示与 Skill 上补入口策略；Mission/Scope 的正式事实写现有 State/治理库，提供恢复读取工具。验收首次接触只问一个入口、新 Session 找回目标与等待项、未经批准不扩 Scope。
+
+- [ ] **I01.01｜补齐，迁移方式待审**（[R01](#r01) / [R08](#r08)） 调整 Identity/System Prompt，固定 Data Steward 职责：资产发现、质量、语义、关联、接入、治理发布、知识沉淀；明确不直接做业务分析、预测和投资判断。资产位置与质量回答也先查对方 visibility。
+- [ ] **I01.02｜接通** 写清工作入口：开始或恢复任务先读 State；缺 person/asset/semantic/relationship/process 时使用 Discovery；提出具体动作后经过已有 Hook。
+- [ ] **I01.03｜新增** 用 Mission Setup / Refinement Skill 逐步取得并确认 `north_star / sponsor / scope / current_objective / success_direction / known_constraints`。North Star 低频变；Objective 可每轮变；Scope 改动由原发起人确认。
+- [ ] **I01.04｜补齐** 首次联系只发一封：自我介绍、一句话说明目标、一个 seed person 或 seed asset/system 问题。后续自然补齐消费者、成功标准、优先项和禁区，不把 3—5 个问题一次全发。
+- [ ] **I01.05｜补齐**（[R07](#r07)） 区分创建者、Sponsor、Boss、系统联系人、Data Owner、Semantic Authority、Publication Approver。被介绍的人先是联系人/候选角色，不能直接升为 Sponsor 或所有审批人。
+- [ ] **I01.06｜复用后补齐**（[R13](#r13)） `IDENTITY.md` 只表达稳定角色；早期 `TASK.md` 示例可以作项目视图，Mission/Scope 的事实源仍应映射到现有 State Tool。避免同一目标在文件、Memory、SQL 各写一份却无主次。
+- [ ] **I01.07｜新增**（[R08](#r08)） 每次新分支记录与 Objective、gap、blocker 或必要血缘的关系。发现潜在 scope 扩展先校验披露权限，再找原发起人确认；未获确认不访问、不接入、不沿该分支继续探索。
+
+来源：[M002—M006](素材/分享对话原文.md#m002)、[M020—M024](素材/分享对话原文.md#m020)、[M087—M094](素材/分享对话原文.md#m087)、[M149—M154](素材/分享对话原文.md#m149)。
+
+<a id="i02"></a>
+## I02 Skills 与专业工作策略
+
+- [x] **代码已有·复用**：已有画像、DQ、清洗提案/执行、语义确认、湖内质量检查、关联与发布工具，以及阶段提案 Skill；清洗保留原值，Gold 发布有分类和 raw 列边界。
+
+代码入口：[tools](../.hermes/plugins/data-steward/tools.py)、[data_tools](../services/data_tools.py)、[clean](../services/clean.py)、[publish](../services/publish.py)、[阶段提案 Skill](../.hermes/skills/data-steward-stage-proposal/SKILL.md)。
+
+**落实与验收**：复用专业工具，补目标/gap 驱动策略、湖内完整画像契约和规则后的复核记录。验收每项统计有口径，负值不自动判错，首批/重大规则达到 R03 的复核要求后才可继续交付。
+
+- [ ] **I02.01｜复用后补齐** 盘点并复用已有 Skill，按职责补 Mission Setup、Gap-driven Discovery、Data Steward/Safe Profiling、Cycle Review；逻辑模块不要求一对一新建目录。
+- [ ] **I02.02｜新增** Discovery description 与核心指令写明触发：当前任务因未知的人、资产、语义、关系或流程无法推进。模型先识别 gap，结构化保存 `type / question / blocks_objective / next_action`，再探索。
+- [ ] **I02.03｜补齐**（[R07](#r07) / [R13](#r13)） 五类 Discovery 都先查已有 SQL 知识；未知 owner 时，按明确 authority → 角色职责线索 → 已记录个人能力寻找知情人，不能由岗位常识推导审批资格。
+- [ ] **I02.04｜新增** 零资产时从 Sponsor 取得入口；之后只探索一跳，验证相关性再决定下一跳。已有很多表时只取与 Mission/实体/语义/血缘相关的候选，防止全库扫描和无目的收集。
+- [ ] **I02.05｜补齐**（[R06](#r06)） Discovery 输出统一带可信状态与来源：`lead / candidate / verified / confirmed`；技术验证与人工业务确认分开，冲突/否定/过期记录保留。足够继续当前任务就停止探索。
+- [ ] **I02.06｜补齐**（[R02](#r02)） Steward Skill 以资产阶段和 Task 完成条件决定下一步：相关性、批准接入、Bronze、画像、结构与业务理解、Silver 候选、验证、必要时 Gold。允许停在 Bronze 或 Silver。
+- [ ] **I02.07｜补齐** Safe Profiling 覆盖 `column/type/nullable`、估算/实际数量、空值数量及比例、distinct、min/max、median、quantiles、top values/frequency、duplicate、类型/范围/不可能值/类别异常、时间缺口、PK/FK 候选和唯一性。
+- [ ] **I02.08｜补齐，重采政策待审**（[R11](#r11)） 取数策略明确：元数据优先、轻量聚合、必要采样、确需时才全量；大表分位数可用近似计算并标记，设置超时和返回量限制；不需要敏感原值时只取允许的统计。深度画像默认在 Lake。
+- [ ] **I02.09｜补齐** 负金额等异常生成语义问题，不自动判错；输出 `known / unknown / suspected / confirmed`，例如 `order_total < 0` 先问退款、冲销还是错误。
+- [ ] **I02.10｜补齐** Silver 提案提供 `Input / Transformation / Reason / Evidence / Expected Output`，包括测试订单、currency、status、revenue、customer/退款关系等示例规则，但不把示例直接当通用清洗规则。
+- [ ] **I02.11｜接通**（[R03](#r03) / [R16](#r16)） 验证覆盖行数变化、金额差异解释、JOIN 丢失/膨胀、null、duplicate、业务规则和前后样例。重大差异、首次规则、重要关联按策略复核，不由“技术上能执行”替代。
+- [ ] **I02.12｜补齐** 原表整改建议默认低优先级，保留问题证据、影响和建议；只有直接阻塞当前正确性时升级，不因为上游可以更整洁而扩大当前 Cycle。
+
+来源：[M025—M038](素材/分享对话原文.md#m025)、[M078—M082](素材/分享对话原文.md#m078)、[M105—M106](素材/分享对话原文.md#m105)。
+
+<a id="i03"></a>
+## I03 复用 State Tool，补齐状态契约
+
+- [x] **代码已有·复用**：`runs` 已保存参数、挂起、waiting_on、checkpoint 与恢复记录；审批、sync_state、asset_catalog、语义可独立查询。
+
+代码入口：[runs](../services/runs.py)、[治理库](../plugins/datasteward_gate/approvals.py)、[resumable](../ops/resumable.py)。
+
+**落实与验收**：扩展 Project/Cycle/Task/Question 的关系和统一只读视图；复用已有审批恢复。验收一人多问题、多任务等同一人、问题取消/已解决、等待窗口和新资产事件去重，不能只验一条工具批准后重试。
+
+- [ ] **I03.01｜新增** Project/Mission State 能表达：North Star、Sponsor、Scope、Objective、phase、active tasks、gaps、known asset/person 引用、waiting、next_action、当前 Cycle、剩余预算、上轮 review。
+- [ ] **I03.02｜补齐** Asset State 能表达：source/table/owner 引用、当前阶段、用途、key/time fields、confirmed semantics 引用、unknowns、candidate/confirmed joins、quality issues、validation results、blockers、pending_human、next_action。
+- [ ] **I03.03｜补齐** Task State 能区分 `ready / running / waiting_human / waiting_approval / waiting_external / blocked / completed / cancelled`。`approved_waiting_window`、`waiting_confirmation` 等场景状态与既有枚举统一映射，见 D08。
+- [ ] **I03.04｜补齐** 每个等待记录 `waiting_for / waiting_reason / resume_condition / next_action`，同时保留 Project、Cycle、Asset、Task 关联。任务结束条件独立于是否发布 Gold。
+- [ ] **I03.05｜接通**（[R09](#r09)） Question/Request 保存 `question_id / task_id / asked_to / exact_question / topic / asset / status`，Communication Thread 与 Incoming Message 保留对应关系及来源。
+- [ ] **I03.06｜新增**（[R05](#r05) / [R15](#r15)） 新表入湖事件创建 Integration Assessment 的任务记录，第二张、第三张及后续资产均适用；重复事件不能制造重复任务。缺画像可先等待；Cycle 已停时是否只登记待办而不启动 Session，按 D06 确认。
+- [ ] **I03.07｜新增**（[R15](#r15)） Integration Assessment 取 Mission/Objective、新 Asset State、相关旧资产和 SQL 已有关系，判断是否关联、直接 JOIN、mapping 或不关联；评估结论及理由均可完成一个 Task，不强迫产出 JOIN。
+- [ ] **I03.08｜补齐**（[R14](#r14)） 每次恢复重新检查任务是否已完成/取消、目标是否变化、资产 schema/版本、原回答适用性及权限。已被另一条线解决的事项不得重复发问或执行。
+- [ ] **I03.09｜接通**（[R12](#r12)） 审批、排期、执行拆开保存，例如 `approval_status=approved / execution_status=scheduled / execution_window=22:00–06:00`。排期不等于执行成功，审批不等于正在允许的时间窗口。
+
+来源：[M029—M036](素材/分享对话原文.md#m029)、[M053—M060](素材/分享对话原文.md#m053)、[M099—M100](素材/分享对话原文.md#m099)、[M115—M116](素材/分享对话原文.md#m115)、[M158](素材/分享对话原文.md#m158)。
+
+<a id="i04"></a>
+## I04 Knowledge SQL 与受控工具
+
+- [x] **代码已有·复用**：`asset_catalog` 已分观测/推断/确认/否定并保留证据；asset_semantics、source_contacts、角色和来源记录已有；metadata_watch 可发现结构变化并登记复核。
+
+代码入口：[catalog](../services/catalog.py)、[治理库](../plugins/datasteward_gate/approvals.py)、[metadata_watch](../services/metadata_watch.py)。
+
+**落实与验收**：扩展组织、能力、authority、visibility 和操作策略，保持现有事实源分层。确认写入前验证对象/资格/证据；真正冲突、互补描述及跨时期差异分别留存。验收旧确认不被模型摘要覆盖、单域确认不扩为跨域结论。
+
+- [ ] **I04.01｜复用后补齐**（[R13](#r13)） 把正式组织知识及可结构化经验落实到 SQL Tool 的查询、写入、确认和废弃接口，而非普通 Memory。示意操作为 `query / upsert / confirm / deprecate`，不意味着模型能直接写任意 SQL。
+- [ ] **I04.02｜补齐**（[R07](#r07)） 人员与岗位分层：`people / roles / person_roles / role_responsibilities / asset_ownership / semantic_authority / person_capabilities`。常见岗位职责辅助探索；实际人员关系和 authority 必须有依据。
+- [ ] **I04.03｜新增** 个人能力记录可表达 `person_id / capability / confidence / evidence_count / source / last_verified`。原文 Bob 熟悉销售库历史、confidence=0.85、evidence_count=6 是示例，不是评分标准。
+- [ ] **I04.04｜补齐**（[R08](#r08)） 保存资产用途/来源、字段语义、JOIN/lineage、业务流程、历史决定、ownership、访问及发布资格、visibility，以及证明这些说法的消息/审批/技术结果。
+- [ ] **I04.05｜新增**（[R12](#r12)） operational knowledge 保存 `copy_window / pre_execution_notice / notify roles / source constraints`。夜间复制要求以后继续有效，除非经有效变更更新，不每次重新问。
+- [ ] **I04.06｜补齐**（[R13](#r13) / [R14](#r14)） 知识条目携带状态、提出/确认者、时间、来源、证据、适用资产版本/日期范围及重新验证信息；人员、schema、权限、业务流程允许过期。历史审批和 Review 保留历史。
+- [ ] **I04.07｜补齐** 同一问题两种说法分别留存；区分真正矛盾、适用时期不同、两个互补描述，不由最近一封覆盖前一封。生成 unresolved gap 并找匹配的 authority。
+- [ ] **I04.08｜补齐**（[R06](#r06)） 单方确认只能确认其有权范围，例如 CRM owner 可确认 CRM 字段，不能代替 Sales 确认跨系统关系；JOIN 规则与当前数据技术验证结果分字段保存。
+- [ ] **I04.09｜补齐**（[R06](#r06) / [R07](#r07)） `confirmed` 写入校验 evidence + responder authority + 对象/范围；拒绝、未确认和已废弃结果也留痕供后续避免重复试错。
+- [ ] **I04.10｜补齐**（[R07](#r07)） 回信里的联系人先 candidate，再查目录；建立联系、获得数据 visibility、获得审批资格分别处理。
+
+来源：[M039—M050](素材/分享对话原文.md#m039)、[M071—M074](素材/分享对话原文.md#m071)、[M117—M134](素材/分享对话原文.md#m117)、[M145—M148](素材/分享对话原文.md#m145)。
+
+<a id="i05"></a>
+## I05 Memory / Session 生命周期
+
+- [x] **代码已有·复用**：资产、语义、联系人、审批和 runs 已落库；读档返回观测时间，插件要求普通 Memory 仅保存沟通偏好等上下文。
+
+代码入口：[catalog](../services/catalog.py)、[runs](../services/runs.py)、[插件提示](../.hermes/plugins/data-steward/__init__.py)。
+
+**落实与验收**：补项目摘要和统一恢复契约，复用 SQL/State；Session 足够时不全量加载摘要，执行前查相关最新事实。用 C08 的“5 张/7 张”与 C05 旧字段回复验收，不能只验同一 Session 能继续对话。
+
+- [ ] **I05.01｜补齐**（[R13](#r13)） Memory 只保留 Project Summary、Person communication preference 和必要的跨 Session 工作摘要；人员能力、owner、口径、JOIN、authority 等以 SQL 为主。
+- [ ] **I05.02｜新增**（[R13](#r13)） 当前 Task Session 足够时不用重读 Project Memory；新 Session、跨 Task、长时间恢复或需要全局背景时才按需读取，准备与具体人沟通时才读其 Person Memory。
+- [ ] **I05.03｜接通**（[R13](#r13) / [R14](#r14)） 新 Session/恢复先获得必要背景，再用 Tool 确认最新 Project/Asset/Task State 和相关 SQL Knowledge；控制检索范围，不全量塞组织档案和所有历史。
+- [ ] **I05.04｜复用后补齐** 新表接入、owner/语义/JOIN 确认、Task、Question、approval/pending 变化发生即写入 SQL/State，不等 Session 或 Cycle 结束。
+- [ ] **I05.05｜新增**（[R13](#r13)） Session 收尾、Cycle checkpoint、Mission/Objective 或整体状态重大变化时重写项目摘要；当前对话临时内容由 Session 承担。
+- [ ] **I05.06｜新增**（[R13](#r13)） 低频 reconcile 比较 Summary 与 SQL/State；不一致时事实源优先，刷新 Working Context 和摘要。不能按 Memory 的“5 张表、mapping 未确认”覆盖库中“7 张、已确认”。
+- [ ] **I05.07｜新增**（[R13](#r13)） 摘要生成保留已完成、未解决和适用范围；不要把“规则已确认”压缩成“所有数据验证通过”。具体刷新频率、失效信号和上下文压缩策略见 D09。
+
+来源：[M047—M052](素材/分享对话原文.md#m047)、[M165—M168](素材/分享对话原文.md#m165)。
+
+<a id="i06"></a>
+## I06 Task Router / Resume / Communication
+
+- [x] **代码已有·复用**：已有 Hermes 邮件入口、mail_threads 归属组件、指定联系人发信、审批恢复、按角色 WIP 与定时催办。当前正式入口仍以发件人构造会话，归属组件不能视为 Task Router 已接通。
+
+代码入口：[mail_threads](../services/mail_threads.py)、[联系人工具](../.hermes/plugins/data-steward/tools.py)、[门禁](../plugins/datasteward_gate/__init__.py)、[cron](../.hermes/plugins/data-steward/cron.py)。
+
+**落实与验收**：把 Task/Question/Message-ID 绑定接进正式出入站；以消息级幂等取代仅按相同主题去重的不足。验收精确回信、无头转发、混答、一条回答关联多任务、同人多角色、静默讨论及迟到回答；模型匹配不改变 authority。
+
+- [ ] **I06.01｜接通**（[R09](#r09)） 前台保持统一 Hermes 入口，后台从 person session 转为 Task Session；同一 Task 可有多个一对一线程或一个多人 Resolution Thread。任务连续性依赖 State，Session 可续用但不是唯一恢复依据。
+- [ ] **I06.02｜接通**（[R09](#r09)） 出站绑定 Task、Question、Thread 和邮件 Message-ID；正文自然提醒“请直接回复这封邮件”，不让用户记内部编号。
+- [ ] **I06.03｜接通**（[R09](#r09)） 路由顺序：原生 In-Reply-To/References/thread → 明确 question/task 标识 → person + open questions → 语义匹配 → unresolved inbox。精确命中线程仍需检查是否包含多个主题。
+- [ ] **I06.04｜新增**（[R09](#r09)） 模型 Router 只读取当前消息、候选 open questions、相关任务/资产及必要的轻量上下文；无独立长期业务记忆，不承担审批或确认结论的权力。
+- [ ] **I06.05｜新增**（[R09](#r09)） 混答拆 Answer Units 并保存原文出处；支持一封信对应多问题/多 Task、一条回答关联多个 Task、一个 Task 等多人回复。高置信可分流，中置信标复核，低置信不自动关闭任务；具体阈值待定。
+- [ ] **I06.06｜新增**（[R09](#r09)） 示例必须能拆开：“金额已扣折扣”→语义；“历史 ID 不确定，问 MDM”→未解决并新增线索；“退款归 Alice”→候选联系人且查 authority。不能整封信投给一个 Task 后把三项都完成。
+- [ ] **I06.07｜补齐**（[R10](#r10)） 维护每人 open questions 上限，超额入 queue，问题完成或撤销后释放。原文 N=3 是示例；合并提问、多人抄送和路由不明时的计数规则见 D10。
+- [ ] **I06.08｜新增** 任务选择结合 Objective 相关性、可执行性、解除其他 blocker 的价值与成本；低优先级源整改靠后。等待 A 不阻塞 B/C，但任何任务仍受 Cycle 和授权范围约束。
+- [ ] **I06.09｜补齐**（[R10](#r10)） 超时按规则提醒、找 alternate 或升级。Finance 三天不回升级 Boss 是 walkthrough 明确场景；通用阈值另定，不能无限催。单次不回不直接把人永久判定为慢响应。
+- [ ] **I06.10｜补齐**（[R07](#r07)） 升级查直属 manager、Data/Domain/System Owner、Semantic Authority 中真正有确认权的人；“问我上级”是 routing evidence，不是对方已具备 authority 的证明。
+- [ ] **I06.11｜新增**（[R06](#r06) / [R08](#r08) / [R09](#r09)） 跨域分歧可创建 Resolution Task Session，组织双方与领域 authority 直接讨论；发送前校验所有收件人可见范围，原有 Task 保留依赖，不因转发而关闭。
+- [ ] **I06.12｜新增**（[R10](#r10)） Response Policy 支持 `SILENT / INTERVENE / WAIT_AND_SUMMARIZE`。默认抽取 claim/evidence/conflict 并静默；跑偏、关键问题无人答、不同口径混谈、缺 authority、应总结或超时才插话。
+- [ ] **I06.13｜新增**（[R10](#r10)） 支持 quiet window/debounce 合并总结，30 分钟仅为原文示例。每封消息可触发接收和路由，不能等同完整模型执行或必发回信；性能收益需后续实测。
+- [ ] **I06.14｜补齐**（[R06](#r06) / [R10](#r10)） 多人共识总结后按政策取得明确有资格的确认；无人反对和邮件正文中的“unless misunderstood”不是自动授权依据。一次简单“收到”也不必给每个后台 Task 各回一封。
+
+来源：[M053—M066](素材/分享对话原文.md#m053)、[M089—M096](素材/分享对话原文.md#m089)、[M109—M110](素材/分享对话原文.md#m109)、[M121—M132](素材/分享对话原文.md#m121)、[M169—M170](素材/分享对话原文.md#m169)。
+
+<a id="i07"></a>
+## I07 复制排期与资产新增事件
+
+- [x] **代码已有·复用**：已有 Bronze 同步、增量/全量策略、schema 漂移检查、同步台账、湖内关联技术证据；Connector 有 bulk 时间窗函数。实际 sync_table 的 Trino 复制尚未接窗口准入。
+
+代码入口：[sync](../services/sync.py)、[Connector](../services/connector.py)、[linkage](../services/linkage.py)。
+
+**落实与验收**：约束必须覆盖实际复制路径，未持久化排期就不能回复“已排队”。补窗口/预检/通知状态、新资产评估事件与 mapping 验收；验证窗口外拒绝、窗口内可达、重复事件不重开，以及异常子集未被丢弃。
+
+- [ ] **I07.01｜接通**（[R11](#r11) / [R12](#r12)） 源访问遵循只读、scope、扫描/返回量、超时、负载及执行窗口限制；大规模统计、清洗和 JOIN 默认在已入湖数据执行。不能将“尽量一次复制”理解为以后禁止受控同步或重新观测。
+- [ ] **I07.02｜接通**（[R12](#r12) / [R14](#r14)） 支持白天审批、晚上执行；正式审批事件绑定具体资产/动作/参数/范围，到执行窗口复查审批和权限有效性、schema 变化、源健康及维护冲突。
+- [ ] **I07.03｜新增**（[R12](#r12)） 执行前通知配置化。示例 21:50 通知、22:00 执行：A 同时负责数据与系统时通知 A；否则找 DB/System Owner，必要时覆盖数据与系统双方，不默认抄送 Sponsor/Boss。
+- [ ] **I07.04｜补齐**（[R12](#r12)） 区分执行通知与再次审批；无额外影响且已有固定窗口时可按政策仅记录日志。预检失败不得继续承诺执行，异常负载下的停止能力需真实可验证。
+- [ ] **I07.05｜接通**（[R05](#r05) / [R15](#r15)） Bronze 完成后更新 Asset State，再安排湖内画像；新资产事件关联 Integration Assessment。排期、复制失败、重复事件、窗口错过与暂停恢复必须保持状态一致。
+- [ ] **I07.06｜补齐**（[R16](#r16)） 关联验证检查类型/格式、值域重叠、唯一性、unmatched、cardinality；mapping 额外检查 effective dates、一对多、重复和空值。区分直接关联规则与历史 mapping 规则。
+- [ ] **I07.07｜新增**（[R16](#r16)） 无歧义子集与异常子集分别保留，例如 99.2% 覆盖、0.8% 未映射；是否允许先交付部分数据及其披露条件需要明确验收口径，不能自动丢弃异常。
+
+来源：[M097—M106](素材/分享对话原文.md#m097)、[M113—M134](素材/分享对话原文.md#m113)、[M159—M162](素材/分享对话原文.md#m159)。
+
+<a id="i08"></a>
+## I08 Cycle Hook / Report / Trust
+
+- [x] **代码已有·复用**：已有 post_llm_call 用量记录、每日预算检查、周报、阶段提案、ROUND_CLOSED 暂停与恢复 monitor。stage-report 的终态/默认 15 天报告不等同独立 Cycle，且不在当前插件 JOBS 中。
+
+代码入口：[门禁](../plugins/datasteward_gate/__init__.py)、[stage-report](../ops/stage-report.py)、[cron](../.hermes/plugins/data-steward/cron.py)。
+
+**落实与验收**：新增持久化 Cycle 和到线报告转换；保留独立动作审批。正式接通截止时间事件与工具准入、报告预留及入站归档。验收到线后确有报告、不新开分支，且 pending/ready/scheduled 均能下一轮正确恢复。
+
+- [ ] **I08.01｜新增**（[R04](#r04)） 在已有 Harness 增加 Cycle 时间和 token 累计边界，先到者触发；时间口径、token 计费范围、重启恢复以及报告所需预留预算见 D01/D02。
+- [ ] **I08.02｜接通**（[R04](#r04) / [R05](#r05)） 到线由确定性控制停止新工作分支，直接进入报告。不能只注入提醒后让模型自行决定是否停，也不能等全部 pending 解决或等下一次周一作业。
+- [ ] **I08.03｜复用后补齐** 报告从 State、执行与知识记录取事实，再由模型生成简短解释和建议；数字、完成状态、确认状态、排期和未决项不得由模型补编。
+- [ ] **I08.04｜补齐** 固定报告字段：Goal、Completed、New Findings、Waiting/Pending、Blocked、Scheduled、Ready but paused、Unresolved/Risks、Recommended Next，可附预算消耗及上轮意见。
+- [ ] **I08.05｜新增**（[R04](#r04)） Sponsor 可继续建议、调整优先级、缩小/扩大 Scope、暂停 Mission，并决定周期长短。新的 scope/预算需明确持久化；信任高不绕过任何关键审批。
+- [ ] **I08.06｜新增**（[R04](#r04)） 渐进周期支持半天/一天 → 2—3 天 → 5—7 天，也允许退回短周期；误判、返工、漏报、方向偏移、报告不实触发 review。升级次数和自动/人工模式不从示例直接定死。
+- [ ] **I08.07｜新增**（[R05](#r05)） Cycle 停止后保留 waiting/scheduled/ready/unresolved，入站可接收和记录；已排期动作是否允许执行及是否触发后续画像/Integration Task 按 D06 决定，不能拖延立即报告。
+- [ ] **I08.08｜接通**（[R02](#r02) / [R03](#r03)） Phase checkpoint 与 Cycle checkpoint 单独建模：开始 Silver 的阶段决定、具体清洗/关联确认、样例复核、发布与访问审批不因“本轮还没到时间”而跳过。
+
+来源：[M005—M019](素材/分享对话原文.md#m005)、[M135—M136](素材/分享对话原文.md#m135)、[M159—M162](素材/分享对话原文.md#m159)。
+
+<a id="i09"></a>
+## I09 Authority / Visibility 与已有 Guardrails
+
+- [x] **代码已有·复用**：已有 L0—L4 策略、签名票据、独立 callback、受控批准参数回放、SQL AST/源湖查询边界、分类/读权限、角色解析与执行审计。
+
+代码入口：[policy](../plugins/datasteward_gate/policy.py)、[门禁](../plugins/datasteward_gate/__init__.py)、[callback](../services/approval_callback.py)、[policy_sync](../services/policy_sync.py)。
+
+**落实与验收**：保留执行保护，前置组织目录的 authority/visibility 契约；当前 callback 校验票据不等于复核点击人的现行资产范围资格。验收无资格线索、转介、角色变化、多收件人披露及有效审批正对照。
+
+- [ ] **I09.01｜新增**（[R08](#r08)） Subject Visibility 覆盖请求者、发送者及所有收件人，区分存在性、表名、schema、质量摘要、sample、aggregate、raw data；Hermes 可读不代表可以转发。
+- [ ] **I09.02｜补齐**（[R06](#r06) / [R07](#r07) / [R14](#r14)） Authority Resolution 按 asset access、semantic、JOIN、business rule、publication 查真正负责人；Responder Authority 在回复/点击时复核人的当前资格及该确认对象。
+- [ ] **I09.03｜补齐**（[R07](#r07) / [R08](#r08)） Demo 目录提供人员、部门、岗位、manager、在职状态、正式角色、visibility、authority、reporting line；可预置 5—10 人，人数只是示例。真实 OA/IAM/HRIS 属于未来部署适配。
+- [ ] **I09.04｜补齐**（[R07](#r07) / [R08](#r08)） 统一工具抽象可覆盖 `find_person / find_role_owner / check_authority / check_visibility / find_approver / start_approval`，先复用现有能力；不假定 HR/普通行政岗位有数据批准权。
+- [ ] **I09.05｜复用并核验接通**（[R12](#r12)） 复用现有工具授权、SQL AST、table scope、read/write、row/scan limit、timeout、sensitive columns、estimated impact、审批与审计，不按原文临时四档例子重排现有等级。
+- [ ] **I09.06｜新增**（[R08](#r08)） 发信内容先经过收件人披露检查：表名、字段、质量问题和受限域的存在也可能不可说。连抽象描述能否披露也应受 visibility 控制，见 D12。
+- [ ] **I09.07｜新增**（[R08](#r08)） scope candidate 先查 Hermes 元数据可见性，再查 Sponsor 可见性，再问是否扩展；Scope 批准不代替接入批准。分析问题转交或说明治理准备度时同样先过此检查。
+- [ ] **I09.08｜补齐**（[R07](#r07)） 知情人的业务线索和授权声明分开，例如 D 懂成本表但无批准权，只能生成 candidate；E 的有效审批事件才改变 access state。
+- [ ] **I09.09｜复用后补齐** 记录重要动作的发起者、action、target、reason、policy decision、approval、execution result、timestamp；能追溯为何读表、为何联系人、谁批准变换、为何 confirmed。
+- [ ] **I09.10｜复用后补齐**（[R06](#r06)） 生产修改、敏感权限变化和知识 confirmed 的边界明确由既有治理策略执行；旧对话“除非 Mission 明确授权”不能自行放开源写入，见 D05。
+
+来源：[M067—M076](素材/分享对话原文.md#m067)、[M139—M154](素材/分享对话原文.md#m139)、[M164](素材/分享对话原文.md#m164)。
+
+<a id="i10"></a>
+## I10 复用 Eval，补行为覆盖
+
+- [x] **代码已有·复用**：现有 Eval 具备机制/行为/真实模型入口、正负配对、INCONCLUSIVE、去护栏校准与原始记录离线重判；本次已完成 I01—I10 的代码映射。
+
+代码入口：[行为 Eval](../evals/behavior/README.md)、[驱动](../tests/run_behavior_case.py)、[代码对照](4_当前代码对照.md)。
+
+**落实与验收**：沿现有框架补 Snapshot/场景和终态判据；walkthrough 原邮件只是模拟素材，转成正式测试时继续区分 state、当前业务邮件与评估元数据。运行真实服务/模型前按已审机制确定边界，不将历史测试数或模拟百分比作为新验收结果。
+
+- [ ] **I10.01｜扩展覆盖** 将[Case 主线](3_Case_walkthrough.md#main)映射到现有 Eval，分别验证零资产启动、转介、夜间复制、湖内画像、三天升级、新表关联评估、跨域冲突、多方静默、mapping 异常及立即报告。
+- [ ] **I10.02｜扩展覆盖** 将[9 个补充场景](3_Case_walkthrough.md#extra)转成后续最小行为检查：误导授权、单边确认、敏感 scope 扩展、语义分歧、延迟恢复、到线停、分析越界、过期 Memory、多问题回复。
+- [ ] **I10.03｜扩展覆盖** 检查未知时是否探索、是否越 Scope、未确认知识是否被误写 confirmed、路由是否正确、人的 authority/visibility 是否生效、Cycle 是否真的阻止新分支、跨 Session 是否按最新事实恢复。
+- [ ] **I10.04｜复用并实测** 保留正负对照与环境终态证据；设计走读不写成真实运行通过，纸面数值不写成测量结果。原文中“场景算通过”仅表示假设流程走通。
+- [ ] **I10.05｜复用并持续核对** 对已有工具、State、Harness、Eval 先做映射清点，再开发缺口。这里不改变现有评估框架，也不因原文提到 LangGraph 就迁移 Runtime。
+
+来源：[M079—M086](素材/分享对话原文.md#m079)、[M137—M170](素材/分享对话原文.md#m137)。
+
+<a id="decisions"></a>
+## 原对话冲突、修正与审阅依据（D01—D25）
+
+下表保留原对话事实和修正，不删早期差异。机制决定统一填上方 R 表；已明确修正的方向不重新变成开放问题。表内模拟数值和人物代号不是实现参数。
+
+| 编号 | 对话中的差异或空缺 | 当前整理口径 / 后续动作 | 来源 | 关联机制审阅 |
+|---|---|---|---|---|
+| D01 | 从 5—7 天改为半天/一天起步；2—3 天、3 天、连续 3/5 轮等值均为例子 | 已定渐进信任与可降级；具体等级、升级证据、谁批准、时间是墙钟还是活跃时长仍待定 | [M005—M018](素材/分享对话原文.md#m005) | [R04](#r04) |
+| D02 | 时间/token 到点停止，但未定义 Router、摘要、重试等调用是否计入及出报告用量 | 待定计量范围、预警/硬线、报告预算及失败兜底；原文 12h/100k token 仅为例子 | [M018](素材/分享对话原文.md#m018)、[M162](素材/分享对话原文.md#m162) | [R04](#r04) |
+| D03 | 早期 Trust 涉及 Allowed Actions、渐进授权；用户随后强调它与已有关键动作审批分开 | 先按 review 周期和预算管理，不自动扩大访问/审批权。是否另设低风险自动化档位待单独确认 | [M008—M010](素材/分享对话原文.md#m008)、[M068](素材/分享对话原文.md#m068) | [R04](#r04) |
+| D04 | 夜间复制场景说“有 authority 的人邮件说可以就已审批”；背景与后续场景采用正式点击审批 | 分开口头/邮件意向与正式批准。接入采用已授权审批事件的走读；语义确认、阶段放行能否凭邮件及如何验证待定 | [M001](素材/分享对话原文.md#m001)、[M098—M100](素材/分享对话原文.md#m098)、[M141—M142](素材/分享对话原文.md#m141) | [R06](#r06) |
+| D05 | 早期源修改写“除非 Mission 明确授权”，又出现临时 L0—L3 四档 | 不将讨论示例覆盖既有只读、SQL 和审批边界；后续核对原策略再设计，禁止把改 Mission 当源写权限 | [M004](素材/分享对话原文.md#m004)、[M068](素材/分享对话原文.md#m068)、[M106](素材/分享对话原文.md#m106) | [R01](#r01) / [R11](#r11) |
+| D06 | 到线不新开 Integration Task；已批准夜间 copy 又被建议允许继续；新 Bronze 必须触发评估 | 已定立即报告；排期是否执行、是否只登记评估待办、原子动作如何停、后续何时启动仍待定 | [M116](素材/分享对话原文.md#m116)、[M136](素材/分享对话原文.md#m136)、[M160—M162](素材/分享对话原文.md#m160) | [R05](#r05) / [R15](#r15) |
+| D07 | 原先完成当前原子动作后出报告；用户纠正“直接就出报告” | 报告不得以善后或任务处理讨论为前置。正在运行的大动作如何安全收口单独处理 | [M018](素材/分享对话原文.md#m018)、[M161—M162](素材/分享对话原文.md#m161) | [R05](#r05) |
+| D08 | `blocked_external / waiting_confirmation / approved_waiting_window / profiled / understood` 等名称不统一 | 待映射现有状态与正交字段，分开 approval、execution、business confirmation、validation，避免大枚举互相覆盖 | [M036](素材/分享对话原文.md#m036)、[M054](素材/分享对话原文.md#m054)、[M100—M134](素材/分享对话原文.md#m100) | [R09](#r09) / [R12](#r12) / [R14](#r14) |
+| D09 | 早期所有组织知识叫 Memory，后改 SQL；又从“每 Session 定期更新”改为按事件与收尾 | 已定 SQL/State 为事实、Memory 为摘要和偏好、Session 管临时上下文；摘要 reconcile 周期与失效信号待定 | [M040—M052](素材/分享对话原文.md#m040)、[M168](素材/分享对话原文.md#m168) | [R13](#r13) |
+| D10 | 每人问题上限 N=3、静默窗口 30 分钟、催办第 2/4/5 天都是举例；主线指定三天找 Boss | 主线保留三天升级，通用 SLA、上限、合并/抄送计数、释放条件与 quiet window 待定 | [M054—M066](素材/分享对话原文.md#m054)、[M109](素材/分享对话原文.md#m109)、[M130](素材/分享对话原文.md#m130) | [R10](#r10) |
+| D11 | 多方邮件写“unless misunderstood”；文字又要求明确确认，并提出“既有政策允许无冲突总结”的备选 | 默认不把沉默当同意；谁需要确认、双边或领域 authority 是否足够、确认通道与有效期待定 | [M118—M132](素材/分享对话原文.md#m118) | [R06](#r06) |
+| D12 | 已强调无权者不能知道表存在；后续拒绝示例仍说“有受限员工/Finance 数据” | 必须按可见范围决定能否透露存在性，抽象描述也不是普遍安全的默认值；拒绝措辞待结合权限模型确定 | [M072](素材/分享对话原文.md#m072)、[M154](素材/分享对话原文.md#m154)、[M164](素材/分享对话原文.md#m164) | [R08](#r08) |
+| D13 | 无关表最初只归档；用户改为找原发起人确认，随后补敏感字段限制 | 已定潜在扩展先 visibility、再找原发起人；一般无关线索是否需逐条提问或汇总 review 待定 | [M150—M154](素材/分享对话原文.md#m150) | [R08](#r08) |
+| D14 | 初始模拟说半天 Cycle，主线又等待三天、最后假设 5—7 天信任等级 | 主线是跨多个 Cycle 的连续走读，不代表首次半天无人批准可跑七天；中间 review 不能在正式用例里省略 | [M086](素材/分享对话原文.md#m086)、[M109](素材/分享对话原文.md#m109)、[M136](素材/分享对话原文.md#m136) | [R04](#r04) / [R05](#r05) |
+| D15 | 已确认规则覆盖 99.2%，同时有 0.8% 未映射/一对多，助手建议先做无歧义部分 | 区分规则确认与数据验收。部分交付阈值、隔离方式、异常披露、谁接受残余风险待定 | [M134](素材/分享对话原文.md#m134) | [R16](#r16) |
+| D16 | `net_revenue` 的“已扣折扣”和“未扣退款”被直接标 conflict | 两条可能同时成立；要确认完整定义和使用限制，不以词面不同自动判矛盾。保留这个潜在误判供验证 | [M156](素材/分享对话原文.md#m156) | [R06](#r06) |
+| D17 | 早期 Data Product/利润问答很宽，后期用户明确不答分析问题 | 已定治理 scope；Gold 可以是治理后交付物，如何划分治理准备度回答与实际分析、交给谁继续待定 | [M004](素材/分享对话原文.md#m004)、[M069—M076](素材/分享对话原文.md#m069)、[M164](素材/分享对话原文.md#m164) | [R01](#r01) |
+| D18 | Bronze 后何时开始 Silver：早期整批阶段批准，后面按 Task 成熟度推进 | 已定 Cycle 不绑定层级、具体规则与发布仍有审批；是否另设每批 start_silver、批次对象和重开条件待定 | [M001](素材/分享对话原文.md#m001)、[M034](素材/分享对话原文.md#m034)、[M136](素材/分享对话原文.md#m136) | [R02](#r02) / [R03](#r03) |
+| D19 | 新表每次应开评估；第三表 CRM 场景又沿用 R-004，而主线第三表是 mapping | 这些是独立场景/示例 ID。正式事件触发、版本更新与重新评估的去重键待定，不按示例编号实现 | [M115—M116](素材/分享对话原文.md#m115)、[M134](素材/分享对话原文.md#m134)、[M144](素材/分享对话原文.md#m144) | [R15](#r15) |
+| D20 | `Source-protect` 写“安全读取一次”，但长期维护需要源变化观测和再同步 | 解释为减少重复重查询、把重工作搬到湖；同步频率、数据新鲜度承诺、变化后复核机制仍待定 | [M004](素材/分享对话原文.md#m004)、[M052](素材/分享对话原文.md#m052)、[M106](素材/分享对话原文.md#m106) | [R11](#r11) / [R12](#r12) |
+| D21 | 初次要“两封邮件”后来纠正为首封一封；转介后又需回 Sponsor 与 Boss 两份 | 已定按沟通节点决定，不使用恒定两封配额。M104/M108 的 A 提问、M096/M108 的 Finance 初信是同一节点续写，不能落成重复发送 | [M087—M108](素材/分享对话原文.md#m087) | [R09](#r09) / [R10](#r10) |
+| D22 | 早期实施顺序说最后补 Authority/Visibility；后续所有探索、回复、确认都依赖它 | 目录接口与权限前置依赖需先具备；后续只延后真实 OA 适配，不能让先跑起来的工作缺少权限边界 | [M078](素材/分享对话原文.md#m078)、[M072—M076](素材/分享对话原文.md#m072) | [R07](#r07) / [R08](#r08) |
+| D23 | 主线向 A 问负金额语义后，没有给出其最终回复；周级报告示例未列这个 pending | 不补成已确认。Case 报告明确保留此项，之后要么给出有效确认，要么明确暂停/转入下一轮 | [M104—M108](素材/分享对话原文.md#m104)、[M136](素材/分享对话原文.md#m136) | [R03](#r03) / [R16](#r16) |
+| D24 | 98.7% 在原文中交替用于值域重叠、ID 覆盖和记录匹配；画像数字也来自不同示例 | 计算时明确分子、分母、采样/全量、版本和时间；原文数字分别保存，不直接合成一次测量 | [M038](素材/分享对话原文.md#m038)、[M104](素材/分享对话原文.md#m104)、[M114—M126](素材/分享对话原文.md#m114) | [R16](#r16) |
+| D25 | B 三天未回复被替换，但后续多人讨论又以 B 指 Finance 联系人 | 主线用 F 表示替代联系人，保留原文代号；实际依据稳定 person/thread/task 标识绑定，不能凭字母继承资格 | [M109—M112](素材/分享对话原文.md#m109)、[M126—M132](素材/分享对话原文.md#m126) | [R07](#r07) / [R09](#r09) |
+
+- [ ] 逐项处理 D01—D25，记录决定者、适用范围及对应 checklist/Case 的更新；不将仍待定的项悄悄填成默认已批准。
+
+## 原文中的参考与数值，保留但不直接变成要求
+
+以下只保留原设计素材，不计入实现待办或待批准政策。
+
+- [M062](素材/分享对话原文.md#m062) 的 LangGraph thread/checkpoint/store、Swarm handoff、AutoGen SelectorGroupChat、Aurelio Semantic Router、Letta 是历史参考讨论；“70% + 20% + 10%”不是选型测量。用户后续明确 Hermes 为基础，此处不重新推荐或引入这些框架，也未重新验证原比较结论。
+- [M004](素材/分享对话原文.md#m004) 的 Data Product 字段保留为未来交付参考：Name、Purpose、Consumers、Business Questions、Owner、Inputs、Transformations、Confirmed Semantics、Output Schema/Metrics、Quality Rules、Freshness、Access Policy、Lineage、Acceptance Criteria。99% 成本关联、99.5% 退款覆盖、daily freshness 都是示例。
+- [M006](素材/分享对话原文.md#m006) 的 P0/P1/P2/P3 优先级示例保留；当前仅明确“源整改建议低优先级，阻塞正确性时提升”，没有确认新的全局优先级编码。
+- 主线 12.4M/8.2M 行、1.8% 负值、98.7% 重叠、99.2% mapping 覆盖、CRM 97.9% 等全部是模拟素材；不写入当前系统能力、质量承诺或正式验收阈值。

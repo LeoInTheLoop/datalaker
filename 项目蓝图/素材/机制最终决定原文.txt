@@ -1,0 +1,583 @@
+Hermes Data Steward 机制决策清单
+
+R01 分析职责
+
+Hermes 定位为 Data Steward Agent，不是业务分析 Agent。
+
+保留 Lake 内查询、JOIN、统计和核验能力，用于：
+
+Profiling
+
+数据质量检查
+
+JOIN coverage
+
+规则验证
+
+数据准备度判断
+
+Bronze / Silver 差异验证
+
+不直接回答：
+
+哪个客户利润最高
+
+哪个区域表现最好
+
+为什么销售下降
+
+预测未来收入
+
+业务分析交给下游 Analytics / BI / Data Product。
+
+即使回答“有哪些数据可以支持这个问题”，也必须先检查请求人的 Visibility。
+
+R02 Bronze → Silver
+
+保留 Sponsor 的阶段门，但不是整批表一起进入 Silver。
+
+流程：
+
+Bronze 形成 ↓ Sponsor 批准当前 Scope 可以开始 Silver 工作 ↓ Stage Gate Open ↓ 各 Asset / Task 根据自身成熟度独立推进 
+
+某张表只有满足：
+
+Bronze Ready
+
+Safe Profiling 完成
+
+关键语义足够清楚
+
+必要关系已确认
+
+transformation 有依据
+
+才进入 Silver Candidate。
+
+Scope 实质扩大时重新审批阶段门。
+
+Gold 不属于 Hermes 核心职责。
+
+R03 样例复核
+
+首次 transformation 或重大变化必须人工复核。
+
+复核材料包括：
+
+Before / After
+
+影响行数
+
+关键字段变化
+
+聚合差异
+
+异常数量
+
+规则说明
+
+规则批准后，同规则、同 Scope、同语义的重复执行可以自动质量验证。
+
+以下情况重新复核：
+
+Schema 变化
+
+规则逻辑变化
+
+数据分布明显漂移
+
+JOIN coverage 明显变化
+
+影响范围异常扩大
+
+新异常类型出现
+
+复核人按对应 Authority 决定，不统一找 Sponsor。
+
+R04 Cycle / Token / Trust
+
+Cycle 是独立机制，不等同于每日预算、周报或 Bronze 报告。
+
+每个 Cycle 保存：
+
+cycle_id start_time time_budget token_budget trust_level status report_budget 
+
+时间按墙钟计算，等待人回复也计时。
+
+触发条件：
+
+Time Budget 到 OR Token Budget 到 → Cycle Stop 
+
+Token 要预留报告预算。
+
+Trust 只影响 Cycle 长度，例如：
+
+0.5 天 → 1 天 → 3 天 → 5–7 天 
+
+Trust 不扩大：
+
+Tool 权限
+
+数据权限
+
+Scope
+
+审批权限
+
+Trust 升降由 Hermes 建议，Sponsor 明确确认。
+
+R05 Cycle 到线后的动作
+
+Cycle 到线：
+
+立即出报告 ↓ 停止开启新任务 / 新分支 
+
+已经开始运行的动作：
+
+允许完成当前动作 ↓ 写 State / Result ↓ 停止，不自动启动后续步骤 
+
+尚未开始的任务暂停到下一 Cycle。
+
+核心规则：
+
+到线先报告；已经 Running 的动作做完，但不能继续扩展。
+
+R06 语义确认与跨域结论
+
+执行审批和语义确认分开。
+
+执行审批
+
+继续使用正式 Approval Event。
+
+语义确认
+
+讨论中的口头、邮件内容只先产生：
+
+claim / provisional understanding 
+
+Hermes 将讨论整理成明确规则后，再发给有 Authority 的人正式确认。
+
+流程：
+
+讨论 ↓ 提取 Claim ↓ Hermes 整理结构化规则 ↓ Authority 正式确认 ↓ confirmed 
+
+沉默不构成确认。
+
+跨域关系：
+
+可以由双方 Authority 分别确认
+
+或由明确拥有跨域裁决权的人确认
+
+有冲突时进入多人 Resolution Thread
+
+R07 找人、角色与 Authority
+
+一个人不能通过自述给自己建立正式 Authority。
+
+例如：
+
+Alice： “我是 HR Admin” → self_claimed → 不能直接获得审批权 
+
+正式 Authority 必须来自独立可信来源，例如：
+
+OA / IAM / HRIS / Org Directory
+
+已确认的上级/Admin
+
+Sponsor / Boss 明确指定
+
+已确认 Authority 的合法转授权
+
+例如：
+
+Boss： “Alice is the HR Admin.” → Alice HR Authority = verified 
+
+Authority 必须绑定：
+
+Person + Role + Domain / Asset + Authority Type 
+
+联系人、允许来信、Visibility、语义确认权、审批权分别管理。
+
+R08 Visibility 与 Scope
+
+Lake 内 Hermes 能看到什么，由系统权限决定。
+
+对外披露则必须检查：
+
+这个人有权知道吗？
+
+如果请求人的 Visibility 不明确：
+
+查已有 Authority ↓ 找其上级 / Domain Admin / HR Admin 等独立来源确认 
+
+不能让本人自证权限。
+
+Scope 扩张仍由原 Sponsor 决定。
+
+但在向 Sponsor 提出 Scope 扩张前，也必须确认 Sponsor 有权知道相关数据域。
+
+敏感资产不能为了“问要不要扩 Scope”而泄露存在性或字段细节。
+
+R09 Task Session / Router
+
+后台从 Person Session 转成 Task Session。
+
+不是一个 Question 一个 Session。
+
+一个 Task Session 有：
+
+Goal Scope Done Criteria Related Assets Open Questions 
+
+Question 是 Task 内部子项。
+
+Message Router
+
+外部消息：
+
+Incoming Message ↓ Existing Task Session？ ├─ Yes → Route ├─ No，但形成独立工作目标 → New Task Session └─ No，且只是边缘信息 → Backlog 
+
+优先级：
+
+1. Email thread / In-Reply-To 2. Task / Question ID 3. Person + Open Questions 4. LLM Semantic Router 
+
+Router 默认只读：
+
+Task Goal / Summary
+
+Open Questions
+
+最近 3 条消息
+
+Incoming Message
+
+低置信度再扩大上下文。
+
+Session Router
+
+进入某个 Task Session 后：
+
+新问题 ↓ 属于当前 Scope → 当前 Session 处理 不属于 Scope，但阻塞当前 Task → dependency / child task 不属于 Scope，也不阻塞 → backlog 
+
+Session 不要求解决所有问题才关闭。
+
+关闭条件：
+
+当前 Task 的 Done Criteria 已满足，且没有阻塞当前使用的 unresolved blocker。
+
+R10 人的注意力与静默
+
+每个人设置未解问题硬上限，例如：
+
+max_open_questions = 3 
+
+但 3 是上限，不是目标。
+
+不能答完一个马上自动补一个，永远维持 3 个。
+
+每轮沟通有默认处理窗口，例如 2–3 个工作日：
+
+发出一批问题 ↓ 等待默认处理窗口 ↓ 窗口结束后 → 再发下一批 / reminder / escalation 
+
+只有以下情况允许提前追加：
+
+当前问题严重阻塞
+
+Sponsor / Boss 明确催办
+
+多人 Resolution Thread：
+
+默认静默，必要时介入。
+
+Hermes 只在以下情况发言：
+
+讨论跑偏
+
+出现关键冲突
+
+缺 Authority
+
+超时
+
+已形成结论，需要总结确认
+
+周报中显性展示人员协作情况：
+
+本周期完成 当前 Pending Queued Blocked by 
+
+R11 Source Profiling 与 Lake Work
+
+核心原则：
+
+Source-protect, Lake-work。
+
+源端只做安全接入必须的最小检查：
+
+Metadata
+
+Schema
+
+数据量估算
+
+必要主键/时间字段
+
+基础可访问性
+
+之后：
+
+Source ↓ Bronze Copy to Lake ↓ 深度 Profiling ↓ Quality ↓ JOIN Validation ↓ Silver 
+
+深度 Profiling 包括：
+
+count
+
+null rate
+
+distinct
+
+min/max
+
+median
+
+quantile
+
+duplicate
+
+anomaly
+
+key
+
+relationship validation
+
+后续只有以下情况受控回源：
+
+Freshness
+
+Schema drift
+
+明显复制异常
+
+普通同步不重复源端深度扫描。
+
+R12 夜间复制与执行通知
+
+大表：
+
+白天审批 ↓ 记录 Execution Window ↓ Task = approved_waiting_window ↓ 窗口到达 ↓ Pre-check ↓ 执行 Bronze Copy 
+
+Execution Window 来源：
+
+已有 Asset Policy
+
+System / DB Owner
+
+Data Owner
+
+执行通知不是再次审批。
+
+通知对象是受执行影响的人，例如：
+
+System Owner
+
+DB Owner
+
+必要时 Data Owner
+
+不默认通知 Sponsor。
+
+提前时间配置化：
+
+10m / 30m / none 
+
+通知没人回复，只要：
+
+Approval 有效
+
+Window 有效
+
+Pre-check 通过
+
+即可正常执行。
+
+R13 Knowledge / Memory 刷新
+
+SQL / State 是 Source of Truth。
+
+SQL / State
+
+事实变化立即写入：
+
+People
+
+Roles
+
+Capabilities
+
+Assets
+
+Ownership
+
+Semantics
+
+JOIN
+
+Authority
+
+Visibility
+
+Decisions
+
+Evidence
+
+Project State
+
+Asset State
+
+Memory
+
+只负责：
+
+Project Summary
+
+Person communication preference
+
+跨 Session 的快速上下文恢复
+
+刷新时机：
+
+Session 收尾 Cycle 收尾 重大 Mission / Objective 变化 
+
+新 Session：
+
+先读 Memory Summary ↓ 再读相关 State / SQL ↓ 冲突时以 State / SQL 为准 ↓ 必要时重写 Memory 
+
+R14 旧审批恢复
+
+同一张表、同一种 Authority，原则上只有一个当前有效审批人。
+
+例如：
+
+sales.orders access_approver = Alice semantic_approver = Bob 
+
+同一 Authority Type 不同时存在多个 active approver。
+
+人员更换使用：
+
+valid_from valid_to 
+
+恢复旧审批时：
+
+读取最新 State / Scope / Asset Version ↓ 判断原审批是否仍适用 
+
+如果仍适用：
+
+严格 replay 原批准参数 
+
+如果：
+
+Scope 实质变化
+
+Schema 影响原动作
+
+Source 变化
+
+敏感级别变化
+
+原任务已失效
+
+则重新审批。
+
+模型不得修改旧票据中的批准参数。
+
+R15 新资产 Integration Assessment
+
+每个新资产第一次成功进入 Bronze后，自动登记一次 Integration Assessment。
+
+New Bronze Asset ↓ Integration Assessment Required 
+
+评估：
+
+是否与现有资产相关
+
+是否需要连接
+
+如何连接
+
+是否存在 Mapping
+
+是否涉及新的业务实体
+
+是否需要找人确认
+
+普通数据同步不重复开 Session。
+
+只有实质变化重新评估：
+
+关键 Schema 变化
+
+JOIN Key 变化
+
+关键语义变化
+
+Source / Lineage 变化
+
+Mission Scope 变化
+
+已确认关系明显失效
+
+Cycle 已停止时：
+
+只登记 assessment_required 不立即启动新 Session 
+
+R16 规则确认、异常与最终产物边界
+
+Data Steward 不承担最终数据产品 100% 正确性或业务验收责任。
+
+Hermes 的职责是：
+
+安全接入尽可能多的相关表 ↓ 在 Lake 内理解和 Profiling ↓ 尽可能搞清字段语义和表间关系 ↓ 找有 Authority 的人确认 ↓ 把知识、异常和证据沉淀进 SQL 
+
+知识可以处于：
+
+candidate verified confirmed unknown conflict exception deprecated 
+
+confirmed 表示：
+
+相关规则或语义已经由有资格的人确认。
+
+不表示：
+
+数据本身 100% 没有错误。
+
+无法解决的异常不能隐藏，也不能猜测补全，应明确沉淀为：
+
+Exception
+
+Unknown
+
+Conflict
+
+并保留 Evidence。
+
+最终数据层边界
+
+Hermes 核心产物：
+
+Source ↓ Bronze ↓ Understand / Profile ↓ Silver / Reusable Lake Assets 同时持续沉淀： Knowledge SQL 
+
+Knowledge SQL 包含：
+
+People Roles Capabilities Owners Authority Assets Semantics Relationships Lineage Exceptions Evidence 
+
+Gold 不属于 Hermes 的核心职责。
+
+Gold、Mart、KPI、Dashboard、客户利润宽表等由下游：
+
+Analytics Agent BI Data Product 
+
+负责。
+
+最终定位可以压缩成一句：
+
+Hermes Data Steward 负责把企业相关数据安全地接进 Lake，尽可能搞清楚“有什么、什么意思、怎么关联、谁负责、哪里不确定”，并把这些组织知识结构化沉淀下来；不负责最终业务分析或保证数据产品绝对正确。
