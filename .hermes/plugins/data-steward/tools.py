@@ -197,9 +197,12 @@ _SCHEMAS.update({
     "ingest_table": {
         "name": "ingest_table",
         "description": (
-            "把一张源表接入数据湖的 bronze 层。**这是需要负责人审批的动作**——"
-            "调用后如果返回待审批，就说明已经替你发出了审批请求，"
-            "不要重试，去做别的不受阻塞的事。"
+            "把一张源表接入数据湖的 bronze 层。**一次一张表，需要负责人正式批准。**"
+            "返回只有三种：①**待审批** —— 审批请求已经替你发出去了，不要重试，"
+            "这条线后续状态查 `get_task_state`；②**接入结果** —— 落进了哪张 bronze 表、"
+            "多少行；③**错误** —— 缺参数、源连不上、结构变了，如实报出来，"
+            "**既不会自动重试也不会替你排队**。"
+            "source 与 table 都必填，缺一个直接报错，不会生成审批。"
         ),
         "parameters": {
             "type": "object",
@@ -1228,7 +1231,6 @@ def _notify_connect(sid, given_by, tables, err, approval_id=""):
         recipients = list(dict.fromkeys(x for x in (provider, owner) if x))
         if err:
             body = (f"{sid} 的只读连接验证失败。\n\n"
-                    "本 Snapshot 未指定、未读取或接入任何业务表。\n\n"
                     f"审批已经通过，但按这份连接信息**连不上**：\n\n"
                     f"  {err}\n\n"
                     f"下一步：麻烦确认一下账号/口令/网络是否可达，"
@@ -1246,11 +1248,9 @@ def _notify_connect(sid, given_by, tables, err, approval_id=""):
                 return str(t)
             names = "、".join(_one(t) for t in tables[:12])
             body = (f"{sid} 的只读连接验证成功。\n\n"
-                    "本 Snapshot 未指定、未复制或接入任何业务表；"
-                    "下面仅是连接可访问性校验结果，不代表选择了这些表。\n\n"
+                    "以下是本次连接校验可见的表，不代表已经复制入湖。\n\n"
                     f"能看到 {len(tables)} 张表：\n\n"
                     f"  {names}{'……' if len(tables) > 12 else ''}\n\n"
-                    "本 Snapshot 到此结束。下一 Snapshot 由数据负责人明确首批表；"
                     "每张表的接入会单独发审批给负责人。")
             subj = f"[数据管家] {sid} 连接成功（未接入业务表）"
         # 结果邮件与审批同属一条线，方便人回复连接信息时确定性回到本轮。
@@ -1505,16 +1505,8 @@ def _resolve_to(st_, role: str) -> str:
     收件箱里，谁也看不到 —— 提案发出去了、没人收到，而日志一切正常。
     `_notify_async` 那边早就按 `MAIL_<ROLE>` 兜底了，这里漏了同一步。
     """
-    import notify
-    who = (st_.resolve_role(role) if st_ else None) or ""
-    if "@" in who:
-        return who
-    for key in (f"MAIL_{role.upper().replace(':', '_')}",
-                "MAIL_SPONSOR", "MAIL_OWNER"):
-        v = notify.cfg(key, "")
-        if "@" in v:
-            return v
-    return ""
+    from identity import resolve_to
+    return resolve_to(st_, role)
 
 
 def _send_stage_mail(qid, decider, summary, recommend, reason, opts) -> str:
@@ -1799,6 +1791,140 @@ def _answer_with_link(args: dict, **_: Any) -> str:
         note = f"（{vv['note']}）" if vv.get("note") else ""
         lines.append(f"  · {k}：{n}{when}{note}{warn}")
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------ 当前任务线状态
+# **状态是确定性代码算的，不是模型回忆的。** 模型每次开工或被唤醒都要先看
+# 这个：哪条线在等谁、哪条已经批了、哪条已经做完 —— 不然它会把「上次好像
+# 申请过」当成事实，要么重复申请，要么以为批了直接往下做。
+#
+# 状态词表**只在这里定义一次**，skill 和报告都引用它，不各自造词。
+_TASK_STATES = {
+    "pending_approval":        "已申请，等人批",
+    "approved_waiting_window": "已批准，等执行窗口到点",
+    "waiting_capacity":        "排队中（并发上限挡着），没在等人",
+    "scheduled":               "已排期，等到点",
+    "approved_ready":          "已批准，等系统把这条线拉起来继续",
+    "denied":                  "被否决了",
+    "running":                 "正在做",
+    "done":                    "已完成",
+    "failed":                  "失败了，看原因",
+    "abandoned":               "等太久已放弃，人可以重开",
+}
+
+
+def _task_state(r: dict, decision: str | None) -> str:
+    """runs 的库状态 + 审批决定 + 排期 → 本批统一词表。
+
+    **不兜底成「看着正常」**：算不出来就原样报库里的状态，
+    让人看见是这里没覆盖到，而不是看见一个像样的词。
+    """
+    from . import _ensure_path
+    _ensure_path()
+    import runs as _runs
+    st = r.get("status")
+    waiting_time = not _runs.due_now(r)          # 排了期，还没到点
+    if st == "waiting_human":
+        if not r.get("waiting_on"):
+            return "scheduled" if waiting_time else "waiting_capacity"
+        if decision == "approve":
+            ck = r.get("checkpoint") or {}
+            if waiting_time or (isinstance(ck, dict) and ck.get("stage") == "window"):
+                return "approved_waiting_window"
+            return "approved_ready"
+        if decision == "deny":
+            return "denied"
+        return "pending_approval"
+    if st == "running" and waiting_time:
+        return "scheduled"
+    return st if st in _TASK_STATES else f"未归类状态：{st}"
+
+
+def _get_task_state(args: dict, **_: Any) -> str:
+    from . import _ensure_path
+    _ensure_path()
+    try:
+        import runs
+    except Exception as e:                                    # noqa: BLE001
+        return f"读取任务状态失败：{type(e).__name__}: {e}"
+
+    rid = str(args.get("run_id") or "").strip()
+    keyword = str(args.get("about") or "").strip().lower()
+    include_done = bool(args.get("include_done"))
+
+    try:
+        if rid:
+            r = runs.get(rid)
+            rows = [r] if r else []
+        else:
+            rows = []
+            wanted = list(runs.STATUSES) if include_done else ["running", "waiting_human"]
+            for s_ in wanted:
+                rows += runs.by_status(s_)
+    except Exception as e:                                    # noqa: BLE001
+        return f"读取任务状态失败：{type(e).__name__}: {e}"
+
+    if rid and not rows:
+        return f"没有 run_id={rid} 这条线。"
+
+    tail = ("\n项目目标与 Scope 不在这张表里 —— 要用就查档案或问人，"
+            "别按印象当成已确认。")
+    out = []
+    for r in rows:
+        params = r.get("params") or {}
+        blob = f"{r.get('kind')} {json.dumps(params, ensure_ascii=False)}".lower()
+        if keyword and keyword not in blob:
+            continue
+        state = _task_state(r, runs.decision_of(r.get("waiting_on")))
+        line = [f"· {r['run_id']}　{r['kind']}　**{state}**"
+                + (f"（{_TASK_STATES[state]}）" if state in _TASK_STATES else "")]
+        if params:
+            line.append("  参数：" + json.dumps(params, ensure_ascii=False)[:200])
+        if r.get("waiting_on"):
+            who = runs.approver_of(r["waiting_on"])
+            line.append(f"  审批：{r['waiting_on']}"
+                        + (f"　等 {who}" if who else "")
+                        + f"　自 {_ts(r['updated_at'])} 起")
+        if r.get("next_action_at"):
+            line.append(f"  到点再动：{_ts(r['next_action_at'])}"
+                        + ("（还没到，现在不会被拉起来）"
+                           if not runs.due_now(r) else "（已到点）"))
+        if r.get("resumed"):
+            line.append(f"  已恢复 {r['resumed']} 次")
+        if r.get("note"):
+            line.append(f"  备注：{str(r['note'])[:200]}")
+        out.append("\n".join(line))
+
+    if not out:
+        return ("当前没有在办的任务线"
+                + ("（已完成的也查了）。" if include_done else
+                   "（只看了在办的；要连做完的一起看就把 include_done 设为 true）。")
+                + tail)
+
+    head = f"任务线 {len(out)} 条" if include_done else f"在办任务线 {len(out)} 条"
+    return (head + "：\n" + "\n".join(out)
+            + "\n\n等人批的那几条**不要重复申请**，也不要当成已经批了。" + tail)
+
+
+_SCHEMAS.update({
+    "get_task_state": {
+        "name": "get_task_state",
+        "description": (
+            "看你自己手上这些任务线现在各是什么状态："
+            "等谁批、批了没、在跑还是做完了。**开工或被唤醒后第一件事就是查它** ——"
+            "「上次好像申请过」不是事实，这里写着的才是。只读，不改任何东西。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "run_id": {"type": "string", "description": "只看某一条线"},
+            "about": {"type": "string",
+                      "description": "按关键词过滤，例如表名或源系统 id"},
+            "include_done": {"type": "boolean",
+                             "description": "连已完成/已失败的一起列出来，默认只看在办的"}},
+            "required": []},
+    },
+})
+
+_HANDLERS.update({"get_task_state": _get_task_state})
 
 
 # **放在函数定义之后**：`_HANDLERS` 是字面量，写在上面那个 dict 里会在

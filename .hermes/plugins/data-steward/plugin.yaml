@@ -11,6 +11,7 @@ author: datalaker
 provides_tools:
   - list_source_tables
   - get_table_metadata
+  - get_task_state
   - profile_table
   - propose_cleaning
   - record_finding

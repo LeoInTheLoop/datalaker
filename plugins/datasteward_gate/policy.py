@@ -57,6 +57,10 @@ POLICY: dict[str, tuple[Level, str | None]] = {
     # 溯源：只读治理库自己的记录，不碰源系统也不碰数据内容
     "trace_asset":          (Level.L0, None),
     "list_source_tables":   (Level.L0, None),
+    # 自己这些任务线现在各是什么状态。**只读 runs / approvals 自己的记录**，
+    # 不碰源系统也不碰数据内容 —— 它存在的理由是模型别把「上次好像申请过」
+    # 当成事实。
+    "get_task_state":       (Level.L0, None),
     # --- L1 常规作业 ---
     "profile_table":        (Level.L1, None),
     "run_dq_check":         (Level.L1, None),
