@@ -31,54 +31,6 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT), str(ROOT / "services"), str(ROOT / "plugins")]
 
 
-def _active_demo_snapshot() -> dict | None:
-    """Read the trusted, read-only current Snapshot when demo scope is enabled."""
-    if os.environ.get("DEMO_SNAPSHOT_GUARD", "").lower() not in ("1", "true", "yes"):
-        return None
-    run_dir = pathlib.Path(os.environ.get("DEMO_RUN_DIR", "/runs"))
-    cases_file = pathlib.Path(os.environ.get("DEMO_CASES_FILE", "/app/demo/cases.json"))
-    try:
-        run = json.loads((run_dir / "runs.json").read_text(encoding="utf-8")).get("current")
-        if not isinstance(run, dict) or run.get("state") != "case_delivered":
-            return None
-        snapshots = json.loads(cases_file.read_text(encoding="utf-8")).get("snapshots", [])
-        return next((item for item in snapshots if isinstance(item, dict)
-                     and item.get("id") == run.get("snapshot_id")), None)
-    except (OSError, json.JSONDecodeError, TypeError):
-        return None
-
-
-def _demo_snapshot_terminal(success_events: list[dict] | None = None) -> bool:
-    """Whether the active demo Snapshot has independently reached its endpoint.
-
-    A successful ``connect_source`` normally closes its task line, but a cron
-    monitor can still observe the old pre-close state once and wake a fresh
-    model session. For a fixed Snapshot that is wasted model work and led to
-    repeated planning. The terminal fact is an emitted success notice, not a
-    model statement and not merely a source grant (a failed validation may
-    already have written a grant).
-    """
-    snapshot = _active_demo_snapshot()
-    expected = (snapshot or {}).get("expected_outcome") or {}
-    if expected.get("kind") != "credential_received":
-        return False
-    source_id = str(expected.get("source_id") or "").strip().lower()
-    if not source_id:
-        return False
-    if success_events is None:
-        try:
-            from datasteward_gate.approvals import open_store, rows_of
-            with open_store(readonly=True, init_schema=False) as st:
-                rows = rows_of(st, "SELECT payload FROM events WHERE"
-                               " kind='SOURCE_CONNECT_NOTICE_SENT' ORDER BY seq DESC LIMIT 40")
-            success_events = [json.loads(row[0] or "{}") for row in rows]
-        except Exception:  # noqa: BLE001
-            return False                    # Cannot prove terminal = do not suppress work.
-    return any(str(event.get("source_id") or "").lower() == source_id
-               and not event.get("failed") for event in success_events
-               if isinstance(event, dict))
-
-
 def _silver_ready() -> list:
     """轮开了、bronze 有表、口径也有了 —— 这些表可以洗了。
 
@@ -124,6 +76,96 @@ def _silver_ready() -> list:
                          args={"source": src, "table": tbl},
                          note="清洗轮已开，这张表还没洗"))
     return out
+
+
+def _observe() -> tuple:
+    """从治理库组装停止点判定要的事实。**三态，别退成两态。**
+
+    查过了没有 → False；这次查不出来 → `None`。后者绝不能写成 False：
+    Trino 连不上时「不知道 silver 有没有」被当成「silver 还没好」，
+    于是该请人拍板的那一刻永远不到 —— 事情没发生，而外面看着一切正常。
+
+    没有事实来源的键**干脆不填**，对应的停止点由 `unevaluable()` 报出来，
+    不在这里编一个看着像样的值。今天缺两个：
+      · `priority_confirmed`（没有「哪些表优先」的确认记录）
+      · `sample_reviewed`（没有「人看过清洗前后样例」的记录）
+    这两个的停止点因此判不了 —— `tests/test_stop_point_wiring.py` 盯着这份清单，
+    补上来源时那条断言会提醒你把它们加进来。
+    """
+    import sys as _s
+    _s.path.insert(0, str(ROOT / "plugins"))
+    from datasteward_gate.approvals import open_store, rows_of
+
+    def n(st, sql, args=()):
+        return rows_of(st, sql, args)[0][0]
+
+    ctx, blockers = {}, []
+    with open_store(readonly=True, init_schema=False) as st:
+        ctx["tables_discovered"] = n(st, "SELECT count(*) FROM asset_catalog"
+                                         " WHERE kind='schema' AND superseded_by IS NULL")
+        ctx["bronze_tables"] = n(st, "SELECT count(*) FROM sync_state"
+                                     " WHERE last_synced_at IS NOT NULL")
+        ctx["dq_findings"] = n(st, "SELECT count(*) FROM remediation_ledger"
+                                   " WHERE category='data' AND status IN ('open','proposed')")
+        ctx["cleaning_confirmed"] = st.stage_choice("start_silver") is not None
+        ctx["cleaning_applied"] = n(st, "SELECT count(*) FROM remediation_ledger"
+                                        " WHERE rows_cleaned > 0")
+        ctx["publish_approved"] = n(
+            st, "SELECT count(*) FROM decisions d JOIN approvals a ON a.id = d.approval_id"
+                " WHERE a.tool_name='publish_gold' AND d.decision='approve'")
+        ctx["permission_proposal"] = n(st, "SELECT count(*) FROM remediation_ledger"
+                                           " WHERE category='permission'")
+        ctx["permission_approved"] = n(
+            st, "SELECT count(*) FROM decisions d JOIN approvals a ON a.id = d.approval_id"
+                " WHERE a.tool_name='grant_read' AND d.decision='approve'")
+        # 卡点
+        if n(st, "SELECT count(*) FROM asset_catalog WHERE kind='review'"
+                 " AND superseded_by IS NULL"):
+            blockers.append("schema_drift")
+        if n(st, "SELECT count(*) FROM remediation_ledger"
+                 " WHERE rule_revisions >= 3 AND status='open'"):
+            blockers.append("dq_exhausted")
+        # 有结构、但没人认领的表
+        if n(st, "SELECT count(*) FROM asset_catalog c WHERE c.kind='schema'"
+                 " AND c.superseded_by IS NULL AND NOT EXISTS ("
+                 "  SELECT 1 FROM asset_catalog o WHERE o.asset=c.asset"
+                 "  AND o.kind='ownership' AND o.superseded_by IS NULL)"):
+            blockers.append("unknown_owner")
+    ctx["blockers"] = blockers
+
+    # silver 在湖里，不在治理库里。**Trino 读不到就是读不到**，写 None。
+    try:
+        import sync
+        ctx["silver_ready"] = bool(sync._trino(
+            "SELECT table_name FROM iceberg.information_schema.tables"
+            " WHERE table_schema='silver'"))
+    except Exception:                                        # noqa: BLE001
+        ctx["silver_ready"] = None
+    return ctx, blockers
+
+
+def _stop_point() -> list:
+    """到了信息边界 —— 该交阶段成果、请人拍板了。
+
+    这是与「预算到线」并列的另一半：那边是钱和时间用完了，这边是
+    **Agent 靠自己已经拿不到新信息**。两边都得有，不能互相顶替。
+
+    **这一行不带 `waited`**：提案发一次就够，催办有自己的作业。
+    局面没变时输出逐字节不变，monitor 因此不会重复唤醒。
+    """
+    try:
+        import sys as _s
+        _s.path.insert(0, str(ROOT / "services"))
+        import stop_points
+        ctx, _ = _observe()
+        stop = stop_points.next_stop(ctx)
+    except Exception:                                        # noqa: BLE001
+        return []                                            # 查不了这一分钟就不报
+    if not stop:
+        return []
+    return [_line(kind=stop["kind"], stop_id=str(stop["id"]), name=stop["name"],
+                  deliverable=stop["deliverable"], question=stop["question"],
+                  reason=stop["reason"])]
 
 
 def _public_args(d) -> dict:
@@ -198,15 +240,10 @@ def _waited(r) -> str:
 
 
 def main() -> int:
-    # This is an external terminal condition for the fixed demo Snapshot. It
-    # runs before collecting resumable lines, so a stale pre-close task cannot
-    # create one more model session after the evaluated action has succeeded.
-    if _demo_snapshot_terminal():
-        return 0
     import runs
     lines = []
     try:
-        rows = runs.resumable(), runs.retryable()
+        rows = runs.resumable(), runs.retryable(), runs.due()
     except Exception:                                        # noqa: BLE001
         # 库还没建表（全新环境）、或者临时读不到 —— **安静退出，退出码 0**。
         # monitor 崩掉每分钟就是一次错误 tick；而「什么都没有」和
@@ -219,10 +256,18 @@ def main() -> int:
             or _public_args(r.get("params")),
             approval_id=r.get("waiting_on"), waited=_waited(r)))
     lines += _silver_ready()
+    lines += _stop_point()
     for r in rows[1]:
         # WIP 挡回来的：**没有票在等**，等的是别人的待办降下来。
         lines.append(_line(
             kind="blocked_by_wip", run_id=r["run_id"], tool=r["kind"],
+            args=_public_args(r.get("params")), waited=_waited(r)))
+    for r in rows[2]:
+        # 等的是**某个时刻**，而那个时刻到了。没到点的线压根不在这个列表里 ——
+        # 抑制发生在查询侧（`runs.due_now`），不是在这里过滤，
+        # 所以 `resume_all()` 那条路也一样守着窗口。
+        lines.append(_line(
+            kind="due", run_id=r["run_id"], tool=r["kind"],
             args=_public_args(r.get("params")), waited=_waited(r)))
     # 排序：`resumable()` 按「谁先批」排，那是**会变的**顺序，
     # 而哈希认字节。不排的话，两个人先后批准会让同一批线的输出抖动，

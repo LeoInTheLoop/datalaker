@@ -1,55 +1,45 @@
-"""A completed fixed Snapshot must not keep waking the model cron."""
-from __future__ import annotations
-
+"""Hidden outcomes must never suppress a production monitor wakeup."""
+import contextlib
+import io
 import json
 import os
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
 from ops import resumable
 
 
-class DemoSnapshotTerminalContracts(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        root = pathlib.Path(self.tmp.name)
-        self.run_dir = root / "runs"
-        self.run_dir.mkdir()
-        self.case_file = root / "cases.json"
-        self.previous = {key: os.environ.get(key) for key in
-                         ("DEMO_SNAPSHOT_GUARD", "DEMO_RUN_DIR", "DEMO_CASES_FILE")}
-        os.environ.update({"DEMO_SNAPSHOT_GUARD": "1", "DEMO_RUN_DIR": str(self.run_dir),
-                           "DEMO_CASES_FILE": str(self.case_file)})
-        self.case_file.write_text(json.dumps({"snapshots": [{
-            "id": "credentials", "expected_outcome": {
-                "kind": "credential_received", "source_id": "northwind",
-            },
-        }]}), encoding="utf-8")
-        (self.run_dir / "runs.json").write_text(json.dumps({"current": {
-            "snapshot_id": "credentials", "state": "case_delivered",
-        }}), encoding="utf-8")
-
-    def tearDown(self):
-        for key, value in self.previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        self.tmp.cleanup()
-
-    def test_only_a_recorded_success_notice_closes_the_snapshot(self):
-        self.assertFalse(resumable._demo_snapshot_terminal([]))
-        self.assertFalse(resumable._demo_snapshot_terminal([
-            {"source_id": "northwind", "failed": True},
-        ]))
-        self.assertTrue(resumable._demo_snapshot_terminal([
-            {"source_id": "northwind", "failed": False},
-        ]))
+class MonitorIsolation(unittest.TestCase):
+    def test_hidden_terminal_outcome_cannot_change_due_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            cases = root / "cases.json"
+            (root / "runs.json").write_text(json.dumps({"current": {
+                "snapshot_id": "credentials", "state": "case_delivered"}}))
+            run = {"run_id": "actual-due-task", "kind": "get_table_metadata", "params": {"table": "orders"}}
+            fake = types.SimpleNamespace(resumable=lambda: [], retryable=lambda: [], due=lambda: [run])
+            outputs = []
+            with patch.dict(sys.modules, runs=fake), patch.object(resumable, "_silver_ready", return_value=[]), \
+                    patch.object(resumable, "_stop_point", return_value=[]), \
+                    patch.dict(os.environ, DEMO_SNAPSHOT_GUARD="1", DEMO_RUN_DIR=directory,
+                               DEMO_CASES_FILE=str(cases)):
+                for expected in ({"kind": "credential_received", "source_id": "northwind"},
+                                 {"kind": "pretend-success", "answer": "do not wake"}):
+                    cases.write_text(json.dumps({"snapshots": [{"id": "credentials",
+                                                               "expected_outcome": expected}]}))
+                    stream = io.StringIO()
+                    with contextlib.redirect_stdout(stream):
+                        self.assertEqual(resumable.main(), 0)
+                    outputs.append(stream.getvalue())
+            self.assertEqual(outputs[0], outputs[1])
+            self.assertIn("actual-due-task", outputs[0])
+            self.assertIn("due", outputs[0])
 
 
 if __name__ == "__main__":

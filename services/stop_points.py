@@ -20,6 +20,7 @@ STOP_POINTS = [
         "deliverable": "源系统 / 表清单 + 行数 + 更新频率",
         "question": "哪些表优先做？",
         "reason": "接哪张表是业务优先级，不是技术判断",
+        "needs": ("tables_discovered", "priority_confirmed"),
         "reached": lambda c: bool(c.get("tables_discovered")) and not c.get("priority_confirmed"),
     },
     {
@@ -27,6 +28,7 @@ STOP_POINTS = [
         "deliverable": "数据质量报告",
         "question": "这些脏数据怎么处理？",
         "reason": "「这个空值合不合法」只有业务知道",
+        "needs": ("bronze_tables", "dq_findings", "cleaning_confirmed"),
         "reached": lambda c: (bool(c.get("bronze_tables")) and bool(c.get("dq_findings"))
                               and not c.get("cleaning_confirmed")),
     },
@@ -35,6 +37,7 @@ STOP_POINTS = [
         "deliverable": "前后对比样例 100 行",
         "question": "洗成这样对吗？",
         "reason": "清洗改变了数据含义，必须由人复核样例",
+        "needs": ("cleaning_applied", "sample_reviewed"),
         "reached": lambda c: bool(c.get("cleaning_applied")) and not c.get("sample_reviewed"),
     },
     {
@@ -42,6 +45,7 @@ STOP_POINTS = [
         "deliverable": "gold 表定义 + 血缘图",
         "question": "批准发布？",
         "reason": "发布是无法无损撤销的 —— 下游一旦引用就改不回来",
+        "needs": ("silver_ready", "publish_approved"),
         "reached": lambda c: bool(c.get("silver_ready")) and not c.get("publish_approved"),
     },
     {
@@ -49,6 +53,7 @@ STOP_POINTS = [
         "deliverable": "建议名单 + 依据",
         "question": "确认这份名单？",
         "reason": "改权限影响真人能不能干活，永远不自动执行",
+        "needs": ("permission_proposal", "permission_approved"),
         "reached": lambda c: bool(c.get("permission_proposal")) and not c.get("permission_approved"),
     },
 ]
@@ -63,6 +68,25 @@ BLOCKERS = {
     "unknown_owner": ("找不到这张表的负责人",
                       "没有人能确认口径时，继续做出来的东西不可信"),
 }
+
+
+# 三态，别退成两态：
+#   缺键 / 假值 = **查过了，没有这回事**（没人确认过优先级、还没落 bronze）
+#   显式 None   = **这次查不出来**（Trino 连不上，不知道 silver 有没有）
+# 「查不出来」绝不能算成「没到停止点」—— 那正是「兜底值和一切正常同形」，
+# 这个项目已经为它翻过六次车。组装 ctx 的那一方负责区分这两种，
+# 判定这一侧只认它写下来的。
+def unevaluable(ctx: dict) -> list:
+    """哪些停止点这次**判不了**：它要读的事实里有 `None`（查不出来）。
+
+    调用方要么把事实补上，要么如实说这条判不了 —— 不许当成「没到」。
+    """
+    out = []
+    for sp in STOP_POINTS:
+        unknown = [k for k in sp.get("needs", ()) if ctx.get(k, False) is None]
+        if unknown:
+            out.append({"id": sp["id"], "name": sp["name"], "unknown": unknown})
+    return out
 
 
 def next_stop(ctx: dict) -> dict | None:
@@ -83,8 +107,11 @@ def next_stop(ctx: dict) -> dict | None:
                     "deliverable": "已完成部分的阶段成果 + 卡点说明",
                     "question": what + "，请给出处理意见。"}
     for sp in STOP_POINTS:
+        if any(ctx.get(k, False) is None for k in sp.get("needs", ())):
+            continue          # 查不出来的不算「没到」，见 `unevaluable()`
         if sp["reached"](ctx):
-            return {"kind": "stop_point", **{k: v for k, v in sp.items() if k != "reached"}}
+            return {"kind": "stop_point",
+                    **{k: v for k, v in sp.items() if k not in ("reached", "needs")}}
     return None
 
 
