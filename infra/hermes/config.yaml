@@ -47,6 +47,14 @@ agent:
     - coding
     - debugging
 
+plugins:
+  enabled: [data-steward]
+tools:
+  tool_search:
+    enabled: false
+skills:
+  external_dirs: ["${CLAW_ROOT}/.hermes/skills"]
+
 # 首次对话不做自我介绍、不建个人画像。
 #
 # Hermes 的首条消息 onboarding 触发条件是 `not history and
