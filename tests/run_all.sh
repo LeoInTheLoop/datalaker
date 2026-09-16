@@ -50,8 +50,29 @@ echo "########## 0.5 工具白名单（安全主防线） ##########"
 python3 tests/test_toolset_whitelist.py || rc=1
 
 echo ""
+echo "########## 0.6 Identity / System Prompt 加载 ##########"
+python3 tests/test_identity_prompt.py || rc=1
+
+echo ""
 echo "########## 0.65 装机初始化（infra/claw.yaml） ##########"
 ( unset DATASTEWARD_DSN; $PY tests/test_claw_init.py ) || rc=1
+
+echo ""
+echo "########## 0.7 任务线状态词表 ##########"
+( unset DATASTEWARD_DSN; python3 tests/test_task_state.py ) || rc=1
+
+echo ""
+echo "########## 0.8 到点唤醒（排期不到点不推进） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_due_wakeup.py ) || rc=1
+
+echo ""
+echo "########## 0.9 停止点接线（信息边界到了就交成果） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_stop_point_wiring.py ) || rc=1
+
+echo ""
+echo "########## 0.10 硬 turn（测完一定会停） ##########"
+( unset DATASTEWARD_DSN; $PY tests/test_turn_limit.py ) || rc=1
+
 
 echo ""
 echo "########## 1. 治理 Plugin 拦截 ##########"

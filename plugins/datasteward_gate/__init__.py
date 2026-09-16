@@ -50,6 +50,105 @@ def store():
 # --------------------------------------------------------------------------
 # pre_tool_call —— 唯一可否决的挂载点
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 硬 turn —— **测试窗口，不是安全边界**
+# --------------------------------------------------------------------------
+# 产品要求是「一直推进」，所以一次演练不会自己收口。要测「面对这个现状，
+# 它下一步干什么」，就得有一个外部的硬停：数够 N 次就不让再动手了，
+# 然后人去看它这 N 步做了什么。
+#
+# **一次 turn = 一次进 gate 的工具调用，被 block 的也算**（CLAUDE.md）——
+# 所以计数放在这里，而不是 `_gate` 里面：`_gate` 抛异常走 fail-closed 的
+# 那一条也得算，不然一个反复触发异常的循环可以无限跑。
+#
+# `CLAW_MAX_TURN` 没设 = 不限（生产默认）。设了才计数，也才会在数不出来时
+# 按 fail-closed 停 —— 数不清的窗口等于没有窗口。
+# 上限值由演练台从 Snapshot 的 `max_turn` 读出来、以环境变量传进容器：
+# **Agent 容器不挂载 `demo/`**，门禁不该认识 case 文件。
+TURN_KIND = "TURN"
+
+
+def _turn_window():
+    try:
+        n = int(os.environ.get("CLAW_MAX_TURN", "0") or 0)
+    except ValueError:
+        n = 0
+    return (n, os.environ.get("CLAW_TURN_SCOPE", "").strip() or "default") if n > 0 else (0, "")
+
+
+def _signal_turn_limit(scope: str, used: int, limit: int) -> None:
+    """告诉 runner「这一轮到线了」—— **挡住工具不等于运行停止**。
+
+    到线之后门禁只是不放行工具，网关仍然会接着请求模型、再试下一个工具，
+    直到时间窗到期为止。那期间烧的每一次调用都不会产生任何动作，
+    却照样计费、照样把 turn 曲线拉长。停机得由外部做：entrypoint 轮询这个
+    文件，停掉进程组并把停止原因记成 `turn_limit`，再归档轨迹。
+
+    写文件失败不改变判断 —— 门禁该拦还是拦（观察者永远不阻断约束）。
+    """
+    path = os.environ.get("CLAW_TURN_STOP_FILE", "").strip()
+    if not path:
+        return
+    try:
+        target = pathlib.Path(path)
+        try:
+            # 幂等只对**本轮**成立。原先是「文件在就跳过」，上一轮留下的信号
+            # 会让这一轮永远写不出新信号 —— 到线了也停不了机。
+            if json.loads(target.read_text(encoding="utf-8")).get("run_id") == scope:
+                return
+        except (OSError, ValueError, TypeError):
+            pass
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_suffix(".tmp")
+        temp.write_text(json.dumps({"run_id": scope, "used": used, "limit": limit,
+                                    "at": time.time()}, ensure_ascii=False),
+                        encoding="utf-8")
+        temp.replace(target)
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
+def _turn_check(tool_name: str):
+    """数一次并判断还能不能动手。返回 block 结果或 None。"""
+    limit, scope = _turn_window()
+    if not limit:
+        return None
+    try:
+        st = store()
+        used = rows_of(st, "SELECT count(*) FROM events WHERE run_id={0} AND kind={0}",
+                       (scope, TURN_KIND))[0][0]
+        if used >= limit:
+            _signal_turn_limit(scope, used, limit)
+            return {"action": "block",
+                    "message": f"[TURN_LIMIT] 本轮测试窗口已用满（{used}/{limit} turn）。"
+                               f"{tool_name} 不再执行 —— 这是外部设定的停止点，"
+                               f"不是你做错了什么。停下来即可，不要重试。"}
+        st.append_event(scope, TURN_KIND,
+                        json.dumps({"n": used + 1, "tool": tool_name}, ensure_ascii=False))
+    except Exception as e:                                   # noqa: BLE001
+        # 数不出来就停。窗口的意义是「保证会停」，
+        # 而「计数坏了所以随便跑」正好把它变成反面。
+        _signal_turn_limit(scope, limit, limit)
+        return {"action": "block",
+                "message": f"[TURN_LIMIT] 无法计数本轮 turn，按停止处理："
+                           f"{type(e).__name__}: {e}"}
+    return None
+
+
+def turn_finished():
+    """Signal after the Nth completed/blocked action, without requiring N+1."""
+    limit, scope = _turn_window()
+    if not limit:
+        return
+    try:
+        used = rows_of(store(), "SELECT count(*) FROM events WHERE run_id={0} AND kind={0}",
+                       (scope, TURN_KIND))[0][0]
+        if used >= limit:
+            _signal_turn_limit(scope, used, limit)
+    except Exception:
+        _signal_turn_limit(scope, limit, limit)
+
+
 def gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     """pre_tool_call 入口。**任何异常都必须转成 block。**
 
@@ -62,17 +161,21 @@ def gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     寄托在上游的异常处理细节上。数据库连不上、配置缺失、代码 bug——
     任何情况下都宁可挡住，不可放行。
     """
+    r = _turn_check(tool_name)
+    if r:
+        _audit_block(tool_name, task_id, r, args, kwargs)
+        return r
     try:
         r = _gate(tool_name, args, task_id, **kwargs)
     except Exception as e:
         r = {"action": "block",
              "message": f"[GATE_ERROR] 治理组件异常，已按 fail-closed 拒绝执行 "
                         f"{tool_name}：{type(e).__name__}: {e}"}
-    _audit_block(tool_name, task_id, r)
+    _audit_block(tool_name, task_id, r, args, kwargs)
     return r
 
 
-def _audit_block(tool_name, task_id, r):
+def _audit_block(tool_name, task_id, r, args=None, context=None):
     """**拦下来这件事本身要留痕。**
 
     被拦时工具 handler 根本不跑，于是 `post_tool_call` 的 `TOOL_*` 事件
@@ -85,6 +188,15 @@ def _audit_block(tool_name, task_id, r):
         return
     msg = str(r.get("message") or "")
     code = msg[1:msg.index("]")] if msg.startswith("[") and "]" in msg else "BLOCK"
+    if r and r.get("action") == "block":
+        try:
+            from snapshot_runner.input_audit import _record
+            _record("tool_blocked", {"tool": tool_name, "task_id": task_id, "args": args,
+                                    "result": r, **{k: (context or {}).get(k) for k in ("session_id", "tool_call_id")}})
+        except Exception:
+            pass  # Evidence failure must never turn a denied tool into allowed.
+        finally:
+            turn_finished()
     try:
         store().append_event(task_id or "gate", f"BLOCKED_{code}",
                              json.dumps({"tool": tool_name, "msg": msg[:200]},
@@ -124,107 +236,6 @@ def _budget_exceeded():
         over = None                       # 查不到预算不阻断正常工作
     _budget_cache.update(ts=_t.time(), over=over)
     return over
-
-
-def _demo_snapshot_scope() -> dict | None:
-    """Return the selected demo Snapshot's bounded tool scope and turn budget.
-
-    A Snapshot is an isolated, fixed moment in a Case, not a miniature copy of
-    the whole governance programme. Its permitted side effects therefore
-    belong to the trusted demo adapter's data file and run record, rather than
-    to model instructions. The agent only gets a read-only mount of that
-    record; it cannot broaden its own scope.
-
-    This guard is deliberately opt-in and demo-only. Normal deployments and
-    regression drivers do not set ``DEMO_SNAPSHOT_GUARD`` and keep their full
-    policy surface unchanged.
-    """
-    if os.environ.get("DEMO_SNAPSHOT_GUARD", "").lower() not in ("1", "true", "yes"):
-        return None
-    run_dir = pathlib.Path(os.environ.get("DEMO_RUN_DIR", "/runs"))
-    cases_file = pathlib.Path(os.environ.get("DEMO_CASES_FILE", "/app/demo/cases.json"))
-    try:
-        run = json.loads((run_dir / "runs.json").read_text(encoding="utf-8")).get("current")
-        if not isinstance(run, dict) or run.get("state") != "case_delivered":
-            return None
-        snapshot_id = str(run.get("snapshot_id") or "")
-        snapshots = json.loads(cases_file.read_text(encoding="utf-8")).get("snapshots", [])
-        snapshot = next((item for item in snapshots
-                         if isinstance(item, dict) and item.get("id") == snapshot_id), None)
-        scope = tuple(str(name) for name in (snapshot or {}).get("tool_scope", [])
-                      if str(name))
-        # `terminal_condition` is deliberately NOT read here: it belongs to the
-        # evaluator, and every string this function returns can end up in a
-        # block message, which is model context.
-        max_turn = int((snapshot or {}).get("max_turn") or 0)
-        started_at = float(run.get("started_at") or 0)
-        if not scope and max_turn <= 0:
-            return None
-        return {"id": snapshot_id, "scope": scope,
-                "max_turn": max_turn, "started_at": started_at}
-    except (OSError, json.JSONDecodeError, TypeError):
-        # A demo presentation constraint must never relax normal governance
-        # policy merely because its observer files are temporarily unavailable.
-        return None
-
-
-def _snapshot_scope_block(tool_name: str):
-    """Keep a selected demo Snapshot from spilling into later workflow steps."""
-    context = _demo_snapshot_scope()
-    if context is None or not context["scope"] or tool_name not in POLICY:
-        return None
-    snapshot_id, allowed = context["id"], context["scope"]
-    if tool_name in allowed:
-        return None
-    # `terminal_condition` 不进 block message：被拦的文本也是模型上下文，
-    # 在这里写终点等于绕个弯泄题（docs/eval-model.md 红线 2）。
-    return (f"[SNAPSHOT_SCOPE] 当前 Snapshot（{snapshot_id}）只允许："
-            f"{', '.join(allowed)}。{tool_name} 本轮不执行。")
-
-
-# The turn budget is a test window, not a governance level: it is the only
-# thing that stops a Run that never reaches its endpoint.  See
-# docs/eval-model.md -- "目标达成即止" lives in the cron wake side and reads a
-# real success event; this is the other half, "没达成也必须停".
-TURN_BLOCK_CODE = "SNAPSHOT_TURNS"
-
-
-def _spends_turn(kind: str) -> bool:
-    """Whether one recorded event means the model spent a turn."""
-    if kind == f"BLOCKED_{TURN_BLOCK_CODE}":
-        return False            # this guard's own events must not self-inflate
-    return kind.startswith("TOOL_") or kind.startswith("BLOCKED_")
-
-
-def _snapshot_turn_block(st, tool_name: str):
-    """Hard stop once this Run has spent its ``max_turn`` budget.
-
-    A turn is one tool call that reached the gate, blocked ones included: the
-    model really did spend a call, and counting only successful handlers lets
-    it loop forever against the same block.  This guard's own events are
-    excluded, or the count would grow on every call after the budget is gone.
-
-    Failing to read the count must not lift the budget -- an unreadable ledger
-    is the case where an unbounded Run is most likely, so it blocks.
-    """
-    context = _demo_snapshot_scope()
-    if context is None or context["max_turn"] <= 0 or tool_name not in POLICY:
-        return None
-    budget = context["max_turn"]
-    # Count in Python, not in SQL: `rows_of` hands one statement to both
-    # backends, and a `LIKE 'TOOL_%'` pattern carries a `%` that psycopg reads
-    # as a placeholder.  The filter is also easier to assert this way.
-    try:
-        rows = rows_of(st, "SELECT kind FROM events WHERE ts >= {0}",
-                       (context["started_at"],))
-        spent = sum(1 for row in rows if _spends_turn(str(row[0] or "")))
-    except Exception as exc:                                 # noqa: BLE001
-        return (f"[{TURN_BLOCK_CODE}] 读不到本轮 turn 计数（{type(exc).__name__}），"
-                f"按 fail-closed 停止：无法证明还在预算内。")
-    if spent < budget:
-        return None
-    return (f"[{TURN_BLOCK_CODE}] 本轮已用满 {budget} 个 turn 的执行预算，"
-            f"外部停止，不再执行 {tool_name}。判分以已发生的记录为准。")
 
 
 def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
@@ -271,19 +282,6 @@ def _gate(tool_name: str, args: dict, task_id: str = "", **kwargs):
     if why:
         return {"action": "block",
                 "message": f"[L4] {tool_name} 这次调用被拒绝：{why}。"}
-
-    # Snapshot 是一个固定时刻的真实链路测试，不是让模型接着跑完整项目。
-    # 在建票和工具 handler 之前收口，避免一次连接成功后继续查表、提阶段
-    # 问题或再次接入。正常部署不启用这条 demo-only scope。
-    why = _snapshot_scope_block(tool_name)
-    if why:
-        return {"action": "block", "message": why}
-
-    # The turn budget closes last among the Snapshot guards: a call that is out
-    # of scope should read as out of scope, not as out of budget.
-    why = _snapshot_turn_block(st, tool_name)
-    if why:
-        return {"action": "block", "message": why}
 
     # 没人提过的源，碰都不该碰（readme 8 / evals v2 发现机制）
     why = _source_not_granted(st, args, tool_name)
