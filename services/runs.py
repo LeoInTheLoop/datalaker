@@ -70,7 +70,8 @@ def _exec(st, sql_lite, sql_pg, args=(), fetch=False):
 
 
 COLS = ("run_id", "kind", "params", "status", "waiting_on", "checkpoint",
-        "note", "owner_role", "created_at", "updated_at", "resumed")
+        "note", "owner_role", "created_at", "updated_at", "resumed",
+        "next_action_at")
 
 
 def _row(r):
@@ -126,6 +127,87 @@ def _approver_of(approval_id):
         return ""
 
 
+def schedule(run_id: str, at: float, reason: str = "") -> dict:
+    """排期：**到这个时刻之前，这条线不算可推进**。
+
+    「已批准，但窗口在今晚 01:00」只能这样表达 —— 没有它的时候，
+    批准一落库 monitor 立刻就把线拉起来（窗口外执行），
+    或者每分钟去问一遍（等于没有排期）。
+
+    不改 status：等谁、在等什么都没变，变的只是「什么时候该再看一眼」。
+    """
+    kw = {"next_action_at": float(at)}
+    if reason:
+        kw["note"] = reason[:400]
+    _set(run_id, **kw)
+    return {"run_id": run_id, "next_action_at": float(at), "reason": reason}
+
+
+def unschedule(run_id: str) -> dict:
+    """撤掉排期，这条线立刻回到「随时可推进」。"""
+    _set(run_id, next_action_at=None)
+    return {"run_id": run_id, "next_action_at": None}
+
+
+def due_now(r: dict, now: float | None = None) -> bool:
+    """这条线现在该被碰了吗。
+
+    **没排期的一律算「到点」** —— 排期是额外的一道闸，不是推进的必要条件。
+    取不到或存了脏值时同样算到点：宁可多醒一次，也不要让一条线因为一个
+    坏字段永远醒不过来。
+    """
+    v = r.get("next_action_at")
+    if v in (None, ""):
+        return True
+    try:
+        return float(v) <= (time.time() if now is None else now)
+    except (TypeError, ValueError):
+        return True
+
+
+def scheduled(now: float | None = None) -> list:
+    """排了期、但还没到点的线。给状态查询用，不给恢复用。"""
+    return [r for r in by_status("waiting_human") + by_status("running")
+            if not due_now(r, now)]
+
+
+def due(now: float | None = None) -> list:
+    """到点了、且**不在等任何审批**的线 —— 等的就是这个时刻本身。
+
+    等审批的那些到点后由 `resumable()` 收走（它们要重放票里的参数），
+    这里只剩「时间到了就该再看一眼」的那一类，否则同一条线会被报两次。
+    """
+    return [r for r in by_status("waiting_human") + by_status("running")
+            if r.get("next_action_at") not in (None, "")
+            and due_now(r, now) and not r.get("waiting_on")]
+
+
+def decision_of(approval_id: str | None) -> str | None:
+    """这条线等的那份审批，人已经给决定了吗？
+
+    返回 approve / deny / answered，没决定返回 None。
+    **读的是 `decisions`，不是 `approvals`** —— 审批请求发出去了不等于有人点过。
+    """
+    if not approval_id:
+        return None
+    try:
+        with _store(readonly=True) as st:
+            r = _exec(st,
+                      "SELECT decision FROM decisions WHERE approval_id=?"
+                      " ORDER BY decided_at DESC LIMIT 1",
+                      "SELECT decision FROM decisions WHERE approval_id::text=%s"
+                      " ORDER BY decided_at DESC LIMIT 1",
+                      (approval_id,), fetch=True)
+        return r[0][0] if r else None
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def approver_of(approval_id: str | None) -> str:
+    """这份审批发给了谁（角色名或邮箱）；查不到返回空串。"""
+    return _approver_of(approval_id) if approval_id else ""
+
+
 def suspend(run_id: str, waiting_on: str | None, checkpoint: dict | None = None,
             note: str = "") -> dict:
     """挂起等人。**这不是失败**，是这类任务的正常状态。
@@ -146,16 +228,35 @@ def suspend(run_id: str, waiting_on: str | None, checkpoint: dict | None = None,
     return {"run_id": run_id, "status": "waiting_human", "waiting_on": waiting_on}
 
 
+def set_checkpoint(run_id: str, checkpoint: dict, note: str = "") -> dict:
+    """只更新这条线的 checkpoint（等窗口、分片进度这类进展）。
+
+    **不能用 `suspend` 代替**：suspend 对「已经在等同一份审批」是幂等的，
+    而「已批准、现在改成等执行窗口」正好落进那个幂等分支 —— 写不进去，
+    外面还看着像写成功了。等谁没变、状态没变，变的只是进展，就用这个。
+    """
+    kw = {"checkpoint": json.dumps(checkpoint or {}, ensure_ascii=False)}
+    if note:
+        kw["note"] = note[:400]
+    _set(run_id, **kw)
+    return {"run_id": run_id, "checkpoint": checkpoint}
+
+
 def finish(run_id, status="done", note=""):
     assert status in STATUSES
-    _set(run_id, status=status, note=note, waiting_on=None)
+    # 排期一并清掉：收了口的线不该再被「到点」叫醒一次。
+    _set(run_id, status=status, note=note, waiting_on=None, next_action_at=None)
     return {"run_id": run_id, "status": status}
 
 
 def bump_resumed(run_id):
+    # 拉起来就把排期清掉 —— 留着的话这条线每个整点会被当成「又到点了」
+    # 再叫一次，而它已经在跑了。
     with _store() as st:
-        _exec(st, "UPDATE runs SET resumed=resumed+1, status='running' WHERE run_id=?",
-              "UPDATE runs SET resumed=resumed+1, status='running' WHERE run_id=%s",
+        _exec(st, "UPDATE runs SET resumed=resumed+1, status='running',"
+                  " next_action_at=NULL WHERE run_id=?",
+              "UPDATE runs SET resumed=resumed+1, status='running',"
+              " next_action_at=NULL WHERE run_id=%s",
               (run_id,))
 
 
@@ -192,7 +293,9 @@ def resumable() -> list:
                      " JOIN decisions d ON d.approval_id::text = r.waiting_on"
                      " WHERE r.status='waiting_human' ORDER BY d.decided_at",
                      (), fetch=True)
-    return [_row(r) for r in rows or []]
+    # **没到点的不算可推进。** 票批下来了不等于现在就能跑 ——
+    # 窗口在今晚 01:00 的那条线，白天被拉起来就是窗口外执行。
+    return [r for r in (_row(x) for x in rows or []) if due_now(r)]
 
 
 def retryable() -> list:
@@ -200,8 +303,13 @@ def retryable() -> list:
 
     它们与 `resumable()` 是两回事：那边等的是**人的决定**，
     这边等的是**别人的待办降下来**。混在一起会让「谁先被批准谁先被拉起」失真。
+
+    **排了期的线不在这里**，它们等的是某个时刻，走 `due()`。
+    混进来的话，「今晚 01:00 再跑」会被当成「被 WIP 挡回来了，赶紧重试」。
     """
-    return [r for r in by_status("waiting_human") if not r["waiting_on"]]
+    return [r for r in by_status("waiting_human")
+            if not r["waiting_on"] and due_now(r)
+            and r.get("next_action_at") in (None, "")]
 
 
 def stuck(min_age_h: float = 0.0) -> list:

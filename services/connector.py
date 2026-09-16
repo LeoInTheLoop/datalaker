@@ -479,8 +479,13 @@ def query(source_id: str, sql: str, purpose: str = "",
     if purpose == "bulk" and not _in_bulk_window():
         w = f"{_E.get('BULK_WINDOW_START')}-{_E.get('BULK_WINDOW_END')}"
         _record(source_id, sql, purpose, 0, 0, -1, f"REJECTED: 非低峰窗口({w})")
+        # **不能说「已排队」** —— 这里只是拒绝，没有任何东西被持久化，
+        # 窗口到点也不会有人来跑它。照着说「排队了」就是那个撞过六次的
+        # 形状：事情没发生，而外面看着一切正常。真正的排队要等接入路径
+        # 把 `approved_waiting_window` 落库、由 cron 到时唤醒。
         raise QueryRejected(
-            f"批量抽取只在 {w} 执行。当前不在窗口内，任务已排队至下个窗口。")
+            f"批量抽取只在 {w} 执行，现在不在窗口内，**这次没有执行、"
+            f"也没有被排队**。要它自动到点再跑，得先有一条落库的接入任务线。")
 
     dsn = _dsn(source_id)
 

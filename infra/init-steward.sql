@@ -331,8 +331,11 @@ CREATE TABLE IF NOT EXISTS runs (
     owner_role  TEXT,
     created_at  DOUBLE PRECISION NOT NULL,
     updated_at  DOUBLE PRECISION NOT NULL,
-    resumed     INTEGER NOT NULL DEFAULT 0
+    resumed     INTEGER NOT NULL DEFAULT 0,
+    -- 「到点再来找我」。NULL = 没有排期，随时可推进。
+    next_action_at DOUBLE PRECISION
 );
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS next_action_at DOUBLE PRECISION;
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
 GRANT SELECT, INSERT, UPDATE ON runs TO agent_role;
 

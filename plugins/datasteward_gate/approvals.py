@@ -196,7 +196,12 @@ CREATE TABLE IF NOT EXISTS runs (
     owner_role  TEXT,
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL,
-    resumed     INTEGER NOT NULL DEFAULT 0
+    resumed     INTEGER NOT NULL DEFAULT 0,
+    -- 「到点再来找我」。**时间本身是一种唤醒条件**：没有这一列时，
+    -- 能推进一条线的只有「有人批了」「清洗轮开了」「WIP 降下来了」，
+    -- 于是「已批准，等今晚 01:00 的窗口」无处表达 —— 要么立刻被拉起来
+    -- （窗口外执行），要么每分钟问一遍。NULL = 没有排期，随时可推进。
+    next_action_at REAL
 );
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
 -- 增量同步状态（readme 6.1）。R3 只在 Postgres 里手工建过，
@@ -899,6 +904,14 @@ class PgStore:
             return c.fetchall()
 
 
+# 给**已存在**的 SQLite 库补的列：(表, 列名, 类型)。
+# 加一列 = 同时改 DDL 和这里，Postgres 那侧改 `infra/init-steward.sql`
+# 与一份 migration —— 三处都要，`tests/test_schema_parity.py` 盯着。
+_ADDED_COLUMNS = (
+    ("runs", "next_action_at", "REAL"),
+)
+
+
 def open_store(readonly=False, init_schema=True):
     """按配置选择后端。
 
@@ -924,6 +937,15 @@ class Store:
         self.db.execute("PRAGMA busy_timeout=5000")
         if init_schema:
             self.db.executescript(DDL)
+            # `CREATE TABLE IF NOT EXISTS` 对**已存在**的表什么也不做 ——
+            # 老库不会因为 DDL 里多了一列就长出那一列，而是等到查询时
+            # 报 "no such column"。SQLite 没有 ADD COLUMN IF NOT EXISTS，
+            # 重复执行会抛 duplicate column name，吞掉它即可。
+            for tbl, col, decl in _ADDED_COLUMNS:
+                try:
+                    self.db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {decl}")
+                except sqlite3.OperationalError:
+                    pass
             self.db.commit()
 
     def close(self):
